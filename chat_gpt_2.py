@@ -46,15 +46,16 @@ from langchain.tools import BaseTool
 from langchain.callbacks.manager import AsyncCallbackManagerForToolRun, CallbackManagerForToolRun
 from langchain.utilities import GoogleSerperAPIWrapper
 from langchain.memory import VectorStoreRetrieverMemory
+from langchain import LLMMathChain
 from langchain.chat_models import ChatOpenAI
-from langchain import LLMMathChain, OpenAI, SerpAPIWrapper, SQLDatabase, SQLDatabaseChain
+
 # import os
 # os.environ["GOOGLE_CSE_ID"] = "c4085b9b60bd34e65"
 os.environ["SERPER_API_KEY"] = "AIzaSyBrM4Y8_TCXJmZDsjMZdBxiwjGKqXvjSGo"
 os.environ["GOOGLE_CSE_ID"] = "9589161c491c4493e"
 os.environ["GOOGLE_API_KEY"] = "***REMOVED***"
 os.environ["OPENAI_API_KEY"] = "***REMOVED***"
-search = GoogleSearchAPIWrapper(k=4)
+search = GoogleSearchAPIWrapper()
 
 
 # Initialize logging with the specified configuration
@@ -284,8 +285,8 @@ db = Chroma(embedding_function=eb)
 
 # defining LLM
 llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo-0613")
-#llm_math_chain = LLMMathChain.from_llm(llm=llm, verbose=True)
 
+llm_math_chain = LLMMathChain.from_llm(llm=llm, verbose=True)
 
 
 template = """Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
@@ -297,6 +298,7 @@ Your response should be meaniful and should not excide more than 200 words and s
 
 ### Instruction:
 
+Remember todays date is 20th june 2023.
 
 You are a highly knowledgeable teacher with a vast amount of information at your disposal.
 You also have access to a tool similar to Google Search that allows you to retrieve information from the web in real-time.
@@ -304,11 +306,7 @@ As a teacher, your goal is to assist students by answering their questions and p
 
 {user_details}
 
-When generating responses, prioritize delivering helpful information.
-
-The aim is to maintain a natural and conversational tone throughout the interaction. 
-When generating responses, prioritize delivering helpful information while using the user's name sparingly to enhance personalization when appropriate.
-
+The aim is to maintain a natural and conversational tone throughout the interaction. When providing responses, make sure to address the user by their name if necessary. When generating responses, prioritize delivering helpful information while using the user's name sparingly to enhance personalization when appropriate.
 
 You have access to the following tools:
 
@@ -427,18 +425,15 @@ class CustomPromptTemplate(StringPromptTemplate):
         if len(intermediate_steps) > 0:
             regex = r"Thought\s*\d*\s*:(.*?)\nAction\s*\d*\s*:(.*?)\nAction\s*\d*\s*Input\s*\d*\s*:[\s]*(.*)\nObservation"
             text_match = intermediate_steps[-1][0].log
-            print("text_matched", text_match)
             if len(intermediate_steps) > 1:
                 text_match = 'Thought: ' + text_match
-            match = re.search(regex, text_match, re.DOTALL) 
-            if match != None:
-                my_list = list(intermediate_steps[-1])
-
-                p_INS_temp = prompt_Ins.format(thought=match.group(
-                    1).strip(), query=match.group(3).strip(), observation=my_list[1])
-                my_list[1] = llm(p_INS_temp)
-                my_tuple = tuple(my_list)
-                intermediate_steps[-1] = my_tuple
+            match = re.search(regex, text_match, re.DOTALL)
+            my_list = list(intermediate_steps[-1])
+            p_INS_temp = prompt_Ins.format(thought=match.group(
+                1).strip(), query=match.group(3).strip(), observation=my_list[1])
+            my_list[1] = llm(p_INS_temp)
+            my_tuple = tuple(my_list)
+            intermediate_steps[-1] = my_tuple
 
         for action, observation in intermediate_steps:
             thoughts += action.log
@@ -452,39 +447,74 @@ prompt = CustomPromptTemplate(input_variables=["input", "history", "intermediate
                               template=template, validate_template=False)
 
 
-class CustomOutputParser(AgentOutputParser):
+import re
+from typing import Union
 
-    def parse(self, llm_output: str) -> Union[AgentAction, AgentFinish]:
-        # Check if agent should finish
-        if "Final Answer:" in llm_output:
+from langchain.agents.agent import AgentOutputParser
+from langchain.agents.conversational.prompt import FORMAT_INSTRUCTIONS
+from langchain.schema import AgentAction, AgentFinish, OutputParserException
+from langchain.agents import ConversationalAgent, ZeroShotAgent
+
+class ConvoOutputParser(AgentOutputParser):
+    ai_prefix: str = "AI"
+
+    def get_format_instructions(self) -> str:
+        return FORMAT_INSTRUCTIONS
+
+    def parse(self, text: str) -> Union[AgentAction, AgentFinish]:
+        if "Final Answer:" in text:
             return AgentFinish(
                 # Return values is generally always a dictionary with a single `output` key
                 # It is not recommended to try anything else at the moment :)
-                return_values={"output": llm_output.split(
-                    "Final Answer:")[-1].strip()},
-                log=llm_output,
+                return_values={"output": text.split("Final Answer:")[-1].strip()},
+                log=text,
             )
         # Parse out the action and action input
         regex = r"Action\s*\d*\s*:(.*?)\nAction\s*\d*\s*Input\s*\d*\s*:[\s]*(.*)"
-        match = re.search(regex, llm_output, re.DOTALL)
+        match = re.search(regex, text, re.DOTALL)
 
         if not match:
             return AgentFinish(
                 # Return values is generally always a dictionary with a single `output` key
                 # It is not recommended to try anything else at the moment :)
-                return_values={"output": llm_output},
-                log=llm_output,
+                return_values={"output": text},
+                log=text,
             )
-            # raise ValueError(f"Could not parse LLM output: `{llm_output}`")
+            # raise ValueError(f"Could not parse LLM output: `{text}`")
         action = match.group(1).strip()
         action_input = match.group(2)
         # Return the action and action input
-        return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=llm_output)
-
+        return AgentAction(tool=action, tool_input=action_input.strip(" ").strip('"'), log=text)
+    @property
+    def _type(self) -> str:
+        return "conversational"
 
 output_parser = CustomOutputParser()
 
 # search = GoogleSearchAPIWrapper(k=1)
+
+
+# agent prompt
+PREFIX = """Assistant is a large language model trained by OpenAI.
+Assistant is designed to be able to assist with a wide range of tasks, from answering simple questions to providing in-depth explanations and discussions on a wide range of topics. As a language model, Assistant is able to generate human-like text based on the input it receives, allowing it to engage in natural-sounding conversations and provide responses that are coherent and relevant to the topic at hand.
+Assistant is constantly learning and improving, and its capabilities are constantly evolving. It is able to process and understand large amounts of text, and can use this knowledge to provide accurate and informative responses to a wide range of questions. Additionally, Assistant is able to generate its own text based on the input it receives, allowing it to engage in discussions and provide explanations and descriptions on a wide range of topics.
+Overall, Assistant is a powerful tool that can help with a wide range of tasks and provide valuable insights and information on a wide range of topics. Whether you need help with a specific question or just want to have a conversation about a particular topic, Assistant is here to assist.
+TOOLS:
+------
+Assistant has access to the following tools:"""
+SUFFIX = """
+Begin!
+Instruction:
+always frame answer such a way that it should be easily parsable.
+User action, what all are action user has taken before:
+{actions}
+User details, Use when user is asking about his personal details
+{user_details}
+Previous conversation history, Use history when u need to answer question from previous conversation or user asking about previous conversation history:
+{chat_history}
+New input: {input}
+{agent_scratchpad}
+"""
 
 
 # Define answer generation function
@@ -521,22 +551,12 @@ def answer(question: str, user_id: int, conv_id: int, first_req: bool = False, l
         f"The top {config.k} chunks are considered to answer the user's query.")
 
     # conversational memory
-    conversational_memory = VectorStoreRetrieverMemory(
-        retriever=db.as_retriever(
-            search_kwargs={"score_threshold": 1,
-                           "metadatas": metas, "collection_name": collection_name}),
-        memory_key='history',
-        # k=5,
-        input_key="input",
-        # output_key='output',
-        return_docs=False
-    )
 
     # Create a RetrivalQA object using a vector store, a QA chain, and a number of chunks to consider.
     qa = RetrievalQA.from_chain_type(
         llm=llm, chain_type="stuff",
         retriever=db.as_retriever(
-            search_kwargs={"score_threshold": 1,
+            search_kwargs={"score_threshold": 2,
                            "metadatas": metas, "collection_name": collection_name}
         )
     )
@@ -544,40 +564,53 @@ def answer(question: str, user_id: int, conv_id: int, first_req: bool = False, l
     # Once we get chain we are ready to generate Agent for this we need to convert this retrieval chain into a tool. We do that like so:
 
     # use below code when you want to use chain as standalone
-    ## Call the RetrivalQA object to generate an answer to the prompt.
+    # # Call the RetrivalQA object to generate an answer to the prompt.
     # result = qa({"query": prompt})
 
     os.environ["NEWS_API_KEY"] = "***REMOVED***"
-
     os.environ["SERPAPI_API_KEY"] = "6aed3e3dc8b3f0741fff071d739b91c2211e6dfe60b5dcea64c85b76ed9fce57"
-
 
     news_api_key = os.environ["NEWS_API_KEY"]
 
-    TOOLS_LIST = ['serpapi', 'google-search','news-api', "llm-math"]
-
+    TOOLS_LIST = ['serpapi', 'google-search','news-api']
     tools = load_tools(TOOLS_LIST, llm=llm, news_api_key=news_api_key)
-
-    tools = [
+    tool = [
         Tool(
-            name='Knowledge Base',
+            name="Knowledge_Base",
             func=qa.run,
-            description=(
-                " Useful for when you need to answer question based on previous chat history between you and human. Extract history from this tool and answer "
-            )
+            description="Useful for when you need to answer question based on previous chat history between you and human. Extract history from this tool and answer "
         )
     ]
+   
+    tools+=tool
 
     output_parser = CustomOutputParser()
 
     llm_chain = LLMChain(llm=llm, prompt=prompt)
 
-    agent = LLMSingleActionAgent(
-        llm_chain=llm_chain,
-        output_parser=output_parser,
-        stop=["\nObservation:"],
-        allowed_tools=tools,
+    conversational_memory = VectorStoreRetrieverMemory(
+        retriever=db.as_retriever(search_kwargs={"score_threshold": 2,
+                           "metadatas": metas, "collection_name": collection_name}),
+        memory_key='chat_history',
+        # k=5,
+        input_key="input",
+        # output_key='output',
+        return_docs=False
     )
+
+    #from langchain.agents.conversational.output_parser import ConvoOutputParser
+
+
+    ca = ConversationalAgent(llm_chain=llm_chain)
+    agent = ca.from_llm_and_tools(
+        llm= llm,
+        tools= tools,
+        prefix= PREFIX,
+        suffix= SUFFIX,
+        ai_prefix= "AI",
+        human_prefix= "Human",
+        input_variables= ['input','chat_history','agent_scratchpad','actions','user_details'],
+    ) 
 
     agent_executor = AgentExecutor.from_agent_and_tools(
         agent=agent,
@@ -622,12 +655,12 @@ def answer(question: str, user_id: int, conv_id: int, first_req: bool = False, l
     '''
 
     # Initializing agen
-    answer = agent_executor(
-        {'input': question, 'actions': actions, "user_details": user_details})
+    answer = agent_executor.run(
+        {'input': question, 'actions': actions, "user_details": user_details, "history":qa.run})
 
     # _input = prompt.format_prompt(query=question)
     # answer = agent(question.to_string())['output']
-    temp_list = [question, answer["output"]]
+    temp_list = [question, answer]
     db.store_embedding(temp_list, database, metas=metas)
     db.chroma_client.persist()
 

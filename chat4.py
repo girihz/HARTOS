@@ -53,7 +53,7 @@ os.environ["SERPER_API_KEY"] = "AIzaSyBrM4Y8_TCXJmZDsjMZdBxiwjGKqXvjSGo"
 os.environ["GOOGLE_CSE_ID"] = "9589161c491c4493e"
 os.environ["GOOGLE_API_KEY"] = "***REMOVED***"
 #os.environ["OPENAI_API_KEY"] = "***REMOVED***"
-search = GoogleSearchAPIWrapper()
+search = GoogleSearchAPIWrapper(k=10)
 
 
 # Initialize logging with the specified configuration
