@@ -86,14 +86,10 @@ in
 {
   config = lib.mkIf (cfg.enable && cfg.variant != "server") {
 
-    # Install the autostart entry and desktop shortcut
+    # Install the autostart entry, desktop shortcut, and GTK4/libadwaita
     environment.systemPackages = [
       onboardingDesktop
       identityDesktop
-    ];
-
-    # Ensure GTK4 + libadwaita are available system-wide
-    environment.systemPackages = lib.mkAfter [
       pkgs.gtk4
       pkgs.libadwaita
       pkgs.gobject-introspection
