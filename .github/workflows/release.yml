@@ -175,19 +175,34 @@ jobs:
 
       - name: Checksum + Torrent
         run: |
-          BUILD_PATH=$(cat /tmp/build-output.txt | head -1)
+          echo "=== Build output ==="
+          cat /tmp/build-output.txt || echo "No build output file"
+          BUILD_PATH=$(cat /tmp/build-output.txt | head -1 | tr -d '[:space:]')
+          echo "BUILD_PATH: '$BUILD_PATH'"
+
+          if [[ -z "$BUILD_PATH" ]]; then
+            echo "ERROR: Nix build produced no output path"
+            echo "Check the Build step logs above for errors"
+            exit 0
+          fi
+
+          echo "=== Listing build path ==="
+          ls -la "$BUILD_PATH" 2>/dev/null || echo "Path does not exist: $BUILD_PATH"
+          find "$BUILD_PATH" -maxdepth 3 -type f 2>/dev/null | head -20 || true
 
           # Find ISO file
           FILE=""
           if [[ -d "$BUILD_PATH/iso" ]]; then
             FILE=$(ls "$BUILD_PATH/iso/"*.iso 2>/dev/null | head -1)
           elif [[ -d "$BUILD_PATH" ]]; then
-            FILE=$(find "$BUILD_PATH" -maxdepth 2 -type f \
-              \( -name "*.iso" -o -name "*.qcow2" -o -name "*.raw" \) | head -1)
+            FILE=$(find "$BUILD_PATH" -maxdepth 3 -type f \
+              \( -name "*.iso" -o -name "*.qcow2" -o -name "*.raw" -o -name "*.img" \) | head -1)
           fi
 
+          echo "FILE: '$FILE'"
+
           if [[ -z "${FILE:-}" ]] || [[ ! -f "$FILE" ]]; then
-            echo "No output file found"
+            echo "No output file found in build path"
             exit 0
           fi
 
