@@ -10,6 +10,7 @@ the time this module is reached (no circular import issue).
 # noqa: E501
 # ruff: noqa
 
+import uuid
 from datetime import datetime
 
 from sqlalchemy import (
