@@ -269,6 +269,11 @@ let
   '';
 in
 {
+  # Top-level imports — runtime.nix enables live reconfiguration
+  imports = lib.optional
+    (builtins.pathExists /etc/hart/runtime.nix)
+    /etc/hart/runtime.nix;
+
   options.hart.selfBuild = {
     enable = lib.mkEnableOption "HART OS runtime self-build";
 
@@ -324,9 +329,7 @@ in
     # Extend hart-ota CLI with self-build command
     # (hart-ota self-build delegates to hart-self-build)
 
-    # runtime.nix is included at the module top level (flake.nix),
-    # not inside config block. Conditional import here is invalid in
-    # NixOS module system — imports must be at top level of the module.
+    # runtime.nix import is at module top level (above options/config)
 
     # Filesystem watcher for auto-rebuild (optional)
     systemd.paths.hart-self-build-watch = lib.mkIf sb.autoRebuild {
