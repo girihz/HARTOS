@@ -5,7 +5,10 @@
     # Track unstable for latest GNOME (50+), kernel, and packages.
     # Safe because HART OTA pipeline (hart-ota.nix) does canary deploys
     # with automatic rollback on failure.
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Pinned to known-good commit (June 2025). nixos-unstable March 2026
+    # introduced breaking changes in ISO image builder (null coercion).
+    # TODO: update once upstream fix lands.
+    nixpkgs.url = "github:NixOS/nixpkgs/50ab793";
 
     llama-cpp = {
       url = "github:ggml-org/llama.cpp";
