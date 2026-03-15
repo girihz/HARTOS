@@ -94,8 +94,26 @@
       pill.style.display = 'none';
       panel.style.display = 'flex';
       if (!iframe.src) {
-        // guest=true triggers existing guest auto-login in Hevolve app
-        iframe.src = BASE + '/agents/' + AGENT + '?embed=true&companionAppInstalled=true&guest=true';
+        // Guest register via existing API, then pass token to iframe
+        var guestToken = sessionStorage.getItem('hevolve_guest_token');
+        if (guestToken) {
+          iframe.src = BASE + '/agents/' + AGENT + '?embed=true&companionAppInstalled=true&token=' + encodeURIComponent(guestToken);
+        } else {
+          fetch(BASE + '/api/social/auth/guest-register', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({display_name: 'Docs Visitor', source: 'docs_widget'})
+          })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            var token = data.token || data.access_token || '';
+            if (token) sessionStorage.setItem('hevolve_guest_token', token);
+            iframe.src = BASE + '/agents/' + AGENT + '?embed=true&companionAppInstalled=true&token=' + encodeURIComponent(token);
+          })
+          .catch(function() {
+            iframe.src = BASE + '/agents/' + AGENT + '?embed=true&companionAppInstalled=true';
+          });
+        }
       }
     } else {
       panel.style.display = 'none';
