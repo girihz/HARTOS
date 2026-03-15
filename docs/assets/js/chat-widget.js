@@ -97,7 +97,7 @@
         // Guest register via existing API, then pass token to iframe
         var guestToken = sessionStorage.getItem('hevolve_guest_token');
         if (guestToken) {
-          iframe.src = BASE + '/agents/' + AGENT + '?embed=true&companionAppInstalled=true&token=' + encodeURIComponent(guestToken);
+          iframe.src = BASE + '/?embed=true&companionAppInstalled=true&token=' + encodeURIComponent(guestToken);
         } else {
           fetch(BASE + '/api/social/auth/guest-register', {
             method: 'POST',
@@ -108,10 +108,10 @@
           .then(function(data) {
             var token = data.token || data.access_token || '';
             if (token) sessionStorage.setItem('hevolve_guest_token', token);
-            iframe.src = BASE + '/agents/' + AGENT + '?embed=true&companionAppInstalled=true&token=' + encodeURIComponent(token);
+            iframe.src = BASE + '/?embed=true&companionAppInstalled=true&token=' + encodeURIComponent(token);
           })
           .catch(function() {
-            iframe.src = BASE + '/agents/' + AGENT + '?embed=true&companionAppInstalled=true';
+            iframe.src = BASE + '/?embed=true&companionAppInstalled=true';
           });
         }
       }
