@@ -99,6 +99,43 @@ class VRAMManager:
         except Exception as e:
             logger.debug(f"nvidia-smi failed: {e}")
 
+        # 1b) rocm-smi — AMD GPUs via ROCm
+        try:
+            result = subprocess.run(
+                ["rocm-smi", "--showmeminfo", "vram", "--csv"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # Parse CSV output: header line then data lines
+                lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip()]
+                for line in lines[1:]:  # skip header
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 3:
+                        try:
+                            total_bytes = float(parts[1])
+                            used_bytes = float(parts[2])
+                            total_gb = round(total_bytes / (1024 ** 3), 2)
+                            free_gb = round((total_bytes - used_bytes) / (1024 ** 3), 2)
+                            info.update({
+                                "name": f"AMD GPU (ROCm)",
+                                "total_gb": total_gb,
+                                "free_gb": free_gb,
+                                "cuda_available": False,
+                                "rocm_available": True,
+                            })
+                            logger.info(
+                                f"GPU (rocm-smi): {info['name']} — "
+                                f"{info['total_gb']} GB total, {info['free_gb']} GB free"
+                            )
+                            self._gpu_info = info
+                            return info
+                        except (ValueError, IndexError):
+                            continue
+        except FileNotFoundError:
+            pass  # rocm-smi not on PATH — no AMD GPU or ROCm drivers
+        except Exception as e:
+            logger.debug(f"rocm-smi failed: {e}")
+
         # 2) PyTorch — only if already imported (don't trigger a 2GB import)
         if "torch" in sys.modules:
             try:

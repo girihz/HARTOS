@@ -60,8 +60,8 @@ export HEVOLVE_LLM_MODEL_NAME="${CLOUD_MODEL}"
 export HEVOLVE_LLM_API_KEY="${CLOUD_KEY}"
 export HEVOLVE_AGENT_ENGINE_ENABLED=true
 export ENABLE_FEDERATION=true
-# Diarization: auto-started as sidecar. Set URL only to override with external service.
-# export HEVOLVE_DIARIZATION_URL="ws://azurekong.hertzai.com:8000/spkdn"
+# Diarization: auto-started as sidecar. Set HEVOLVE_DIARIZATION_URL to override.
+export HEVOLVE_DIARIZATION_URL="${HEVOLVE_DIARIZATION_URL:-ws://localhost:8000/spkdn}"
 
 echo "[MODE]       HEVOLVE_NODE_TIER=central"
 echo "[LLM]        Endpoint: ${CLOUD_ENDPOINT}"
