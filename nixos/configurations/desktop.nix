@@ -425,7 +425,7 @@
   # Auto-login
   services.displayManager.autoLogin = {
     enable = true;
-    user = "hart-admin";
+    user = lib.mkForce "hart-admin";
   };
 
   # Audio: PipeWire bridges all subsystems (Linux, Android, Wine)
