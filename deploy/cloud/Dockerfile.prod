@@ -107,16 +107,26 @@ RUN echo '{"version": "dev", "signed": false}' > release_manifest.json
 # Create necessary directories
 RUN mkdir -p /app/logs /app/media /app/output_images /app/agent_data
 
-# ── HevolveAI source protection ──
-# Compile .py → .pyc, strip source, clean metadata that leaks git URLs
-RUN python scripts/compile_hevolveai.py --strip-source \
-    --manifest-out security/hevolveai_manifest.json 2>/dev/null || true && \
-    # Remove .dist-info/direct_url.json (leaks git+ssh:// origin)
-    find /opt/venv/lib -path '*/hevolveai*dist-info/direct_url.json' -delete 2>/dev/null || true && \
-    # Remove RECORD file (full file listing)
-    find /opt/venv/lib -path '*/hevolveai*dist-info/RECORD' -delete 2>/dev/null || true && \
+# ── HevolveAI source protection (zero loopholes) ──
+# HevolveAI is NEVER shipped as Python source or .pyc in the Docker image.
+# It ships ONLY as an encrypted native binary (.so.enc) decrypted to tmpfs at runtime.
+RUN \
+    # Remove ALL HevolveAI Python source and bytecode from the image
+    find /opt/venv/lib -path '*/hevolveai*' -delete 2>/dev/null || true && \
+    find /opt/venv/lib -path '*/embodied_ai*' -delete 2>/dev/null || true && \
+    # Remove dist-info (leaks package metadata, git origin, file listing)
+    find /opt/venv/lib -path '*/hevolveai*dist-info' -type d -exec rm -rf {} + 2>/dev/null || true && \
+    find /opt/venv/lib -path '*/embodied*dist-info' -type d -exec rm -rf {} + 2>/dev/null || true && \
     # Remove build scripts from final image
-    rm -rf /app/scripts
+    rm -rf /app/scripts && \
+    # Verify: no hevolveai Python files remain
+    test -z "$(find /opt/venv/lib -name '*.py' -path '*hevolveai*' 2>/dev/null)" || \
+      (echo "ERROR: HevolveAI source still in image" && exit 1)
+# HevolveAI loads at runtime via security/native_hive_loader.py:
+#   1. Finds .so.enc at /usr/lib/hevolve/ or ~/.hevolve/lib/
+#   2. Decrypts to tmpfs (RAM only) using HKDF(node_key + master_pubkey)
+#   3. Loads via ctypes, wipes tmpfs
+#   4. Falls back to stub mode if binary not present
 
 # DEPLOYMENT: Run with read-only filesystem to prevent runtime code modification:
 #   docker run --read-only --tmpfs /tmp --tmpfs /app/logs --tmpfs /app/agent_data ...
