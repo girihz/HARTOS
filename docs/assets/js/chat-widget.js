@@ -102,11 +102,11 @@
           fetch(BASE + '/api/social/auth/guest-register', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({display_name: 'Docs Visitor', source: 'docs_widget'})
+            body: JSON.stringify({guest_name: 'Docs Visitor', source: 'docs_widget'})
           })
           .then(function(r) { return r.json(); })
           .then(function(data) {
-            var token = data.token || data.access_token || '';
+            var token = (data.data && data.data.token) || data.token || '';
             if (token) sessionStorage.setItem('hevolve_guest_token', token);
             iframe.src = BASE + '/?embed=true&companionAppInstalled=true&token=' + encodeURIComponent(token);
           })
