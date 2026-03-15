@@ -94,7 +94,28 @@
       pill.style.display = 'none';
       panel.style.display = 'flex';
       if (!iframe.src) {
-        iframe.src = BASE + '/agents/' + AGENT + '?embed=true&companionAppInstalled=true';
+        // Auto guest login for docs visitors — no login wall
+        var guestToken = sessionStorage.getItem('hevolve_guest_token');
+        if (guestToken) {
+          iframe.src = BASE + '/agents/' + AGENT + '?embed=true&companionAppInstalled=true&token=' + encodeURIComponent(guestToken);
+        } else {
+          // Register as guest, then open chat
+          fetch(BASE + '/api/social/auth/guest-register', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({source: 'docs_widget'})
+          })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            var token = data.token || data.access_token || '';
+            if (token) sessionStorage.setItem('hevolve_guest_token', token);
+            iframe.src = BASE + '/agents/' + AGENT + '?embed=true&companionAppInstalled=true&token=' + encodeURIComponent(token);
+          })
+          .catch(function() {
+            // Fallback: open without token, app handles login
+            iframe.src = BASE + '/agents/' + AGENT + '?embed=true&companionAppInstalled=true&guest=true';
+          });
+        }
       }
     } else {
       panel.style.display = 'none';
