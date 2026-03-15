@@ -4420,11 +4420,30 @@ def chat():
             })
 
     if prompt_id:
+        # System agents (like Nunba) route directly to langchain casual chat
+        # instead of entering gather_info/CREATE mode
+        _prompt_path = os.path.join(PROMPTS_DIR, f'{prompt_id}.json')
+        if os.path.exists(_prompt_path):
+            try:
+                with open(_prompt_path, 'r') as _pf:
+                    _agent_meta = json.load(_pf)
+                if _agent_meta.get('is_system_agent'):
+                    # System agent: use its system_prompt for langchain casual chat
+                    _sys_prompt = ''
+                    if _agent_meta.get('flows') and _agent_meta['flows'][0].get('system_prompt'):
+                        _sys_prompt = _agent_meta['flows'][0]['system_prompt']
+                    casual_conv = True
+                    custom_prompt = _sys_prompt
+                    prompt_id = None  # Skip CREATE/REUSE routing, fall through to get_ans()
+                    app.logger.info(f"System agent '{_agent_meta.get('name')}' routed to casual chat")
+            except Exception:
+                pass
+
         # Per-user lock prevents concurrent requests from corrupting agent state.
         # Replaces the global _state_lock for better concurrency.
         _user_lock = _get_user_lock(user_id)
         with _user_lock:
-            if os.path.exists(os.path.join(PROMPTS_DIR, f'{prompt_id}.json')):
+            if prompt_id and os.path.exists(os.path.join(PROMPTS_DIR, f'{prompt_id}.json')):
                 app.logger.info('GATHER JSON EXISTS')
                 if os.path.exists(os.path.join(PROMPTS_DIR, f'{prompt_id}_0_recipe.json')):
                     app.logger.info('0 Recipe JSON EXISTS')
