@@ -1,11 +1,6 @@
 # Developer User Journey
 
-End-to-end guide: from zero to shipping an AI-native app on HART OS.
-
-!!! tip "Cloud or Local?"
-    Use `https://hevolve.ai` for the hosted cloud API (no setup needed).
-    Use `$API` if you're running HART OS locally.
-    All examples below show both — replace the base URL to match your setup.
+End-to-end guide: from zero to shipping an AI-native app on HART OS. Examples use `https://hevolve.ai` as the default API URL; replace with `http://localhost:6777` if self-hosted.
 
 ---
 

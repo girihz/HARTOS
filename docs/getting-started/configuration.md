@@ -23,7 +23,7 @@ Runtime compute settings can also be updated via the **Settings API** (`PUT /api
 | `OPENAI_API_KEY` | OpenAI API key for GPT models | (required) |
 | `GROQ_API_KEY` | Groq API key for fast inference | (optional) |
 | `LANGCHAIN_API_KEY` | LangChain API key for tracing | (optional) |
-| `HEVOLVE_BASE_URL` | Base URL for this node's API | `http://localhost:6777` |
+| `HEVOLVE_BASE_URL` | Base URL for this node's API | `https://hevolve.ai` |
 
 ---
 
@@ -119,10 +119,10 @@ The `config.json` file holds API keys for external services. Create it in the pr
 
 ## Runtime Settings API
 
-Compute settings can be updated at runtime without restarting the server:
+Compute settings can be updated at runtime without restarting the server (use `http://localhost:6777` if self-hosted):
 
 ```bash
-curl -X PUT http://localhost:6777/api/settings/compute \
+curl -X PUT https://hevolve.ai/api/settings/compute \
   -H "Content-Type: application/json" \
   -d '{
     "compute_policy": "prefer_local",

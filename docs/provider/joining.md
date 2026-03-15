@@ -40,8 +40,10 @@ Supported causes:
 
 ## Step 3: Join the Network
 
+All examples below use `https://hevolve.ai`. Replace with `http://localhost:6777` if self-hosted.
+
 ```bash
-curl -X POST http://localhost:6777/api/settings/compute/provider/join \
+curl -X POST https://hevolve.ai/api/settings/compute/provider/join \
   -H "Content-Type: application/json" \
   -d '{
     "cause_alignment": "democratize_compute",
@@ -73,7 +75,7 @@ This creates a `NodeComputeConfig` row and updates your `PeerNode` identity.
 ## Step 4: Verify Provider Status
 
 ```bash
-curl http://localhost:6777/api/settings/compute/provider
+curl https://hevolve.ai/api/settings/compute/provider
 ```
 
 Returns your contribution score, compute stats, pending settlements, and reward summary. See [dashboard.md](dashboard.md) for full details.

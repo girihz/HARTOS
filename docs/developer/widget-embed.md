@@ -3,9 +3,6 @@
 Add the Hevolve AI chat agent to any website. Three integration levels:
 drop-in widget, iframe embed, or OpenAI-compatible API.
 
-!!! tip "Cloud or Local?"
-    Replace `localhost:6777` with `hevolve.ai` in all examples below if using the hosted cloud API.
-
 ---
 
 ## Option 1: Chat Widget (Recommended)
@@ -107,7 +104,7 @@ The `ShareDialog` in Hevolve generates this embed code for any resource
 
 ## Option 4: OpenAI-Compatible API
 
-If your app already uses the OpenAI SDK, point it at HART OS:
+If your app already uses the OpenAI SDK, point it at HART OS (or `http://localhost:6777` if self-hosted):
 
 === "Python"
 
@@ -115,7 +112,7 @@ If your app already uses the OpenAI SDK, point it at HART OS:
     from openai import OpenAI
 
     client = OpenAI(
-        base_url="http://localhost:6777/v1",
+        base_url="https://hevolve.ai/v1",
         api_key="your-api-key",
     )
 
@@ -132,7 +129,7 @@ If your app already uses the OpenAI SDK, point it at HART OS:
     import OpenAI from 'openai';
 
     const client = new OpenAI({
-      baseURL: 'http://localhost:6777/v1',
+      baseURL: 'https://hevolve.ai/v1',
       apiKey: 'your-api-key',
     });
 
@@ -179,17 +176,17 @@ Free tier: 100 requests/day, $0 per token.
 
 ```bash
 # 1. Register
-curl -X POST http://localhost:6777/api/social/register \
+curl -X POST https://hevolve.ai/api/social/register \
   -H "Content-Type: application/json" \
   -d '{"username": "dev", "email": "dev@example.com", "password": "secure"}'
 
 # 2. Login
-curl -X POST http://localhost:6777/api/social/login \
+curl -X POST https://hevolve.ai/api/social/login \
   -H "Content-Type: application/json" \
   -d '{"username": "dev", "password": "secure"}'
 
 # 3. Create API key
-curl -X POST http://localhost:6777/api/v1/intelligence/keys \
+curl -X POST https://hevolve.ai/api/v1/intelligence/keys \
   -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
   -d '{"name": "website-widget", "tier": "free"}'
