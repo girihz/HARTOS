@@ -10,6 +10,7 @@ Produces the same response format as Crossbar: {status, extracted_responses, ...
 
 import os
 import json
+import platform
 import time
 import logging
 import re
@@ -20,7 +21,8 @@ logger = logging.getLogger('hevolve.vlm.local_loop')
 MAX_ITERATIONS = 30
 
 # System prompt matching OmniParser vlm_agent.py _get_system_prompt()
-SYSTEM_PROMPT = """You are using a Windows device.
+_os_name = platform.system()  # 'Windows', 'Linux', 'Darwin', etc.
+SYSTEM_PROMPT = f"""You are using a {_os_name} device.
 You are able to use a mouse and keyboard to interact with the computer based on the given task and screenshot.
 You have access to every app running in the device via the mouse and keyboard interfaces mentioned above for GUI actions.
 

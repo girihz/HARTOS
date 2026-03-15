@@ -30,6 +30,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from functools import wraps
 from typing import Optional
@@ -49,7 +50,7 @@ def _get_allowed_roots():
         return _ALLOWED_ROOTS
     roots = [
         os.path.realpath(os.path.expanduser('~')),
-        os.path.realpath('/tmp'),
+        os.path.realpath(tempfile.gettempdir()),
     ]
     extra = os.environ.get('HART_SHELL_ALLOWED_PATHS', '')
     if extra:

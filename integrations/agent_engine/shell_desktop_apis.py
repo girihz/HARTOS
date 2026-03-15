@@ -13,6 +13,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -50,13 +51,15 @@ def _is_wayland():
     # Fallback: some GNOME sessions don't set WAYLAND_DISPLAY
     if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
         return True
-    try:
-        r = subprocess.run(['pgrep', '-x', 'sway|labwc|hyprland'],
-                          capture_output=True, text=True, timeout=3)
-        if r.returncode == 0:
-            return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    # pgrep is Linux-only; skip on other platforms
+    if sys.platform == 'linux':
+        try:
+            r = subprocess.run(['pgrep', '-x', 'sway|labwc|hyprland'],
+                              capture_output=True, text=True, timeout=3)
+            if r.returncode == 0:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
     return False
 
 
@@ -150,7 +153,13 @@ def register_shell_desktop_routes(app):
         if not mime:
             return jsonify({'error': 'mime_type required'}), 400
         candidates = []
-        apps_dir = '/usr/share/applications'
+        if sys.platform == 'win32':
+            apps_dir = os.path.join(os.environ.get('PROGRAMDATA', r'C:\ProgramData'),
+                                    'Microsoft', 'Windows', 'Start Menu', 'Programs')
+        elif sys.platform == 'darwin':
+            apps_dir = '/Applications'
+        else:
+            apps_dir = '/usr/share/applications'
         if os.path.isdir(apps_dir):
             for f in os.listdir(apps_dir):
                 if not f.endswith('.desktop'):

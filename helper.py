@@ -78,8 +78,14 @@ def _is_terminate_msg(msg: dict) -> bool:
     """
     content = msg.get("content") if isinstance(msg, dict) else None
     return content is not None and "TERMINATE" in content
-redis_client = redis.StrictRedis(
-    host='azure_all_vms.hertzai.com', port=6369, db=0)
+try:
+    redis_client = redis.StrictRedis(
+        host=os.environ.get('REDIS_HOST', 'localhost'),
+        port=int(os.environ.get('REDIS_PORT', 6379)),
+        db=0)
+except Exception as _redis_err:
+    logging.getLogger(__name__).info(f"Redis unavailable (expected in local mode): {_redis_err}")
+    redis_client = None
 
 async def fetch(session, url):
     try:
