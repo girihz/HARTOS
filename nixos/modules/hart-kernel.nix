@@ -165,6 +165,7 @@ in
       # SELinux-compatible properties filesystem (Android expects this)
       boot.specialFileSystems = {
         "/dev/binderfs" = {
+          device = "binder";
           fsType = "binder";
           options = [ "stats=global" ];
         };
