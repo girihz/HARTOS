@@ -64,7 +64,7 @@ curl -X POST http://localhost:6777/v1/chat/completions \
 curl http://localhost:6777/status
 ```
 
-**Use any frontend:** [Nunba](https://github.com/hertz-ai/Hevolve) (companion app, OSS soon), any OpenAI-compatible client, curl, Python, the `hart` CLI, or build your own with the [HART SDK](docs/developer/sdk.md).
+**Use any frontend:** [Nunba](https://github.com/hertz-ai/Nunba) (companion app, OSS soon), any OpenAI-compatible client, curl, Python, the `hart` CLI, or build your own with the [HART SDK](docs/developer/sdk.md).
 
 ---
 
