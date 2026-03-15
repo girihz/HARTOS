@@ -13,6 +13,8 @@ Configure how your node routes models, handles hive tasks, and manages metered A
 
 ## API Endpoints
 
+Examples use `https://hevolve.ai`. Replace with `http://localhost:6777` if self-hosted.
+
 ### GET /api/settings/compute
 
 Returns the merged configuration (env > DB > defaults).
@@ -43,7 +45,7 @@ Updates configuration. Fields are routed to the correct table automatically:
 - **Provider identity** goes to `PeerNode` (gossipped to the network)
 
 ```bash
-curl -X PUT http://localhost:6777/api/settings/compute \
+curl -X PUT https://hevolve.ai/api/settings/compute \
   -H "Content-Type: application/json" \
   -d '{
     "compute_policy": "local_only",

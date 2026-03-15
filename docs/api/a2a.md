@@ -12,7 +12,7 @@ Returns the Agent Card for a registered agent.
 {
   "name": "Research Agent",
   "description": "Researches topics and produces summaries",
-  "url": "http://localhost:6777/a2a/research_agent",
+  "url": "https://hevolve.ai/a2a/research_agent",
   "version": "1.0.0",
   "capabilities": {
     "streaming": false,

@@ -2,9 +2,6 @@
 
 Get HART OS running in 5 minutes.
 
-!!! tip "Try without installing"
-    Don't want to set up locally? Use the hosted version at [hevolve.ai](https://hevolve.ai) — same API, zero setup.
-
 ---
 
 ## Prerequisites
@@ -60,16 +57,16 @@ python langchain_gpt_api.py
 scripts/start_docker.sh
 ```
 
-The server starts on **http://localhost:6777** using Waitress as the production WSGI server.
+The server starts on `http://localhost:6777` using Waitress as the production WSGI server.
 
 ---
 
 ## 4. Health Check
 
-Verify the server is running:
+Verify the server is running (use `http://localhost:6777` if self-hosted):
 
 ```bash
-curl http://localhost:6777/status
+curl https://hevolve.ai/status
 ```
 
 Expected response:
@@ -85,7 +82,7 @@ Expected response:
 Send a task to an agent:
 
 ```bash
-curl -X POST http://localhost:6777/chat \
+curl -X POST https://hevolve.ai/chat \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "user1",
@@ -99,7 +96,7 @@ This runs in **CREATE mode** -- the agent decomposes the task, executes each act
 To create a dedicated agent for the task, add `"create_agent": true`:
 
 ```bash
-curl -X POST http://localhost:6777/chat \
+curl -X POST https://hevolve.ai/chat \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "user1",

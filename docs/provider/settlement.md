@@ -46,10 +46,10 @@ The `settle_metered_api_costs()` function (in `revenue_aggregator.py`):
 
 ## Controlling Exposure
 
-To limit how much USD your node absorbs for hive tasks:
+To limit how much USD your node absorbs for hive tasks (use `http://localhost:6777` if self-hosted):
 
 ```bash
-curl -X PUT http://localhost:6777/api/settings/compute \
+curl -X PUT https://hevolve.ai/api/settings/compute \
   -H "Content-Type: application/json" \
   -d '{
     "allow_metered_for_hive": true,
@@ -64,7 +64,7 @@ curl -X PUT http://localhost:6777/api/settings/compute \
 ## Viewing Pending Settlements
 
 ```bash
-curl http://localhost:6777/api/settings/compute/provider
+curl https://hevolve.ai/api/settings/compute/provider
 ```
 
 The `pending_settlements` section shows count and total USD awaiting settlement.

@@ -22,10 +22,10 @@ Running community-proposed thought experiments. The `ThoughtExperiment` table st
 
 ## Setting Your Cause
 
-At join time:
+At join time (use `http://localhost:6777` if self-hosted):
 
 ```bash
-curl -X POST http://localhost:6777/api/settings/compute/provider/join \
+curl -X POST https://hevolve.ai/api/settings/compute/provider/join \
   -H "Content-Type: application/json" \
   -d '{"cause_alignment": "frontier_training"}'
 ```
@@ -33,7 +33,7 @@ curl -X POST http://localhost:6777/api/settings/compute/provider/join \
 After joining:
 
 ```bash
-curl -X PUT http://localhost:6777/api/settings/compute \
+curl -X PUT https://hevolve.ai/api/settings/compute \
   -H "Content-Type: application/json" \
   -d '{"cause_alignment": "thought_experiments"}'
 ```

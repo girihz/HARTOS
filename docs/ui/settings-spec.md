@@ -12,7 +12,7 @@
 
 | Mode | Access |
 |------|--------|
-| **Nunba (bundled)** | Settings page rendered in-app; API calls to localhost:6777 |
+| **Nunba (bundled)** | Settings page rendered in-app; API calls to `https://hevolve.ai` (or `localhost:6777` if self-hosted) |
 | **Non-bundled (React app)** | Settings page in external React app; API calls to configured HART OS host |
 
 ## Wireframe
