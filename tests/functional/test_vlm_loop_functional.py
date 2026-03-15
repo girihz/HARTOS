@@ -162,7 +162,7 @@ class TestLoopMaxIterationsCap:
         """VLM always returns IN_PROGRESS -- loop must stop at max_iterations=5."""
         # All responses are IN_PROGRESS; loop should run exactly 5 times then stop
         always_in_progress = _make_llm_responses(
-            *[{"status": "IN_PROGRESS", "action": "left_click", "reasoning": f"iter {i}"}
+            *[{"status": "IN_PROGRESS", "action": "left_click", "reasoning": "iter %d" % i}
               for i in range(20)]
         )
 
