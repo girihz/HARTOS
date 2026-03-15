@@ -13,10 +13,7 @@ on:
         type: boolean
         default: true
   push:
-    branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
+    branches: [main, gpt4.1, develop]
 
 permissions:
   contents: write
