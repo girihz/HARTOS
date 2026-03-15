@@ -249,8 +249,7 @@ jobs:
   # 4. Deploy Docs to GitHub Pages
   # ═══════════════════════════════════════════════════════════
   deploy-docs:
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
-    # Docs deploy independently of tests
+    # Docs deploy on any push or manual dispatch
     runs-on: ubuntu-latest
     environment:
       name: github-pages
