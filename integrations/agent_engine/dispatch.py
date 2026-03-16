@@ -268,29 +268,6 @@ def dispatch_goal(prompt: str, user_id: str, goal_id: str,
             # Fall through to local dispatch if distributed fails
             logger.info(f"Distributed fallback -> local dispatch for {goal_type} goal {goal_id}")
 
-    # In bundled/desktop mode, use the in-process adapter instead of HTTP
-    # to port 6777 (which doesn't run as a separate server in bundled mode).
-    if os.environ.get('NUNBA_BUNDLED'):
-        try:
-            try:
-                from routes.hartos_backend_adapter import chat as hevolve_chat
-            except ImportError:
-                from hartos_backend_adapter import chat as hevolve_chat
-            result = hevolve_chat(
-                text=prompt,
-                user_id=user_id,
-                agent_id=f"{goal_type}_{goal_id[:8]}",
-                create_agent=True,
-                casual_conv=False,
-            )
-            response = result.get('text') or result.get('response', '')
-            if response:
-                return response
-        except Exception as e:
-            logger.warning(f"Bundled dispatch failed for {goal_type} goal {goal_id}: {e}")
-        return None
-
-    base_url = os.environ.get('HEVOLVE_BASE_URL', f'http://localhost:{get_port("backend")}')
     prompt_id = f"{goal_type}_{goal_id[:8]}"
 
     body = {
@@ -307,14 +284,37 @@ def dispatch_goal(prompt: str, user_id: str, goal_id: str,
     if _dispatch_model_tier:
         body['model_tier'] = _dispatch_model_tier.value
 
+    # 3-tier dispatch (same as hartos_backend_adapter.py):
+    #   Tier 1: Direct in-process import (no ports, no HTTP)
+    #   Tier 2: HTTP proxy to backend port
+    #   Tier 3: llama.cpp fallback (direct LLM, no agent pipeline)
+    resp = None
+
+    # Tier 1: Direct in-process import of hart_intelligence
     try:
-        resp = pooled_post(
-            f'{base_url}/chat',
-            json=body,
-            timeout=120,
+        try:
+            from routes.hartos_backend_adapter import chat as hevolve_chat
+        except ImportError:
+            from hartos_backend_adapter import chat as hevolve_chat
+        result = hevolve_chat(
+            text=prompt, user_id=user_id,
+            agent_id=prompt_id, create_agent=True, casual_conv=False,
         )
+        response = result.get('text') or result.get('response', '')
+        if response:
+            return response
+    except ImportError:
+        pass  # Nunba adapter not available — fall through to Tier 2
+    except Exception as e:
+        logger.warning(f"Tier-1 dispatch failed for {goal_type} goal {goal_id}: {e}")
+
+    # Tier 2: HTTP proxy to HARTOS backend port
+    base_url = os.environ.get('HEVOLVE_BASE_URL', f'http://localhost:{get_port("backend")}')
+    resp = pooled_post(f'{base_url}/chat', json=body, timeout=120)
+
+    try:
         if resp.status_code == 200:
-            result = resp.json()
+            result = resp.get_json() if hasattr(resp, 'get_json') else resp.json()
             response = result.get('response', '')
 
             # GUARDRAIL: post-response check (fail-closed)
