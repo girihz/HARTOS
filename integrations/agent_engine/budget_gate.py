@@ -38,18 +38,12 @@ _MODEL_COST_MAP = {
 def _is_local_model() -> bool:
     """Detect whether the active LLM is a local model (zero Spark cost).
 
-    Returns True if any of these signals indicate a local/self-hosted backend:
-    - HEVOLVE_LOCAL_LLM_URL is set (explicit local endpoint override)
-    - LLAMA_CPP_PORT is set (llama.cpp running locally)
-    - HEVOLVE_LOCAL_LLM_MODEL is set (local model name configured)
-
-    When Nunba starts llama.cpp on port 8080, it typically sets LLAMA_CPP_PORT.
+    Delegates to port_registry.is_local_llm() which checks whether the
+    resolved LLM URL points to localhost/127.0.0.1, or if a local model
+    name is configured.
     """
-    return bool(
-        os.environ.get('HEVOLVE_LOCAL_LLM_URL')
-        or os.environ.get('LLAMA_CPP_PORT')
-        or os.environ.get('HEVOLVE_LOCAL_LLM_MODEL')
-    )
+    from core.port_registry import is_local_llm
+    return is_local_llm()
 
 
 def estimate_llm_cost_spark(prompt: str, model_name: str = 'gpt-4o') -> int:
@@ -192,7 +186,7 @@ def _resolve_model_name(model_name: str) -> str:
     if local_model:
         return local_model
 
-    # If HEVOLVE_LOCAL_LLM_URL or LLAMA_CPP_PORT is set, the active model
+    # If the resolved LLM URL points to localhost, the active model
     # is local even though we don't know the exact name — use 'llama'
     # which maps to 0 Spark in _MODEL_COST_MAP.
     if _is_local_model():

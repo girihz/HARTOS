@@ -84,6 +84,7 @@ class WorldModelBridge:
         self._hive_mind = None  # HiveMind
         self._in_process = False
         self._in_process_retry_done = False
+        self._http_disabled = False  # Set True when bundled + no server to talk to
         self._federation_aggregated = {}
 
         # Cloud consent: per-user gate for non-local HTTP data sharing.
@@ -98,6 +99,19 @@ class WorldModelBridge:
         self._node_id: Optional[str] = None
 
         self._init_in_process()
+
+        # Disable HTTP when there's no server to talk to.
+        # If in-process failed AND no explicit HEVOLVEAI_API_URL was configured
+        # (just the default localhost:8000), there's no point spamming HTTP.
+        # Bundled mode (NUNBA_BUNDLED) always disables — Nunba owns the lifecycle.
+        # Non-bundled with default URL also disables — no server was started.
+        if not self._in_process:
+            _explicit_url = os.environ.get('HEVOLVEAI_API_URL', '')
+            if os.environ.get('NUNBA_BUNDLED') == '1' or not _explicit_url:
+                self._http_disabled = True
+                logger.info(
+                    "[WorldModelBridge] Learning not available in-process, "
+                    "no explicit HEVOLVEAI_API_URL — HTTP disabled")
 
         # Periodic HevolveAI integrity watcher (Gap 1 fix)
         self._crawl_watcher = None
@@ -399,8 +413,7 @@ class WorldModelBridge:
             return
 
         # HTTP fallback (central standalone or HevolveAI not in-process)
-        if self._cb_is_open():
-            logger.debug("[WorldModelBridge] Circuit breaker open — skipping HTTP flush")
+        if self._http_disabled or self._cb_is_open():
             return
 
         # CONSENT GATE: if target is external (cloud), filter to consented users only.
@@ -521,6 +534,8 @@ class WorldModelBridge:
                 return {'success': False, 'reason': 'Cloud data consent required'}
 
         # HTTP fallback
+        if self._http_disabled:
+            return {'success': False, 'reason': 'Learning not available (bundled mode)'}
         body = {
             'original_response': original_response[:5000],
             'corrected_response': corrected_response[:5000],
@@ -657,7 +672,7 @@ class WorldModelBridge:
             pass
 
         # HTTP fallback
-        if self._cb_is_open():
+        if self._http_disabled or self._cb_is_open():
             return None
 
         try:
@@ -701,6 +716,8 @@ class WorldModelBridge:
             return result
 
         # HTTP fallback
+        if self._http_disabled:
+            return result
         try:
             resp = pooled_get(
                 f'{self._api_url}/v1/stats', timeout=self._timeout_default)
@@ -733,6 +750,8 @@ class WorldModelBridge:
                 pass
 
         # HTTP fallback
+        if self._http_disabled:
+            return []
         try:
             resp = pooled_get(
                 f'{self._api_url}/v1/hivemind/agents', timeout=self._timeout_default)
@@ -828,6 +847,13 @@ class WorldModelBridge:
             }
 
         # HTTP fallback
+        if self._http_disabled:
+            return {
+                'healthy': False,
+                'learning_active': False,
+                'mode': 'disabled',
+                'node_tier': self._node_tier,
+            }
         try:
             resp = pooled_get(
                 f'{self._api_url}/health', timeout=5)
@@ -913,7 +939,7 @@ class WorldModelBridge:
                 logger.debug(f"In-process action send error: {e}")
 
         # HTTP fallback
-        if self._cb_is_open():
+        if self._http_disabled or self._cb_is_open():
             return False
 
         try:
@@ -963,7 +989,7 @@ class WorldModelBridge:
                 logger.debug(f"In-process sensor ingest error: {e}")
 
         # HTTP fallback
-        if self._cb_is_open():
+        if self._http_disabled or self._cb_is_open():
             return 0
 
         try:
@@ -1003,7 +1029,7 @@ class WorldModelBridge:
                 pass
 
         # HTTP fallback
-        if self._cb_is_open():
+        if self._http_disabled or self._cb_is_open():
             return None
 
         try:
@@ -1127,7 +1153,7 @@ class WorldModelBridge:
                 logger.debug(f"[WorldModelBridge] In-process sensor frame failed: {e}")
 
         # HTTP fallback
-        if self._cb_is_open():
+        if self._http_disabled or self._cb_is_open():
             return
 
         try:

@@ -179,7 +179,7 @@ user_simplemem = TTLCache(ttl_seconds=7200, max_size=500, name='reuse_user_simpl
 # }]
 
 # Mode-aware config_list: cloud/regional use external LLM, flat uses local
-# (user's wizard-configured endpoint via HEVOLVE_LOCAL_LLM_URL or LLAMA_CPP_PORT)
+# (user's wizard-configured endpoint via HEVOLVE_LOCAL_LLM_URL)
 _node_tier = os.environ.get('HEVOLVE_NODE_TIER', 'flat')
 _active_cloud = os.environ.get('HEVOLVE_ACTIVE_CLOUD_PROVIDER', '')
 if _node_tier in ('regional', 'central') and os.environ.get('HEVOLVE_LLM_ENDPOINT_URL'):
@@ -200,14 +200,11 @@ elif _active_cloud and os.environ.get('HEVOLVE_LLM_API_KEY'):
         _cloud_cfg["base_url"] = os.environ['HEVOLVE_LLM_ENDPOINT_URL']
     config_list = [_cloud_cfg]
 else:
-    # Dynamic: reads from user's LLM Setup Wizard config (set by Nunba app.py)
-    from core.port_registry import get_port as _get_llm_port
-    _llama_port = os.environ.get('LLAMA_CPP_PORT', str(_get_llm_port('llm')))
-    _local_llm_url = os.environ.get('HEVOLVE_LOCAL_LLM_URL', f'http://localhost:{_llama_port}/v1')
+    from core.port_registry import get_local_llm_url
     config_list = [{
         "model": os.environ.get('HEVOLVE_LOCAL_LLM_MODEL', 'local'),
         "api_key": 'dummy',
-        "base_url": _local_llm_url,
+        "base_url": get_local_llm_url(),
         "price": [0, 0]
     }]
 
