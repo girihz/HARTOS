@@ -71,11 +71,11 @@ def create_agents_for_user(user_id: str, autonomous=False, initial_description=N
             "price": [0.0025, 0.01]
         }]
     else:
-        _llama_port = os.environ.get('LLAMA_CPP_PORT', '8080')
+        from core.port_registry import get_local_llm_url
         config_list = [{
             "model": 'Qwen3-VL-4B-Instruct',
             "api_key": 'dummy',
-            "base_url": f'http://localhost:{_llama_port}/v1',
+            "base_url": get_local_llm_url(),
             "price": [0, 0]
         }]
 

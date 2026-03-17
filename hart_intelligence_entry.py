@@ -305,7 +305,7 @@ class ChatQwen3VL(LLM):
     - Drop-in replacement for ChatOpenAI
     """
 
-    base_url: str = os.environ.get('HEVOLVE_LOCAL_LLM_URL', "http://localhost:8000/v1")
+    base_url: str = None  # resolved lazily via get_local_llm_url()
     model_name: str = "local"
     temperature: float = 0.7
     max_tokens: int = 1500
@@ -325,6 +325,10 @@ class ChatQwen3VL(LLM):
         Returns:
             The generated response text
         """
+        if not self.base_url:
+            from core.port_registry import get_local_llm_url
+            self.base_url = get_local_llm_url()
+
         payload = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -349,14 +353,14 @@ class ChatQwen3VL(LLM):
         except Exception as e:
             _log.warning(f"[LocalLLM] {self.base_url} unavailable: {e}")
 
-        # Fallback: llama.cpp (Nunba always starts it)
-        _llama_port = os.environ.get('LLAMA_CPP_PORT', '8080')
-        _llama_url = f"http://127.0.0.1:{_llama_port}/v1"
-        if _llama_url not in self.base_url:
+        # Fallback: resolved LLM URL (handles port conflicts, warm starts)
+        from core.port_registry import get_local_llm_url
+        _llm_url = get_local_llm_url()
+        if _llm_url not in self.base_url:
             try:
-                _log.info(f"[LocalLLM] Falling back to llama.cpp at {_llama_url}")
+                _log.info(f"[LocalLLM] Falling back to llama.cpp at {_llm_url}")
                 response = pooled_post(
-                    f"{_llama_url}/chat/completions",
+                    f"{_llm_url}/chat/completions",
                     json=payload,
                     timeout=120
                 )
@@ -435,8 +439,9 @@ def get_llm(model_name="gpt-3.5-turbo", temperature=0.7, max_tokens=1500):
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        if _active == 'custom_openai' and os.environ.get('CUSTOM_LLM_BASE_URL'):
-            _kwargs['openai_api_base'] = os.environ['CUSTOM_LLM_BASE_URL']
+        if _active == 'custom_openai':
+            from core.port_registry import get_local_llm_url
+            _kwargs['openai_api_base'] = get_local_llm_url()
         return ChatOpenAI(**_kwargs)
 
     if USE_QWEN3VL:
@@ -982,8 +987,8 @@ def _has_cloud_api() -> bool:
 
 def _wait_for_llm_server(url=None, timeout=15):
     if url is None:
-        _port = os.environ.get('LLAMA_CPP_PORT', '8080')
-        url = f'http://localhost:{_port}'
+        from core.port_registry import get_local_llm_url
+        url = get_local_llm_url().replace('/v1', '')
     """Wait for llama.cpp server, giving parent process time to start it.
 
     In Nunba (flat mode), the desktop app starts llama.cpp in a background

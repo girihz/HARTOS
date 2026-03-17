@@ -266,8 +266,8 @@ def _call_local_llm(messages: list) -> str:
         api_key = os.environ['OPENAI_API_KEY']
     else:
         # Last resort: local llama.cpp / Qwen3-VL
-        llama_port = os.environ.get('LLAMA_CPP_PORT', '8080')
-        base_url = f'http://localhost:{llama_port}/v1'
+        from core.port_registry import get_local_llm_url
+        base_url = get_local_llm_url()
         model = 'Qwen3-VL-4B-Instruct'
         api_key = 'dummy'
 
