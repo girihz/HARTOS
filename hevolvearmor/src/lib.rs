@@ -94,20 +94,41 @@ fn derive_key_from_bytes(raw: &[u8]) -> [u8; KEY_SIZE] {
 }
 
 /// Full key derivation chain — tries all sources in priority order.
-/// Called from Rust, reads env vars and files directly.
+/// Generic: env var names are configurable via HEVOLVEARMOR_* prefix overrides.
+///
+/// Default env vars (HART OS):
+///   KEY_DIR:   HEVOLVE_KEY_DIR       (overridable: HEVOLVEARMOR_KEY_DIR_VAR)
+///   DATA_KEY:  HEVOLVE_DATA_KEY      (overridable: HEVOLVEARMOR_DATA_KEY_VAR)
+///   TIER:      HEVOLVE_NODE_TIER     (overridable: HEVOLVEARMOR_TIER_VAR)
+///   MASTER_PK: hardcoded default     (overridable: HEVOLVEARMOR_MASTER_PK)
+///
+/// This makes the tool usable by ANY project, not just HART OS.
 fn derive_runtime_key_internal(
     node_key_path: Option<&str>,
     passphrase: Option<&str>,
 ) -> Result<[u8; KEY_SIZE], String> {
+    // Configurable env var names (defaults = HART OS conventions)
+    let key_dir_var = std::env::var("HEVOLVEARMOR_KEY_DIR_VAR")
+        .unwrap_or_else(|_| "HEVOLVE_KEY_DIR".to_string());
+    let data_key_var = std::env::var("HEVOLVEARMOR_DATA_KEY_VAR")
+        .unwrap_or_else(|_| "HEVOLVE_DATA_KEY".to_string());
+    let tier_var = std::env::var("HEVOLVEARMOR_TIER_VAR")
+        .unwrap_or_else(|_| "HEVOLVE_NODE_TIER".to_string());
+    let master_pk = std::env::var("HEVOLVEARMOR_MASTER_PK").unwrap_or_else(|_| {
+        "4662e30d86c2f58416c5ac3f806c2a6af8186e1d96fdbbcad3189847cf888a01".to_string()
+    });
+    let app_name = std::env::var("HEVOLVEARMOR_APP_NAME")
+        .unwrap_or_else(|_| "Nunba".to_string());
+
     // 1. Ed25519 node private key file
     let key_candidates = [
         node_key_path.map(|s| s.to_string()),
-        std::env::var("HEVOLVE_KEY_DIR")
+        std::env::var(&key_dir_var)
             .ok()
             .map(|d| format!("{}/node_private_key.pem", d)),
         Some("agent_data/node_private_key.pem".to_string()),
         dirs_next::document_dir().map(|d| {
-            d.join("Nunba")
+            d.join(&app_name)
                 .join("data")
                 .join("node_private_key.pem")
                 .to_string_lossy()
@@ -117,29 +138,25 @@ fn derive_runtime_key_internal(
 
     for candidate in key_candidates.iter().flatten() {
         if let Ok(pem_bytes) = fs::read(candidate) {
-            // Try to extract raw 32-byte Ed25519 key from PEM
             if let Some(raw) = extract_ed25519_raw_from_pem(&pem_bytes) {
                 return derive_key_from_ed25519(&raw);
             }
         }
     }
 
-    // 2. HEVOLVE_DATA_KEY env var
-    if let Ok(data_key) = std::env::var("HEVOLVE_DATA_KEY") {
+    // 2. Data encryption key env var
+    if let Ok(data_key) = std::env::var(&data_key_var) {
         if !data_key.is_empty() {
             return Ok(derive_key_from_bytes(data_key.as_bytes()));
         }
     }
 
     // 3. Tier-based derivation (tier + master public key hash)
-    let tier = std::env::var("HEVOLVE_NODE_TIER").unwrap_or_else(|_| "flat".to_string());
-    // Master public key hex — same constant as in security/master_key.py
-    let master_pk = "4662e30d86c2f58416c5ac3f806c2a6af8186e1d96fdbbcad3189847cf888a01";
+    let tier = std::env::var(&tier_var).unwrap_or_else(|_| "flat".to_string());
     let mut hasher = Sha256::new();
     hasher.update(format!("hevolvearmor-tier-{}-{}", tier, master_pk).as_bytes());
     let tier_seed = hasher.finalize();
-    // Only use tier key if explicitly set (not default "flat")
-    if std::env::var("HEVOLVE_NODE_TIER").is_ok() {
+    if std::env::var(&tier_var).is_ok() {
         return Ok(derive_aes_key(&tier_seed));
     }
 
@@ -148,7 +165,7 @@ fn derive_runtime_key_internal(
         return Ok(derive_key_from_passphrase(pp));
     }
 
-    // 5. Last resort: tier-based even with default
+    // 5. Last resort: tier-based with defaults
     Ok(derive_aes_key(&tier_seed))
 }
 
