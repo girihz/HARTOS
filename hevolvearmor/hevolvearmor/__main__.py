@@ -104,6 +104,22 @@ def cmd_verify(args):
         sys.exit(1)
 
 
+def cmd_bcc(args):
+    from hevolvearmor._bcc import compile_package_to_c
+
+    patterns = args.patterns.split(',') if args.patterns else None
+    skip = args.skip.split(',') if args.skip else None
+
+    stats = compile_package_to_c(
+        args.source, args.output,
+        patterns=patterns, skip_patterns=skip,
+        verbose=not args.quiet,
+    )
+    if not args.quiet:
+        print(f"\nCompiled: {stats['compiled']}, Failed: {stats['failed']}, "
+              f"Skipped: {stats['skipped']}")
+
+
 def cmd_hash(args):
     from hevolvearmor import armor_self_hash
     h = armor_self_hash()
@@ -137,12 +153,20 @@ def main():
     p_ver.add_argument('--passphrase', '-p')
     p_ver.add_argument('--key-file', '-k')
 
+    # bcc
+    p_bcc = sub.add_parser('bcc', help='Compile Python to C extensions (BCC mode)')
+    p_bcc.add_argument('source', help='Path to Python package root')
+    p_bcc.add_argument('output', help='Output directory for compiled extensions')
+    p_bcc.add_argument('--patterns', help='Comma-separated fnmatch patterns to compile')
+    p_bcc.add_argument('--skip', help='Comma-separated fnmatch patterns to skip')
+    p_bcc.add_argument('--quiet', '-q', action='store_true')
+
     # hash
     sub.add_parser('hash', help='Print SHA-256 hash of native binary')
 
     args = parser.parse_args()
     {'encrypt': cmd_encrypt, 'keygen': cmd_keygen,
-     'verify': cmd_verify, 'hash': cmd_hash}[args.command](args)
+     'verify': cmd_verify, 'bcc': cmd_bcc, 'hash': cmd_hash}[args.command](args)
 
 
 if __name__ == '__main__':

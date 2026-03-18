@@ -414,6 +414,60 @@ class TestTransformBuilds:
 #  STRESS TESTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+class TestBCC:
+    """BCC mode — compile Python to C extensions via Cython."""
+
+    def test_bcc_compile_subset(self, test_dir):
+        if not os.path.isdir(HEVOLVEAI_SRC):
+            pytest.skip("hevolveai source not found")
+        try:
+            import Cython
+        except ImportError:
+            pytest.skip("Cython not installed")
+
+        from hevolvearmor._bcc import compile_package_to_c
+        out = os.path.join(test_dir, "bcc_test")
+        stats = compile_package_to_c(
+            HEVOLVEAI_SRC, out,
+            patterns=["embodied_ai.core.*", "tools.*"],
+            verbose=False,
+        )
+        assert stats["compiled"] >= 3, f"Expected >= 3 compiled, got {stats['compiled']}"
+        assert stats["failed"] == 0
+
+    def test_bcc_produces_native_extensions(self, test_dir):
+        import sysconfig
+        ext = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
+        out = os.path.join(test_dir, "bcc_test")
+        if not os.path.isdir(out):
+            pytest.skip("BCC output not found")
+        found = []
+        for root, dirs, files in os.walk(out):
+            for f in files:
+                if f.endswith(ext):
+                    found.append(f)
+        assert len(found) >= 3, f"Expected >= 3 native extensions, found {found}"
+
+    def test_bcc_skip_patterns(self, test_dir):
+        if not os.path.isdir(HEVOLVEAI_SRC):
+            pytest.skip("hevolveai source not found")
+        try:
+            import Cython
+        except ImportError:
+            pytest.skip("Cython not installed")
+
+        from hevolvearmor._bcc import compile_package_to_c
+        out = os.path.join(test_dir, "bcc_skip")
+        stats = compile_package_to_c(
+            HEVOLVEAI_SRC, out,
+            patterns=["*"],
+            skip_patterns=["*"],  # skip everything
+            verbose=False,
+        )
+        assert stats["compiled"] == 0
+        assert stats["skipped"] > 100
+
+
 class TestStress:
     def test_encrypt_decrypt_1000_iterations(self):
         from hevolvearmor._native import armor_encrypt, armor_decrypt, armor_generate_key
