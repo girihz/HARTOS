@@ -433,14 +433,161 @@ impl PyArmoredLoader {
         let code_bytes = PyBytes::new(py, &pyc_bytes[16..]);
         let code = marshal.call_method1("loads", (code_bytes,))?;
 
+        // ── Post-decrypt transforms ──
+        // Apply string decryption and function unwrapping to the code object.
+        // These reverse the build-time transforms from _transforms.py.
+        let transforms = py.import("hevolvearmor._transforms").ok();
+        let final_code = if let Some(tf) = transforms {
+            // Decrypt encrypted strings: __hevolvearmor_enc_str__ markers → plaintext
+            let decrypt_strings = tf.getattr("decrypt_strings_in_code").ok();
+            // Unwrap per-function encrypted code: __hevolvearmor_wrapped__ → code objects
+            let unwrap_fns = tf.getattr("unwrap_function_code").ok();
+
+            // Build a Python-callable decrypt function that uses Rust native
+            let decrypt_closure = py
+                .import("hevolvearmor._native")?
+                .getattr("_runtime_decrypt")?;
+
+            let mut transformed = code.clone().unbind();
+
+            if let Some(ds) = decrypt_strings {
+                if let Ok(result) = ds.call1((&transformed, &decrypt_closure)) {
+                    transformed = result.unbind();
+                }
+            }
+            if let Some(uw) = unwrap_fns {
+                if let Ok(result) = uw.call1((&transformed, &decrypt_closure)) {
+                    transformed = result.unbind();
+                }
+            }
+            transformed
+        } else {
+            code.unbind()
+        };
+
+        // Set armored marker BEFORE exec so assert-import can verify
+        module.setattr("__hevolvearmor__", true)?;
+
         // exec(code, module.__dict__)
         let builtins = py.import("builtins")?;
         let exec_fn = builtins.getattr("exec")?;
         let module_dict = module.dict();
-        exec_fn.call1((code, module_dict))?;
+        exec_fn.call1((final_code.bind(py), module_dict))?;
+
+        // Re-set marker after exec (in case module code overwrote __dict__)
+        module.setattr("__hevolvearmor__", true)?;
 
         Ok(())
     }
+}
+
+// ─── Anti-Debug (platform-specific) ──────────────────────────────────────────
+
+/// Check if a debugger is attached.  Returns true if debugger detected.
+fn is_debugger_present() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: IsDebuggerPresent + NtQueryInformationProcess
+        extern "system" {
+            fn IsDebuggerPresent() -> i32;
+        }
+        unsafe {
+            if IsDebuggerPresent() != 0 {
+                return true;
+            }
+        }
+        // Also check via NtQueryInformationProcess (ProcessDebugPort = 7)
+        // More resistant to IsDebuggerPresent patching
+        #[allow(non_snake_case)]
+        extern "system" {
+            fn NtQueryInformationProcess(
+                ProcessHandle: isize,
+                ProcessInformationClass: u32,
+                ProcessInformation: *mut isize,
+                ProcessInformationLength: u32,
+                ReturnLength: *mut u32,
+            ) -> i32;
+        }
+        let mut debug_port: isize = 0;
+        let status = unsafe {
+            NtQueryInformationProcess(
+                -1isize, // current process
+                7,       // ProcessDebugPort
+                &mut debug_port as *mut isize,
+                std::mem::size_of::<isize>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if status == 0 && debug_port != 0 {
+            return true;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Linux: check /proc/self/status for TracerPid
+        if let Ok(status) = fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if line.starts_with("TracerPid:") {
+                    let pid: i64 = line
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    if pid != 0 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: sysctl CTL_KERN, KERN_PROC, KERN_PROC_PID
+        // Check P_TRACED flag in kinfo_proc.kp_proc.p_flag
+        extern "C" {
+            fn sysctl(
+                name: *const i32,
+                namelen: u32,
+                oldp: *mut u8,
+                oldlenp: *mut usize,
+                newp: *const u8,
+                newlen: usize,
+            ) -> i32;
+            fn getpid() -> i32;
+        }
+        // CTL_KERN=1, KERN_PROC=14, KERN_PROC_PID=1
+        let mib: [i32; 4] = [1, 14, 1, unsafe { getpid() }];
+        let mut info = vec![0u8; 648]; // sizeof(kinfo_proc) on macOS
+        let mut size = info.len();
+        let ret = unsafe {
+            sysctl(
+                mib.as_ptr(),
+                4,
+                info.as_mut_ptr(),
+                &mut size,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if ret == 0 && size >= 32 {
+            // kp_proc.p_flag is at offset 16 (i32)
+            let flags = i32::from_ne_bytes([info[16], info[17], info[18], info[19]]);
+            let p_traced = 0x00000800; // P_TRACED
+            if flags & p_traced != 0 {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Python-exposed debugger check
+#[pyfunction]
+fn armor_is_debugger_present() -> bool {
+    is_debugger_present()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -537,8 +684,26 @@ fn install(
     let finder = Py::new(py, PyArmoredFinder {})?;
     meta_path.call_method1("insert", (0i32, finder))?;
 
+    // Anti-debug: check for attached debuggers if enforcement is on
+    let enforce = std::env::var("HEVOLVEARMOR_ENFORCE")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    if enforce {
+        if is_debugger_present() {
+            // Wipe key immediately
+            let mut guard2 = STATE.lock().map_err(|_| PyRuntimeError::new_err("lock"))?;
+            if let Some(ref mut s) = *guard2 {
+                s.key.zeroize();
+                s.armed = false;
+            }
+            return Err(PyRuntimeError::new_err(
+                "HevolveArmor: debugger detected. Cannot load encrypted modules under debugger.",
+            ));
+        }
+    }
+
     // Disable sys.settrace / sys.setprofile to resist debugger attachment
-    // (only when armed — doesn't interfere with normal development)
     let _ = sys.setattr("settrace", py.None());
     let _ = sys.setattr("setprofile", py.None());
 
@@ -598,6 +763,19 @@ fn armor_encrypt(py: Python<'_>, data: &[u8], key: &[u8]) -> PyResult<Py<PyBytes
     let k: [u8; KEY_SIZE] = key.try_into().unwrap();
     let ct = encrypt_bytes(data, &k).map_err(|e| PyRuntimeError::new_err(e))?;
     Ok(PyBytes::new(py, &ct).unbind())
+}
+
+/// Runtime decrypt using the global key (for string/function unwrapping).
+/// Called from Python _transforms.py callbacks — the key never leaves Rust.
+#[pyfunction]
+fn _runtime_decrypt(py: Python<'_>, blob: &[u8]) -> PyResult<Py<PyBytes>> {
+    let guard = STATE.lock().map_err(|_| PyRuntimeError::new_err("lock"))?;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| PyRuntimeError::new_err("HevolveArmor not initialized"))?;
+    let pt = decrypt_bytes(blob, &state.key)
+        .map_err(|e| PyRuntimeError::new_err(format!("Runtime decrypt: {e}")))?;
+    Ok(PyBytes::new(py, &pt).unbind())
 }
 
 #[pyfunction]
@@ -671,6 +849,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(install, m)?)?;
     m.add_function(wrap_pyfunction!(uninstall, m)?)?;
     m.add_function(wrap_pyfunction!(derive_runtime_key, m)?)?;
+    m.add_function(wrap_pyfunction!(_runtime_decrypt, m)?)?;
 
     // Build-time API
     m.add_function(wrap_pyfunction!(armor_encrypt, m)?)?;
@@ -681,6 +860,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(armor_derive_key_raw, m)?)?;
     m.add_function(wrap_pyfunction!(armor_self_hash, m)?)?;
     m.add_function(wrap_pyfunction!(armor_load_module, m)?)?;
+    m.add_function(wrap_pyfunction!(armor_is_debugger_present, m)?)?;
 
     // Classes
     m.add_class::<PyArmoredFinder>()?;

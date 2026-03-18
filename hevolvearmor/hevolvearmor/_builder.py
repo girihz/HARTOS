@@ -1,16 +1,18 @@
 """
-Build-time encryption of Python packages.
+Build-time encryption of Python packages with optional transforms.
 
-Compiles .py → .pyc (bytecode) → AES-256-GCM encrypted .enc blobs.
-The .pyc compilation happens in Python (marshal), encryption in Rust.
+Pipeline: .py → [RFT rename] → [assert-import] → [private mode] →
+          compile → [string encrypt] → [per-function wrap] →
+          marshal → AES-256-GCM encrypt → .enc
 """
 import importlib.util
 import marshal
 import os
-import py_compile
 import shutil
 import struct
 import sys
+
+from hevolvearmor._transforms import TransformConfig, apply_transforms
 
 _SKIP_DIRS = frozenset({
     '__pycache__', '.git', '.tox', 'tests', 'test', 'legacy',
@@ -19,12 +21,26 @@ _SKIP_DIRS = frozenset({
 })
 
 
-def compile_to_pyc_bytes(source_path: str) -> bytes:
-    """Compile a .py file to .pyc bytes (header + marshalled code)."""
+def compile_to_pyc_bytes(source_path: str,
+                          config: TransformConfig = None,
+                          encrypt_fn=None) -> bytes:
+    """Compile a .py file to .pyc bytes with optional transforms.
+
+    Args:
+        source_path: path to .py file
+        config: transform config (None = no transforms, just compile)
+        encrypt_fn: Rust encrypt function for string/function wrapping
+
+    Returns:
+        .pyc bytes (header + marshalled code object)
+    """
     with open(source_path, 'r', encoding='utf-8') as f:
         source = f.read()
 
-    code = compile(source, source_path, 'exec', dont_inherit=True, optimize=2)
+    if config is not None:
+        code = apply_transforms(source, source_path, config, encrypt_fn)
+    else:
+        code = compile(source, source_path, 'exec', dont_inherit=True, optimize=2)
 
     magic = importlib.util.MAGIC_NUMBER
     flags = struct.pack('<I', 0)
@@ -35,26 +51,42 @@ def compile_to_pyc_bytes(source_path: str) -> bytes:
 
 
 def build_encrypted_package(source_dir: str, output_dir: str,
-                            key: bytes, verbose: bool = True) -> dict:
-    """Encrypt an entire Python package tree.
+                            key: bytes, verbose: bool = True,
+                            config: TransformConfig = None) -> dict:
+    """Encrypt an entire Python package tree with optional transforms.
 
     For each .py file:
-      1. Compile to .pyc (bytecode, optimize=2)
-      2. Encrypt .pyc with AES-256-GCM via Rust native
-      3. Write as .enc to output_dir
+      1. Apply configured transforms (RFT, string encrypt, etc.)
+      2. Compile to .pyc (bytecode, optimize=2)
+      3. Encrypt .pyc with AES-256-GCM via Rust native
+      4. Write as .enc to output_dir
 
     Args:
         source_dir: path to package root (must contain __init__.py)
         output_dir: output directory for .enc files
         key: 32-byte AES key
         verbose: print per-file progress
+        config: TransformConfig for build-time transforms
 
     Returns:
-        dict with {encrypted, failed, skipped, total_bytes}
+        dict with {encrypted, failed, skipped, total_bytes, transforms}
     """
     from hevolvearmor._native import armor_encrypt
 
-    stats = {'encrypted': 0, 'failed': 0, 'skipped': 0, 'total_bytes': 0}
+    # Create encrypt_fn closure for transforms that need it
+    def _encrypt_fn(data):
+        return bytes(armor_encrypt(data, key))
+
+    stats = {
+        'encrypted': 0, 'failed': 0, 'skipped': 0, 'total_bytes': 0,
+        'transforms': {
+            'rft_renamed': 0,
+            'strings_encrypted': 0,
+            'functions_wrapped': 0,
+            'assert_imports_injected': 0,
+            'private_mode_injected': 0,
+        }
+    }
 
     if os.path.isdir(output_dir):
         shutil.rmtree(output_dir)
@@ -78,7 +110,11 @@ def build_encrypted_package(source_dir: str, output_dir: str,
             os.makedirs(os.path.dirname(enc_full), exist_ok=True)
 
             try:
-                pyc_bytes = compile_to_pyc_bytes(full_path)
+                pyc_bytes = compile_to_pyc_bytes(
+                    full_path,
+                    config=config,
+                    encrypt_fn=_encrypt_fn if config else None,
+                )
                 encrypted = bytes(armor_encrypt(pyc_bytes, key))
 
                 with open(enc_full, 'wb') as f:
@@ -89,7 +125,20 @@ def build_encrypted_package(source_dir: str, output_dir: str,
                 manifest.append(rel_path)
 
                 if verbose:
-                    print(f"  [OK] {rel_path} ({len(encrypted):,} bytes)")
+                    flags = []
+                    if config:
+                        if config.rft_mode:
+                            flags.append('RFT')
+                        if config.encrypt_strings:
+                            flags.append('STR')
+                        if config.wrap_functions:
+                            flags.append('WRAP')
+                        if config.assert_imports:
+                            flags.append('ASSERT')
+                        if config.private_mode:
+                            flags.append('PRIV')
+                    flag_str = f" [{','.join(flags)}]" if flags else ""
+                    print(f"  [OK] {rel_path} ({len(encrypted):,} bytes){flag_str}")
 
             except SyntaxError as e:
                 stats['failed'] += 1
