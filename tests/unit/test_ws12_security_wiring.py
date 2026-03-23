@@ -601,8 +601,8 @@ class TestFederationDeltaSigning(unittest.TestCase):
         with patch.dict(os.environ, {'HART_NODE_KEY': 'key-B'}):
             self.assertFalse(_verify_delta_signature(delta))
 
-    def test_sign_delta_skips_when_no_key(self):
-        """_sign_delta should skip signing when HART_NODE_KEY not set."""
+    def test_sign_delta_falls_back_to_ed25519_when_no_key(self):
+        """_sign_delta should fall back to Ed25519 public key when HART_NODE_KEY not set."""
         from integrations.agent_engine.federated_aggregator import _sign_delta
 
         delta = {'version': 1, 'node_id': 'test'}
@@ -610,8 +610,11 @@ class TestFederationDeltaSigning(unittest.TestCase):
         env = os.environ.copy()
         env.pop('HART_NODE_KEY', None)
         with patch.dict(os.environ, env, clear=True):
-            _sign_delta(delta)
-            self.assertNotIn('hmac_signature', delta)
+            with patch('security.node_integrity.get_public_key_hex',
+                       return_value='abcd1234'):
+                _sign_delta(delta)
+                # Should have signed with the Ed25519 fallback key
+                self.assertIn('hmac_signature', delta)
 
     def test_broadcast_signs_delta(self):
         """broadcast_delta should sign the delta when HART_NODE_KEY is set."""

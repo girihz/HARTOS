@@ -65,7 +65,7 @@ class NodeWatchdog:
         watchdog.heartbeat('gossip')
     """
 
-    def __init__(self, check_interval: int = None, frozen_multiplier: float = 2.0):
+    def __init__(self, check_interval: int = None, frozen_multiplier: float = 10.0):
         import os
         self._check_interval = check_interval or int(
             os.environ.get('HEVOLVE_WATCHDOG_INTERVAL', '30'))

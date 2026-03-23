@@ -537,13 +537,15 @@ def lifecycle_hook_track_action_assignment(user_prompt: str, user_tasks, group_c
         set_action_state(user_prompt, user_tasks, ActionState.ASSIGNED)
         return True
 
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     current_state = get_action_state(user_prompt, current_action_id)
 
@@ -576,13 +578,15 @@ def lifecycle_hook_track_status_verification_request(user_prompt: str, user_task
                                        "direct status verification request")
         return True
 
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     # When @StatusVerifier is mentioned, move to STATUS_VERIFICATION_REQUESTED
     if (group_chat and group_chat.messages and
@@ -660,13 +664,15 @@ def lifecycle_hook_process_verifier_response(user_prompt: str, json_obj: dict, u
 
 def lifecycle_hook_track_fallback_request(user_prompt: str, user_tasks, group_chat) -> bool:
     """7. Track when fallback is requested to user"""
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     # When fallback is requested, move to FALLBACK_REQUESTED
     if (group_chat.messages and
@@ -682,13 +688,15 @@ def lifecycle_hook_track_fallback_request(user_prompt: str, user_tasks, group_ch
 
 def lifecycle_hook_track_user_fallback(user_prompt: str, user_tasks, group_chat) -> bool:
     """8. Track when fallback is received from user"""
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     current_state = get_action_state(user_prompt, current_action_id)
 
@@ -706,13 +714,15 @@ def lifecycle_hook_track_user_fallback(user_prompt: str, user_tasks, group_chat)
 
 def lifecycle_hook_track_recipe_request(user_prompt: str, user_tasks, group_chat) -> bool:
     """9. Track when recipe creation is requested"""
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     # When recipe creation is requested
     if (group_chat.messages and
@@ -754,13 +764,15 @@ def lifecycle_hook_track_recipe_completion(user_prompt: str, json_obj: dict, use
 
 def lifecycle_hook_track_termination(user_prompt: str, user_tasks, group_chat) -> bool:
     """11. Track when action is terminated and passed to chat instructor"""
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     # When TERMINATE is issued
     if (group_chat.messages and

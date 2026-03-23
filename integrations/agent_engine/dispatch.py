@@ -33,8 +33,27 @@ logger = logging.getLogger('hevolve_social')
 # This prevents the watchdog-restart cascade where restarted daemons
 # pile up concurrent requests that each take longer, triggering more
 # restarts.
-_LOCAL_LLM_MAX_CONCURRENT = int(os.environ.get('HEVOLVE_LOCAL_LLM_MAX_CONCURRENT', '2'))
+_LOCAL_LLM_MAX_CONCURRENT = int(os.environ.get('HEVOLVE_LOCAL_LLM_MAX_CONCURRENT', '1'))
 _local_llm_semaphore = threading.Semaphore(_LOCAL_LLM_MAX_CONCURRENT)
+
+
+# ── User-priority gate ──────────────────────────────────────────────────
+# When a human user is chatting, daemon dispatch must yield the LLM.
+# Tracked via timestamp of last user activity — daemon checks freshness.
+import time as _time
+_last_user_chat_at: float = 0.0
+_USER_CHAT_COOLDOWN = 10  # seconds after last user chat to yield LLM
+
+
+def mark_user_chat_activity():
+    """Call on every user (non-daemon) /chat request."""
+    global _last_user_chat_at
+    _last_user_chat_at = _time.time()
+
+
+def is_user_recently_active() -> bool:
+    """True if a human user chatted within the cooldown window."""
+    return (_time.time() - _last_user_chat_at) < _USER_CHAT_COOLDOWN
 
 
 def _notify_watchdog_llm_start():
@@ -347,6 +366,11 @@ def dispatch_goal(prompt: str, user_id: str, goal_id: str,
             from routes.hartos_backend_adapter import chat as hevolve_chat
         except ImportError:
             from hartos_backend_adapter import chat as hevolve_chat
+
+        # USER PRIORITY: if user chatted recently, skip this tick — let user have the LLM
+        if is_user_recently_active():
+            logger.info(f"User active ({_USER_CHAT_COOLDOWN}s cooldown), deferring dispatch for goal {goal_id}")
+            return None
 
         # Try to acquire semaphore (non-blocking check first)
         if not _local_llm_semaphore.acquire(timeout=5):

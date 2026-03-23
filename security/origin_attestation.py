@@ -42,8 +42,8 @@ ORIGIN_IDENTITY = {
     'name': 'HART OS',
     'full_name': 'Hevolve Hive Agentic Runtime',
     'organization': 'Hevolve.ai',
-    'master_public_key_hex': '906ae0b15ad4ae6bd11696a772d669a29a971c3c7de71156c621f0fe8826d1bf',
-    'license': 'BSL-1.1',
+    'master_public_key_hex': '4662e30d86c2f58416c5ac3f806c2a6af8186e1d96fdbbcad3189847cf888a01',
+    'license': 'Apache-2.0',
     'origin_url': 'https://github.com/hertz-ai/HARTOS',
     'guardian_principle': 'Every agent is a guardian angel for the human it serves',
     'revenue_split': '90/9/1',
@@ -56,7 +56,7 @@ ORIGIN_FINGERPRINT = hashlib.sha256(_CANONICAL_IDENTITY.encode('utf-8')).hexdige
 
 # Files that MUST contain HART OS markers (relative to code root)
 BRAND_MARKER_FILES = {
-    'security/master_key.py': '906ae0b15ad4ae6bd11696a772d669a29a971c3c7de71156c621f0fe8826d1bf',
+    'security/master_key.py': '4662e30d86c2f58416c5ac3f806c2a6af8186e1d96fdbbcad3189847cf888a01',
     'security/hive_guardrails.py': 'Every agent is a guardian angel for the human it serves',
     'security/origin_attestation.py': 'Hevolve Hive Agentic Runtime',
     'LICENSE': 'Hevolve.ai',

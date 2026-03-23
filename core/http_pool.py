@@ -76,7 +76,25 @@ def pooled_get(url: str, timeout=DEFAULT_TIMEOUT, **kwargs) -> requests.Response
 
 def pooled_post(url: str, timeout=DEFAULT_TIMEOUT, **kwargs) -> requests.Response:
     """Connection-pooled POST request."""
-    return get_http_session().post(url, timeout=timeout, **kwargs)
+    resp = get_http_session().post(url, timeout=timeout, **kwargs)
+    # Log LLM input/output for observability
+    if '/chat/completions' in url:
+        try:
+            import json as _json
+            body = kwargs.get('json', {})
+            msgs = body.get('messages', [])
+            prompt_preview = msgs[-1].get('content', '')[:200] if msgs else ''
+            rj = resp.json()
+            content = rj.get('choices', [{}])[0].get('message', {}).get('content', '')
+            reasoning = rj.get('choices', [{}])[0].get('message', {}).get('reasoning_content', '')
+            usage = rj.get('usage', {})
+            logger.info(
+                f"[LLM] IN: {prompt_preview}... | "
+                f"OUT({usage.get('completion_tokens',0)}tok): {content[:200]}... | "
+                f"THINK: {len(reasoning)}chars")
+        except Exception:
+            pass
+    return resp
 
 
 def pooled_put(url: str, timeout=DEFAULT_TIMEOUT, **kwargs) -> requests.Response:

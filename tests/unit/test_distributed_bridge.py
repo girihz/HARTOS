@@ -164,14 +164,19 @@ class TestDistributedDispatch:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {'response': 'local result'}
+        mock_resp.get_json.return_value = {'response': 'local result'}
 
         with patch('integrations.agent_engine.dispatch._get_distributed_coordinator',
                    return_value=None):
-            with patch('integrations.agent_engine.dispatch.requests.post',
+            with patch('integrations.agent_engine.dispatch.pooled_post',
                        return_value=mock_resp):
-                result = dispatch_goal(
-                    'Test prompt', 'user_1', 'goal_abc', 'marketing')
-                assert result == 'local result'
+                with patch.dict('sys.modules', {
+                    'routes.hartos_backend_adapter': None,
+                    'hartos_backend_adapter': None,
+                }):
+                    result = dispatch_goal(
+                        'Test prompt', 'user_1', 'goal_abc', 'marketing')
+                    assert result == 'local result'
 
     def test_dispatch_goal_falls_back_to_local_when_no_peers(
             self, mock_coordinator, mock_guardrails):
@@ -180,18 +185,23 @@ class TestDistributedDispatch:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {'response': 'local result'}
+        mock_resp.get_json.return_value = {'response': 'local result'}
 
         with patch('integrations.agent_engine.dispatch._get_distributed_coordinator',
                    return_value=mock_coordinator):
             with patch('integrations.agent_engine.dispatch._has_hive_peers',
                        return_value=False):
-                with patch('integrations.agent_engine.dispatch.requests.post',
+                with patch('integrations.agent_engine.dispatch.pooled_post',
                            return_value=mock_resp):
-                    result = dispatch_goal(
-                        'Test prompt', 'user_1', 'goal_abc', 'marketing')
-                    assert result == 'local result'
-                    # Coordinator should NOT have been called
-                    mock_coordinator.submit_goal.assert_not_called()
+                    with patch.dict('sys.modules', {
+                        'routes.hartos_backend_adapter': None,
+                        'hartos_backend_adapter': None,
+                    }):
+                        result = dispatch_goal(
+                            'Test prompt', 'user_1', 'goal_abc', 'marketing')
+                        assert result == 'local result'
+                        # Coordinator should NOT have been called
+                        mock_coordinator.submit_goal.assert_not_called()
 
     def test_dispatch_goal_falls_back_on_distributed_failure(
             self, mock_guardrails):
@@ -200,6 +210,7 @@ class TestDistributedDispatch:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {'response': 'local fallback'}
+        mock_resp.get_json.return_value = {'response': 'local fallback'}
 
         # Coordinator reachable + peers exist, but submit_goal fails
         failing_coord = MagicMock()
@@ -209,11 +220,15 @@ class TestDistributedDispatch:
                    return_value=failing_coord):
             with patch('integrations.agent_engine.dispatch._has_hive_peers',
                        return_value=True):
-                with patch('integrations.agent_engine.dispatch.requests.post',
+                with patch('integrations.agent_engine.dispatch.pooled_post',
                            return_value=mock_resp):
-                    result = dispatch_goal(
-                        'Test prompt', 'user_1', 'goal_abc', 'marketing')
-                    assert result == 'local fallback'
+                    with patch.dict('sys.modules', {
+                        'routes.hartos_backend_adapter': None,
+                        'hartos_backend_adapter': None,
+                    }):
+                        result = dispatch_goal(
+                            'Test prompt', 'user_1', 'goal_abc', 'marketing')
+                        assert result == 'local fallback'
 
     def test_distributed_goal_context_includes_source_node(
             self, mock_coordinator, mock_guardrails):

@@ -715,8 +715,8 @@ class TestClassifyDestructive:
             assert _classify_destructive('delete all files') is False
 
     def test_classify_fails_open(self):
-        """If classifier unavailable, action should be allowed (fail-open)."""
+        """If classifier unavailable, action is blocked (fail-closed for security)."""
         from integrations.agent_engine.shell_os_apis import _classify_destructive
         with patch('security.action_classifier.classify_action',
                    side_effect=ImportError('no module')):
-            assert _classify_destructive('anything') is True
+            assert _classify_destructive('anything') is False

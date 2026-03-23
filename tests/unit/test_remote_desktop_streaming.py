@@ -118,14 +118,14 @@ class TestSunshineBridge(unittest.TestCase):
 
     def test_api_get_without_requests(self):
         import integrations.remote_desktop.sunshine_bridge as sb_mod
-        orig = sb_mod._requests
-        sb_mod._requests = None
+        orig = sb_mod._http_pool
+        sb_mod._http_pool = None
         try:
             bridge = SunshineBridge(binary_path='sunshine')
             result = bridge._api_get('/api/config')
             self.assertIsNone(result)
         finally:
-            sb_mod._requests = orig
+            sb_mod._http_pool = orig
 
     def test_get_install_command(self):
         bridge = SunshineBridge(binary_path=None)
