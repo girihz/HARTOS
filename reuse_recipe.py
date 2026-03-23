@@ -1060,37 +1060,6 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
     # Attach ledger to Action instance
     user_tasks[user_prompt].set_ledger(ledger)
 
-    # RESUME: if the ledger has completed actions from a previous dispatch,
-    # advance current_action past them. Without this, every new dispatch
-    # (e.g. daemon re-dispatch for continuous goals) restarts from action 1,
-    # re-doing work that the ledger already recorded as completed.
-    # The ledger is persisted (Redis/JSON) and add_task() skips existing
-    # task_ids, so completed statuses survive across sessions.
-    try:
-        _total_actions = len(role_actions)
-        _resume_from = 1
-        for _aidx in range(1, _total_actions + 1):
-            _task_key = f"action_{_aidx}"
-            _ltask = ledger.tasks.get(_task_key)
-            if _ltask and hasattr(_ltask, 'status'):
-                _st = _ltask.status.value if hasattr(_ltask.status, 'value') else str(_ltask.status)
-                if _st in ('completed', 'verified'):
-                    _resume_from = _aidx + 1
-                else:
-                    break  # First non-completed → resume here
-            else:
-                break
-        if _resume_from > 1 and _resume_from <= _total_actions:
-            user_tasks[user_prompt].current_action = _resume_from
-            current_app.logger.info(
-                f"[RESUME] Advancing to action {_resume_from} "
-                f"({_resume_from - 1}/{_total_actions} already completed in ledger)")
-        elif _resume_from > _total_actions:
-            current_app.logger.info(
-                f"[RESUME] All {_total_actions} actions already completed in ledger")
-    except Exception as _resume_err:
-        current_app.logger.debug(f"Ledger resume scan: {_resume_err}")
-
     individual_recipe = []
     for i in range(1, (len(recipes[user_prompt]['actions']) + 1)):
         current_app.logger.info(f'checking for {os.path.join(PROMPTS_DIR, f"{prompt_id}_{role_number}_{i}.json")}')
