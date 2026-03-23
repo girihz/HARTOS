@@ -2735,7 +2735,7 @@ class CustomGPT(LLM):
                 thread_local_data.update_recognize_intents(intents["action"])
             except Exception as e:
                 app.logger.info(
-                    f"Exception occur while intent calcualtion and calling exception {e}")
+                    f"LangChain action parse failed (non-JSON response): {e}")
                 # thread_local_data.update_recognize_intents("Final Answer")
             # time.sleep(10)
 
@@ -2768,7 +2768,7 @@ class CustomGPT(LLM):
                 thread_local_data.update_recognize_intents(intents["action"])
             except Exception as e:
                 app.logger.info(
-                    f"Exception occur while intent calcualtion and calling exception {e}")
+                    f"LangChain action parse failed (non-JSON response): {e}")
                 # thread_local_data.update_recognize_intents("Final Answer")
                 # time.sleep(10)
 
@@ -4363,6 +4363,15 @@ def chat():
     channel_context = data.get('channel_context', None)
     if channel_context:
         thread_local_data.channel_context = channel_context
+
+    # USER PRIORITY: mark user activity so daemon dispatch yields the LLM
+    if not autonomous:
+        try:
+            from integrations.agent_engine.dispatch import mark_user_chat_activity
+            mark_user_chat_activity()
+        except ImportError:
+            pass
+
     app.logger.info(f"casual_conv type {casual_conv}")
 
     # Security: sanitize prompt_id to prevent path traversal
@@ -5231,7 +5240,7 @@ def get_public_prompts():
                         'image_url': data.get('image_url', ''),
                         'video_text': data.get('video_text', ''),
                         'has_recipe': os.path.exists(
-                            os.path.join(prompts_dir, f'{pid}_0_recipe.json')),
+                            os.path.join(PROMPTS_DIR, f'{pid}_0_recipe.json')),
                         'flow_count': len(data.get('flows', [])),
                         'source': 'local',
                     })
@@ -6681,7 +6690,7 @@ def _init_runtime_tools():
         from integrations.service_tools.runtime_manager import runtime_tool_manager
         runtime_tool_manager.load_state()
     except Exception as e:
-        logger.warning(f"Runtime tool init failed: {e}")
+        klogger.warning(f"Runtime tool init failed: {e}")
 
 
 def _validate_startup():

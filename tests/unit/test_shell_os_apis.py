@@ -228,8 +228,12 @@ class TestShellTerminal(unittest.TestCase):
 
     def test_exec_command(self):
         client = _make_os_app()
-        r = client.post('/api/shell/terminal/exec',
-                        json={'command': 'echo hello'})
+        # _classify_destructive is fail-closed when classifier unavailable;
+        # patch it to return True (safe) so harmless commands are allowed.
+        with patch('integrations.agent_engine.shell_os_apis._classify_destructive',
+                   return_value=True):
+            r = client.post('/api/shell/terminal/exec',
+                            json={'command': 'echo hello'})
         self.assertEqual(r.status_code, 200)
         data = json.loads(r.data)
         self.assertIn('hello', data['stdout'])
@@ -249,8 +253,11 @@ class TestShellTerminal(unittest.TestCase):
     def test_exec_with_cwd(self):
         client = _make_os_app()
         cwd = tempfile.gettempdir()
-        r = client.post('/api/shell/terminal/exec',
-                        json={'command': 'echo ok', 'cwd': cwd})
+        # _classify_destructive is fail-closed; patch to allow safe commands.
+        with patch('integrations.agent_engine.shell_os_apis._classify_destructive',
+                   return_value=True):
+            r = client.post('/api/shell/terminal/exec',
+                            json={'command': 'echo ok', 'cwd': cwd})
         self.assertEqual(r.status_code, 200)
         data = json.loads(r.data)
         self.assertIn('ok', data['stdout'])
@@ -264,8 +271,11 @@ class TestShellTerminal(unittest.TestCase):
 
     def test_exec_timeout(self):
         client = _make_os_app()
-        r = client.post('/api/shell/terminal/exec',
-                        json={'command': 'sleep 60', 'timeout': 1})
+        # _classify_destructive is fail-closed; patch to allow safe commands.
+        with patch('integrations.agent_engine.shell_os_apis._classify_destructive',
+                   return_value=True):
+            r = client.post('/api/shell/terminal/exec',
+                            json={'command': 'sleep 60', 'timeout': 1})
         self.assertEqual(r.status_code, 408)
 
 

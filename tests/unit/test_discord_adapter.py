@@ -135,7 +135,7 @@ class TestDiscordFlaskIntegration:
         assert integration.registry is not None
         assert len(integration.registry.list_channels()) == 0
 
-    @patch('integrations.channels.flask_integration.requests.post')
+    @patch('integrations.channels.flask_integration.pooled_post')
     def test_discord_message_routing(self, mock_post):
         """Test that Discord messages route to agent API."""
         from integrations.channels.flask_integration import FlaskChannelIntegration

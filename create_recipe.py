@@ -2,6 +2,59 @@
 import ast
 import autogen
 import os
+
+# Qwen3.5's Jinja chat template rejects system messages mid-conversation:
+#   "System message must be at the beginning"
+# Autogen's GroupChat sends system-role speaker selection prompts mid-conversation.
+# Patch the httpx transport to rewrite system→user before sending to llama-server.
+# This catches ALL LLM calls from autogen regardless of which method triggers them.
+try:
+    import httpx as _httpx
+    import json as _json
+    _orig_httpx_send = _httpx.Client.send
+
+    def _fix_system_role_send(self, request, **kwargs):
+        # Only intercept chat completions to local LLM
+        if b'/v1/chat/completions' in request.url.raw_path and request.content:
+            try:
+                body = _json.loads(request.content)
+                messages = body.get('messages', [])
+                changed = False
+                for i, msg in enumerate(messages):
+                    if i > 0 and msg.get('role') == 'system':
+                        msg['role'] = 'user'
+                        changed = True
+                if changed:
+                    request = _httpx.Request(
+                        method=request.method,
+                        url=request.url,
+                        headers=request.headers,
+                        content=_json.dumps(body).encode(),
+                    )
+            except Exception:
+                pass
+        resp = _orig_httpx_send(self, request, **kwargs)
+        # Log autogen LLM input/output
+        if b'/v1/chat/completions' in request.url.raw_path:
+            try:
+                body = _json.loads(request.content) if request.content else {}
+                msgs = body.get('messages', [])
+                prompt_preview = msgs[-1].get('content', '')[:200] if msgs else ''
+                rj = resp.json() if resp.status_code == 200 else {}
+                content = rj.get('choices', [{}])[0].get('message', {}).get('content', '')
+                reasoning = rj.get('choices', [{}])[0].get('message', {}).get('reasoning_content', '')
+                usage = rj.get('usage', {})
+                _logging.getLogger('hevolve_social').info(
+                    f"[LLM-autogen] IN: {prompt_preview}... | "
+                    f"OUT({usage.get('completion_tokens',0)}tok): {content[:200]}... | "
+                    f"THINK: {len(reasoning or '')}chars")
+            except Exception:
+                pass
+        return resp
+
+    _httpx.Client.send = _fix_system_role_send
+except ImportError:
+    pass
 from typing import Annotated, Optional, Dict, Tuple, List, Any
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -300,6 +353,27 @@ else:
         "base_url": get_local_llm_url(),
         "price": [0, 0]
     }]
+# Log LLM 500 errors with response body for debugging.
+# Wraps httpx.Client.send to capture error responses from llama-server.
+try:
+    import httpx as _httpx
+    _orig_httpx_send = _httpx.Client.send
+
+    def _logging_send(self, request, **kwargs):
+        response = _orig_httpx_send(self, request, **kwargs)
+        if response.status_code >= 400 and '/v1/chat/completions' in str(request.url):
+            try:
+                body = response.text[:500]
+            except Exception:
+                body = '<unreadable>'
+            logging.getLogger('create_recipe').error(
+                f"LLM HTTP {response.status_code} from {request.url}: {body}")
+        return response
+
+    _httpx.Client.send = _logging_send
+except ImportError:
+    pass
+
 # Per-request model config override (speculative execution, hive compute routing)
 # Canonical implementation lives in helper.py — thin wrapper passes local config_list.
 def get_llm_config():
@@ -1747,6 +1821,16 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
         Determines the next speaker in the group chat based on various conditions.
         Preserves ChatInstructor's appropriate agent selection logic.
         """
+        # Heartbeat: tell watchdog this thread is alive (recipe runs many rounds)
+        try:
+            from security.node_watchdog import get_watchdog
+            _wd = get_watchdog()
+            if _wd:
+                for _dn in ('agent_daemon', 'coding_daemon'):
+                    _wd.heartbeat(_dn)
+        except Exception:
+            pass
+
         user_prompt = f'{user_id}_{prompt_id}'
         current_action_id = user_tasks[user_prompt].current_action
 
@@ -1834,8 +1918,10 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             current_app.logger.error(f"Error in error detection logic: {e}")
 
         # Get metadata once for potential use later
+        # get_saved_metadata is a tool closure — access agent_data directly here
         try:
-            metadata = get_saved_metadata()
+            _ad = agent_data.get(prompt_id, {})
+            metadata = json.dumps(list(_ad.keys())) if _ad else "{}"
         except Exception as e:
             current_app.logger.error(f"Error getting metadata: {e}")
             metadata = "{}"
@@ -2013,8 +2099,8 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             return assistant
 
         if last_speaker.name == 'Executor' or last_speaker.name == 'Helper' or last_speaker.name == 'UserProxy' or last_speaker.name == 'UserProxy' or last_speaker.name == 'ChatInstructor':
-
-            group_chat.messages[-1]['content'] = f"{group_chat.messages[-1]['content']}\n Metadata/skeleton of all keys for retrieving data from memory:{metadata}"
+            if group_chat.messages:
+                group_chat.messages[-1]['content'] = f"{group_chat.messages[-1]['content']}\n Metadata/skeleton of all keys for retrieving data from memory:{metadata}"
             current_app.logger.info('Got last speaker as executor or helper or author or chat_instructor & reutrning next speaker as assistant')
             return assistant
         json_obj = None
@@ -2155,7 +2241,8 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
         'select_speaker_prompt_template': f"Read the above conversation, select the next person from [Assistant, Helper, Executor, ChatInstructor, StatusVerifier & User] & only return the role as agent. Return User only if the previous message demands it",
         'speaker_selection_method': state_transition,  # using an LLM to decide
         'allow_repeat_speaker': False,  # Prevent same agent speaking twice
-        'send_introductions': False
+        'send_introductions': False,
+        'role_for_select_speaker_messages': 'user',  # Qwen3.5 Jinja template rejects system messages mid-conversation
     }
 
     # Check if GroupChat supports select_speaker_transform_messages parameter
@@ -2170,17 +2257,31 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
     except Exception as e:
         current_app.logger.warning(f"Could not check AutoGen version compatibility: {e}")
 
-    # Debug: log agent types before GroupChat creation
-    current_app.logger.info(f"GroupChat agents ({len(all_agents)}): {[(a.name, type(a).__name__, isinstance(a, autogen.Agent)) for a in all_agents]}")
-    current_app.logger.info(f"GroupChat kwargs keys: {list(group_chat_kwargs.keys())}")
-
-    # Guard: filter out any non-Agent items that might have crept in
+    # Guard: filter out any non-Agent items that might have crept in via
+    # custom_agents or Agent Lightning wrapping
     valid_agents = [a for a in all_agents if isinstance(a, autogen.Agent)]
     if len(valid_agents) != len(all_agents):
-        current_app.logger.warning(f"Filtered {len(all_agents) - len(valid_agents)} non-Agent items from all_agents")
+        current_app.logger.warning(
+            f"Filtered {len(all_agents) - len(valid_agents)} non-Agent items: "
+            f"{[(type(a).__name__, getattr(a, 'name', '?')) for a in all_agents if not isinstance(a, autogen.Agent)]}")
         group_chat_kwargs['agents'] = valid_agents
+    current_app.logger.info(
+        f"GroupChat creating with {len(group_chat_kwargs['agents'])} agents: "
+        f"{[a.name for a in group_chat_kwargs['agents']]}")
 
-    group_chat = autogen.GroupChat(**group_chat_kwargs)
+    try:
+        group_chat = autogen.GroupChat(**group_chat_kwargs)
+    except ValueError as e:
+        if 'allowed_speaker_transitions_dict' in str(e):
+            # Retry without select_speaker_transform_messages — known compatibility issue
+            # with certain autogen versions when agents are wrapped or modified
+            current_app.logger.warning(
+                f"GroupChat speaker transitions failed, retrying without "
+                f"select_speaker_transform_messages: {e}")
+            group_chat_kwargs.pop('select_speaker_transform_messages', None)
+            group_chat = autogen.GroupChat(**group_chat_kwargs)
+        else:
+            raise
 
     manager = autogen.GroupChatManager(
         groupchat=group_chat,
@@ -2225,7 +2326,18 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
                     })
         except Exception:
             pass
-    group_chat.messages.append = _unified_ingest_hook
+    # Hook into message flow using a wrapper list instead of overriding append
+    # (plain list.append is read-only in Python — can't be replaced on instances)
+    class _HookedList(list):
+        def append(self, msg):
+            super().append(msg)
+            try:
+                _unified_ingest_hook(msg)
+            except Exception:
+                pass
+
+    _hooked = _HookedList(group_chat.messages)
+    group_chat.messages = _hooked
 
     # Auto-ingest group_chat messages into MemoryGraph (provenance tracking)
     if memory_graph is not None:
@@ -2800,7 +2912,8 @@ def create_time_agents(user_id, prompt_id,role,goal,actions):
         select_speaker_transform_messages=select_speaker_transforms,
         speaker_selection_method=state_transition1,  # using an LLM to decide
         allow_repeat_speaker=True,  # Prevent same agent speaking twice
-        send_introductions=False
+        send_introductions=False,
+        role_for_select_speaker_messages='user',
     )
 
     time_manager = autogen.GroupChatManager(

@@ -267,7 +267,7 @@ class TestFlaskIntegration:
         assert ("telegram", "123456") in integration._user_sessions
         assert integration._user_sessions[("telegram", "123456")] == (999, 111)
 
-    @patch('integrations.channels.flask_integration.requests.post')
+    @patch('integrations.channels.flask_integration.pooled_post')
     def test_message_handling(self, mock_post):
         """Test message handling routes to agent API."""
         from integrations.channels.flask_integration import FlaskChannelIntegration
@@ -296,7 +296,7 @@ class TestFlaskIntegration:
         assert payload["prompt"] == "Hello"
         assert payload["channel_context"]["channel"] == "telegram"
 
-    @patch('integrations.channels.flask_integration.requests.post')
+    @patch('integrations.channels.flask_integration.pooled_post')
     def test_message_handling_api_error(self, mock_post):
         """Test error handling when API fails."""
         from integrations.channels.flask_integration import FlaskChannelIntegration

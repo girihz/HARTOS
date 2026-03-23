@@ -218,7 +218,21 @@ def get_local_llm_url() -> str:
         if port:
             url = f'http://127.0.0.1:{port}/v1'
 
-    # 4. Fallback: port registry default
+    # 4. Read from Nunba's llama_config.json (wizard-configured port)
+    if not url:
+        try:
+            import json as _json
+            _cfg_path = os.path.join(os.path.expanduser('~'), '.nunba', 'llama_config.json')
+            if os.path.isfile(_cfg_path):
+                with open(_cfg_path) as _f:
+                    _cfg = _json.load(_f)
+                _port = _cfg.get('server_port')
+                if _port:
+                    url = f'http://127.0.0.1:{_port}/v1'
+        except Exception:
+            pass
+
+    # 5. Fallback: port registry default
     if not url:
         url = f'http://127.0.0.1:{get_port("llm")}/v1'
 

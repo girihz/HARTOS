@@ -28,6 +28,9 @@ class AgentLightningWrapper:
     - Reward tracking for reinforcement learning
     - Performance monitoring
     - Zero impact on agent behavior (transparent wrapper)
+
+    Registered as a virtual subclass of autogen.Agent so isinstance()
+    checks pass in GroupChat speaker selection and transition validation.
     """
 
     def __init__(
@@ -259,6 +262,16 @@ class AgentLightningWrapper:
 
     def __repr__(self) -> str:
         return f"AgentLightningWrapper({self.agent_id}, wrapped={self.agent.__class__.__name__})"
+
+
+# Register as virtual subclass of autogen.Agent so isinstance() checks pass
+# in GroupChat (speaker selection, transition validation, graph validity).
+# This is the ABC way to say "this class IS-A Agent" without inheriting.
+try:
+    import autogen
+    autogen.Agent.register(AgentLightningWrapper)
+except (ImportError, AttributeError):
+    pass  # autogen not installed or Agent doesn't support register()
 
 
 def instrument_autogen_agent(

@@ -94,7 +94,7 @@ deploy/kong/*.json
 # Vendored / one-off directories that should not be committed
 autogen-*/
 framework/
-media/
+/media/
 pycharm-plugin/
 hevolvebot-admin-dashboard/
 secrets_to_scrub.txt

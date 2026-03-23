@@ -8,6 +8,7 @@ except ImportError:
 import os
 import pytz
 from core.http_pool import pooled_get, pooled_post, pooled_request
+from core.port_registry import get_port as _get_llm_port
 from typing import Dict, Optional, Tuple, Any, List
 import uuid
 import time
@@ -919,7 +920,8 @@ def create_agents_for_role(user_id: str, prompt_id):
             select_speaker_transform_messages=select_speaker_transforms,
             speaker_selection_method=state_transition,  # using an LLM to decide
             allow_repeat_speaker=False,  # Prevent same agent speaking twice
-            send_introductions=False
+            send_introductions=False,
+            role_for_select_speaker_messages='user',  # Qwen3.5 rejects system mid-conversation
         )
 
         manager = autogen.GroupChatManager(
@@ -2876,7 +2878,8 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
         select_speaker_transform_messages=select_speaker_transforms,
         speaker_selection_method=state_transition,  # using an LLM to decide
         allow_repeat_speaker=False,  # Prevent same agent speaking twice
-        send_introductions=False
+        send_introductions=False,
+        role_for_select_speaker_messages='user',
     )
 
     manager = autogen.GroupChatManager(
@@ -2891,7 +2894,8 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
         select_speaker_transform_messages=select_speaker_transforms,
         speaker_selection_method=state_transition1,  # using an LLM to decide
         allow_repeat_speaker=False,  # Prevent same agent speaking twice
-        send_introductions=False
+        send_introductions=False,
+        role_for_select_speaker_messages='user',
     )
 
     manager_1 = autogen.GroupChatManager(
@@ -2906,7 +2910,8 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
         select_speaker_transform_messages=select_speaker_transforms,
         speaker_selection_method=state_transition2,  # using an LLM to decide
         allow_repeat_speaker=False,  # Prevent same agent speaking twice
-        send_introductions=False
+        send_introductions=False,
+        role_for_select_speaker_messages='user',
     )
 
     manager_2 = autogen.GroupChatManager(
@@ -2980,24 +2985,52 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
                         pass
             return _unified_ingest_hook
 
-        gc.messages.append = _make_hook(_original_append)
+        # Use wrapper list (plain list.append is read-only in Python)
+        class _HookedList(list):
+            def __init__(self, data, hook):
+                super().__init__(data)
+                self._hook = hook
+            def append(self, msg):
+                super().append(msg)
+                try:
+                    self._hook(msg)
+                except Exception:
+                    pass
+        gc.messages = _HookedList(gc.messages, _make_hook(_original_append))
 
     # Auto-ingest group_chat messages into MemoryGraph (provenance tracking)
     if memory_graph is not None:
         for gc in [group_chat, group_chat_1, group_chat_2]:
-            _prev_append = gc.messages.append
-            def _make_graph_hook(prev_append, graph=memory_graph, session=user_prompt):
+            def _make_graph_hook(graph=memory_graph, session=user_prompt):
                 def _graph_ingest_hook(msg):
-                    prev_append(msg)
                     try:
                         content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
                         speaker = msg.get("name", "Agent") if isinstance(msg, dict) else "Agent"
                         if content and len(content.strip()) > 5:
                             graph.register_conversation(speaker, content, session)
                     except Exception:
-                        pass  # Non-blocking
+                        pass
                 return _graph_ingest_hook
-            gc.messages.append = _make_graph_hook(_prev_append)
+            if isinstance(gc.messages, _HookedList):
+                # Already hooked — chain the graph hook into the existing one
+                _existing_hook = gc.messages._hook
+                _graph_h = _make_graph_hook()
+                def _chained(msg, _eh=_existing_hook, _gh=_graph_h):
+                    _eh(msg)
+                    _gh(msg)
+                gc.messages._hook = _chained
+            else:
+                class _GraphHookedList(list):
+                    def __init__(self, data, hook):
+                        super().__init__(data)
+                        self._hook = hook
+                    def append(self, msg):
+                        super().append(msg)
+                        try:
+                            self._hook(msg)
+                        except Exception:
+                            pass
+                gc.messages = _GraphHookedList(gc.messages, _make_graph_hook())
 
     return assistant, user_proxy, group_chat, manager, helper, multi_role_agent, time_agent, time_user, group_chat_1, manager_1, chat_instructor, visual_agent_group
 
