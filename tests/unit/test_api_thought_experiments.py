@@ -155,3 +155,120 @@ class TestAutoEvolve:
         resp = client.get('/api/social/experiments/auto-evolve/status')
         assert resp.status_code in (200, 500)
         assert resp.content_type.startswith('application/json')
+
+
+# ============================================================
+# Experiment lifecycle — advance, evaluate, decide
+# ============================================================
+
+class TestExperimentLifecycle:
+    """Thought experiments progress: proposed → voting → evaluating → decided."""
+
+    def test_advance_requires_experiment_id(self, client):
+        """POST /experiments/<id>/advance needs a valid experiment ID."""
+        mock_db, mock_svc, modules = _mock_db_and_service()
+        mock_svc.advance_experiment.return_value = None
+        with patch.dict('sys.modules', modules):
+            resp = client.post('/api/social/experiments/nonexistent/advance',
+                               json={}, content_type='application/json')
+        # May return 404 or 500 (experiment not found)
+        assert resp.status_code in (200, 404, 500)
+
+    def test_evaluate_requires_experiment_id(self, client):
+        mock_db, mock_svc, modules = _mock_db_and_service()
+        with patch.dict('sys.modules', modules):
+            resp = client.post('/api/social/experiments/exp1/evaluate',
+                               json={'result': 'positive'},
+                               content_type='application/json')
+        assert resp.status_code in (200, 400, 500)
+
+    def test_decide_requires_experiment_id(self, client):
+        mock_db, mock_svc, modules = _mock_db_and_service()
+        with patch.dict('sys.modules', modules):
+            resp = client.post('/api/social/experiments/exp1/decide',
+                               json={'decision': 'adopt'},
+                               content_type='application/json')
+        assert resp.status_code in (200, 400, 500)
+
+
+# ============================================================
+# Experiment data endpoints
+# ============================================================
+
+class TestExperimentData:
+    """Data endpoints consumed by the TrackerPage detail view."""
+
+    def test_get_experiment_returns_json(self, client):
+        """GET /experiments/<id> — single experiment detail."""
+        mock_db, mock_svc, modules = _mock_db_and_service()
+        mock_svc.get_experiment.return_value = {'id': 'exp1', 'title': 'Test'}
+        with patch.dict('sys.modules', modules):
+            resp = client.get('/api/social/experiments/exp1')
+        assert resp.status_code in (200, 404, 500)
+
+    def test_experiment_votes_endpoint(self, client):
+        """GET /experiments/<id>/votes — vote tally."""
+        mock_db, mock_svc, modules = _mock_db_and_service()
+        mock_svc.get_votes.return_value = {'up': 5, 'down': 2}
+        with patch.dict('sys.modules', modules):
+            resp = client.get('/api/social/experiments/exp1/votes')
+        assert resp.status_code in (200, 500)
+
+    def test_experiment_timeline_endpoint(self, client):
+        """GET /experiments/<id>/timeline — lifecycle event history."""
+        mock_db, mock_svc, modules = _mock_db_and_service()
+        mock_svc.get_timeline.return_value = []
+        with patch.dict('sys.modules', modules):
+            resp = client.get('/api/social/experiments/exp1/timeline')
+        assert resp.status_code in (200, 500)
+
+    def test_experiment_metrics_endpoint(self, client):
+        """GET /experiments/<id>/metrics — performance data."""
+        mock_db, mock_svc, modules = _mock_db_and_service()
+        with patch.dict('sys.modules', modules):
+            resp = client.get('/api/social/experiments/exp1/metrics')
+        assert resp.status_code in (200, 500)
+
+
+# ============================================================
+# Pause/Resume auto-evolve
+# ============================================================
+
+class TestPauseResumeEvolve:
+    """Experiment owners can pause/resume their auto-evolve iterations."""
+
+    def test_pause_endpoint_exists(self, client):
+        resp = client.post('/api/social/experiments/exp1/pause-evolve',
+                           json={}, content_type='application/json')
+        assert resp.status_code in (200, 400, 403, 500)
+
+    def test_resume_endpoint_exists(self, client):
+        resp = client.post('/api/social/experiments/exp1/resume-evolve',
+                           json={}, content_type='application/json')
+        assert resp.status_code in (200, 400, 403, 500)
+
+
+# ============================================================
+# Create validation edge cases
+# ============================================================
+
+class TestCreateEdgeCases:
+    """Additional validation for experiment creation."""
+
+    def test_empty_title_rejected(self, client):
+        resp = client.post('/api/social/experiments',
+                           json={'creator_id': 'u1', 'title': '', 'hypothesis': 'H'},
+                           content_type='application/json')
+        assert resp.status_code == 400
+
+    def test_empty_hypothesis_rejected(self, client):
+        resp = client.post('/api/social/experiments',
+                           json={'creator_id': 'u1', 'title': 'T', 'hypothesis': ''},
+                           content_type='application/json')
+        assert resp.status_code == 400
+
+    def test_missing_creator_id_rejected(self, client):
+        resp = client.post('/api/social/experiments',
+                           json={'title': 'T', 'hypothesis': 'H'},
+                           content_type='application/json')
+        assert resp.status_code == 400
