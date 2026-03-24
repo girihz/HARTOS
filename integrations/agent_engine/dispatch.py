@@ -18,6 +18,7 @@ Falls back to local /chat when Redis is unavailable.
 """
 import os
 import logging
+import threading
 import requests
 from typing import Dict, List, Optional
 
@@ -25,6 +26,67 @@ from core.http_pool import pooled_post
 from core.port_registry import get_port
 
 logger = logging.getLogger('hevolve_social')
+
+# ── LLM concurrency control ──────────────────────────────────────────────
+# Local llama-server degrades exponentially with concurrent requests
+# (KV cache thrashing). Allow only N concurrent local LLM calls.
+# This prevents the watchdog-restart cascade where restarted daemons
+# pile up concurrent requests that each take longer, triggering more
+# restarts.
+_LOCAL_LLM_MAX_CONCURRENT = int(os.environ.get('HEVOLVE_LOCAL_LLM_MAX_CONCURRENT', '1'))
+_local_llm_semaphore = threading.Semaphore(_LOCAL_LLM_MAX_CONCURRENT)
+
+
+# ── User-priority gate ──────────────────────────────────────────────────
+# When a human user is chatting, daemon dispatch must yield the LLM.
+# Tracked via timestamp of last user activity — daemon checks freshness.
+import time as _time
+_last_user_chat_at: float = 0.0
+_USER_CHAT_COOLDOWN = 10  # seconds after last user chat to yield LLM
+
+
+def mark_user_chat_activity():
+    """Call on every user (non-daemon) /chat request."""
+    global _last_user_chat_at
+    _last_user_chat_at = _time.time()
+
+
+def is_user_recently_active() -> bool:
+    """True if a human user chatted within the cooldown window."""
+    return (_time.time() - _last_user_chat_at) < _USER_CHAT_COOLDOWN
+
+
+def _notify_watchdog_llm_start():
+    """Tell the watchdog the current thread is blocked on a legitimate LLM call.
+
+    The watchdog will extend the heartbeat threshold for threads marked
+    'in_llm_call' instead of restarting them.
+    """
+    try:
+        from security.node_watchdog import get_watchdog
+        wd = get_watchdog()
+        if wd:
+            name = threading.current_thread().name
+            # Find which daemon this thread belongs to
+            for daemon_name in ('coding_daemon', 'agent_daemon'):
+                if daemon_name in name or wd.is_registered(daemon_name):
+                    wd.mark_in_llm_call(daemon_name)
+                    break
+    except Exception:
+        pass
+
+
+def _notify_watchdog_llm_end():
+    """Clear the LLM call marker and send a heartbeat."""
+    try:
+        from security.node_watchdog import get_watchdog
+        wd = get_watchdog()
+        if wd:
+            for daemon_name in ('coding_daemon', 'agent_daemon'):
+                wd.clear_llm_call(daemon_name)
+                wd.heartbeat(daemon_name)
+    except Exception:
+        pass
 
 
 def _get_distributed_coordinator():
@@ -268,30 +330,13 @@ def dispatch_goal(prompt: str, user_id: str, goal_id: str,
             # Fall through to local dispatch if distributed fails
             logger.info(f"Distributed fallback -> local dispatch for {goal_type} goal {goal_id}")
 
-    # In bundled/desktop mode, use the in-process adapter instead of HTTP
-    # to port 6777 (which doesn't run as a separate server in bundled mode).
-    if os.environ.get('NUNBA_BUNDLED'):
-        try:
-            try:
-                from routes.hartos_backend_adapter import chat as hevolve_chat
-            except ImportError:
-                from hartos_backend_adapter import chat as hevolve_chat
-            result = hevolve_chat(
-                text=prompt,
-                user_id=user_id,
-                agent_id=f"{goal_type}_{goal_id[:8]}",
-                create_agent=True,
-                casual_conv=False,
-            )
-            response = result.get('text') or result.get('response', '')
-            if response:
-                return response
-        except Exception as e:
-            logger.warning(f"Bundled dispatch failed for {goal_type} goal {goal_id}: {e}")
-        return None
-
-    base_url = os.environ.get('HEVOLVE_BASE_URL', f'http://localhost:{get_port("backend")}')
-    prompt_id = f"{goal_type}_{goal_id[:8]}"
+    # Generate a NUMERIC prompt_id (same format as hart_intelligence_entry._next_prompt_id)
+    # so it passes the isdigit() check in the adapter and /chat handler.
+    # Use goal_id hash to ensure the SAME goal always gets the SAME prompt_id
+    # across dispatches — this is what enables recipe reuse on subsequent ticks.
+    import hashlib
+    _goal_hash = int(hashlib.md5(goal_id.encode()).hexdigest()[:10], 16) % 100_000_000_000
+    prompt_id = str(max(1, _goal_hash))
 
     body = {
         'user_id': user_id,
@@ -307,14 +352,63 @@ def dispatch_goal(prompt: str, user_id: str, goal_id: str,
     if _dispatch_model_tier:
         body['model_tier'] = _dispatch_model_tier.value
 
+    # 3-tier dispatch (same as hartos_backend_adapter.py):
+    #   Tier 1: Direct in-process import (no ports, no HTTP)
+    #   Tier 2: HTTP proxy to backend port
+    #   Tier 3: llama.cpp fallback (direct LLM, no agent pipeline)
+    resp = None
+
+    # Tier 1: Direct in-process import of hart_intelligence
+    # Guarded by semaphore to prevent concurrent request pile-up on
+    # local llama-server (causes exponential slowdown + watchdog restarts).
     try:
-        resp = pooled_post(
-            f'{base_url}/chat',
-            json=body,
-            timeout=120,
-        )
+        try:
+            from routes.hartos_backend_adapter import chat as hevolve_chat
+        except ImportError:
+            from hartos_backend_adapter import chat as hevolve_chat
+
+        # USER PRIORITY: if user chatted recently, skip this tick — let user have the LLM
+        if is_user_recently_active():
+            logger.info(f"User active ({_USER_CHAT_COOLDOWN}s cooldown), deferring dispatch for goal {goal_id}")
+            return None
+
+        # Try to acquire semaphore (non-blocking check first)
+        if not _local_llm_semaphore.acquire(timeout=5):
+            logger.info(f"LLM busy ({_LOCAL_LLM_MAX_CONCURRENT} in flight), "
+                        f"skipping dispatch for goal {goal_id}")
+            return None
+
+        # Signal to watchdog that this thread is in a legitimate LLM call
+        _notify_watchdog_llm_start()
+        try:
+            # Use a daemon-specific request_id so thinking traces from daemon
+            # dispatch are isolated from user chat traces. Without this, daemon
+            # traces leak into user responses via drain_thinking_traces().
+            _daemon_request_id = f'daemon_{goal_id}'
+            result = hevolve_chat(
+                text=prompt, user_id=user_id,
+                agent_id=prompt_id, create_agent=True, casual_conv=False,
+                autonomous=True, request_id=_daemon_request_id,
+            )
+        finally:
+            _local_llm_semaphore.release()
+            _notify_watchdog_llm_end()
+
+        response = result.get('text') or result.get('response', '')
+        if response:
+            return response
+    except ImportError:
+        pass  # Nunba adapter not available — fall through to Tier 2
+    except Exception as e:
+        logger.warning(f"Tier-1 dispatch failed for {goal_type} goal {goal_id}: {e}")
+
+    # Tier 2: HTTP proxy to HARTOS backend port
+    base_url = os.environ.get('HEVOLVE_BASE_URL', f'http://localhost:{get_port("backend")}')
+    resp = pooled_post(f'{base_url}/chat', json=body, timeout=120)
+
+    try:
         if resp.status_code == 200:
-            result = resp.json()
+            result = resp.get_json() if hasattr(resp, 'get_json') else resp.json()
             response = result.get('response', '')
 
             # GUARDRAIL: post-response check (fail-closed)

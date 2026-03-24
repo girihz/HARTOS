@@ -125,7 +125,9 @@ def _auto_sync_to_ledger(user_prompt: str, action_id: int, state: 'ActionState')
                 task.resume(reason=f"Resumed via ActionState.{state.value}")
                 task.blocked_reason = None  # Clear blocked reason on resume
                 ledger.save()
-            else:
+            elif task.status != ledger_status:
+                # Skip no-op transitions (e.g. IN_PROGRESS → IN_PROGRESS when
+                # multiple ActionStates map to the same LedgerTaskStatus)
                 ledger.update_task_status(task_id, ledger_status, reason=f"ActionState: {state.value}")
 
             # === BLOCKED REASON: set specific reason based on ActionState source ===
@@ -537,13 +539,15 @@ def lifecycle_hook_track_action_assignment(user_prompt: str, user_tasks, group_c
         set_action_state(user_prompt, user_tasks, ActionState.ASSIGNED)
         return True
 
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     current_state = get_action_state(user_prompt, current_action_id)
 
@@ -576,13 +580,15 @@ def lifecycle_hook_track_status_verification_request(user_prompt: str, user_task
                                        "direct status verification request")
         return True
 
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     # When @StatusVerifier is mentioned, move to STATUS_VERIFICATION_REQUESTED
     if (group_chat and group_chat.messages and
@@ -600,13 +606,15 @@ def lifecycle_hook_process_verifier_response(user_prompt: str, json_obj: dict, u
     if not json_obj or 'status' not in json_obj:
         return {'action': 'allow', 'message': None}
 
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get') and not hasattr(user_tasks, 'current_action'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return {'action': 'allow', 'message': None}
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return {'action': 'allow', 'message': None}
 
     status = json_obj['status'].lower()
     current_state = get_action_state(user_prompt, current_action_id)
@@ -660,13 +668,15 @@ def lifecycle_hook_process_verifier_response(user_prompt: str, json_obj: dict, u
 
 def lifecycle_hook_track_fallback_request(user_prompt: str, user_tasks, group_chat) -> bool:
     """7. Track when fallback is requested to user"""
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     # When fallback is requested, move to FALLBACK_REQUESTED
     if (group_chat.messages and
@@ -682,13 +692,15 @@ def lifecycle_hook_track_fallback_request(user_prompt: str, user_tasks, group_ch
 
 def lifecycle_hook_track_user_fallback(user_prompt: str, user_tasks, group_chat) -> bool:
     """8. Track when fallback is received from user"""
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     current_state = get_action_state(user_prompt, current_action_id)
 
@@ -706,13 +718,15 @@ def lifecycle_hook_track_user_fallback(user_prompt: str, user_tasks, group_chat)
 
 def lifecycle_hook_track_recipe_request(user_prompt: str, user_tasks, group_chat) -> bool:
     """9. Track when recipe creation is requested"""
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     # When recipe creation is requested
     if (group_chat.messages and
@@ -731,13 +745,15 @@ def lifecycle_hook_track_recipe_completion(user_prompt: str, json_obj: dict, use
     if not json_obj or 'status' not in json_obj or json_obj.get('status', '').lower() != 'done':
         return {'action': 'allow', 'message': None}
 
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get') and not hasattr(user_tasks, 'current_action'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return {'action': 'allow', 'message': None}
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return {'action': 'allow', 'message': None}
 
     current_state = get_action_state(user_prompt, current_action_id)
 
@@ -754,13 +770,15 @@ def lifecycle_hook_track_recipe_completion(user_prompt: str, json_obj: dict, use
 
 def lifecycle_hook_track_termination(user_prompt: str, user_tasks, group_chat) -> bool:
     """11. Track when action is terminated and passed to chat instructor"""
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return False
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return False
 
     # When TERMINATE is issued
     if (group_chat.messages and
@@ -775,13 +793,15 @@ def lifecycle_hook_track_termination(user_prompt: str, user_tasks, group_chat) -
 
 def lifecycle_hook_can_increment_action(user_prompt: str, user_tasks) -> dict:
     """12. Check if we can increment to next action"""
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get') and not hasattr(user_tasks, 'current_action'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return {'action': 'allow', 'message': None}
         current_action_id = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         current_action_id = user_tasks.current_action
+    else:
+        return {'action': 'allow', 'message': None}
 
     current_state = get_action_state(user_prompt, current_action_id)
 
@@ -797,15 +817,17 @@ def lifecycle_hook_can_increment_action(user_prompt: str, user_tasks) -> dict:
 
 def lifecycle_hook_check_all_actions_terminated(user_prompt: str, user_tasks) -> dict:
     """13. Check if all actions in array are exhausted and can create flow recipe"""
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get') and not hasattr(user_tasks, 'current_action'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return {'action': 'allow', 'message': None}
         total_actions = len(current_tasks.actions)
         current_action = current_tasks.current_action
-    else:
+    elif hasattr(user_tasks, 'current_action'):
         total_actions = len(user_tasks.actions)
         current_action = user_tasks.current_action
+    else:
+        return {'action': 'allow', 'message': None}
 
     # Check if all actions completed
     if current_action > total_actions:
@@ -834,13 +856,15 @@ def lifecycle_hook_validate_final_agent_creation(user_prompt: str, user_tasks, p
     """16. Final validation before 'Agent created successfully'"""
 
     # Check 1: All actions reached TERMINATED
-    if isinstance(user_tasks, dict):
+    if hasattr(user_tasks, 'get') and not hasattr(user_tasks, 'current_action'):
         current_tasks = user_tasks.get(user_prompt)
         if not current_tasks:
             return {'action': 'block', 'message': 'No tasks found'}
         total_actions = len(current_tasks.actions)
-    else:
+    elif hasattr(user_tasks, 'actions'):
         total_actions = len(user_tasks.actions)
+    else:
+        return {'action': 'block', 'message': 'No tasks found'}
 
     for action_id in range(1, total_actions + 1):
         state = get_action_state(user_prompt, action_id)

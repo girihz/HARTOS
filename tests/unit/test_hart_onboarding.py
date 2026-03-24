@@ -96,11 +96,11 @@ class TestHARTTag(unittest.TestCase):
 
     def test_build_tag(self):
         tag = build_hart_tag('neon', 'owl', 'lumira')
-        self.assertEqual(tag, '@neon.owl.lumira')
+        self.assertEqual(tag, '@owl.lumira.neon')
 
     def test_build_tag_all_lower(self):
         tag = build_hart_tag('iron', 'wolf', 'synthar')
-        self.assertEqual(tag, '@iron.wolf.synthar')
+        self.assertEqual(tag, '@wolf.synthar.iron')
 
     def test_tag_format_consistent(self):
         tag = build_hart_tag('ember', 'dolphin', 'auren')
@@ -461,14 +461,19 @@ class TestIdentityUnification(unittest.TestCase):
         self.assertIn(e, ['stone', 'wind'])
 
     @patch.dict(sys.modules, {'hart_intelligence_entry': _mock_lgapi})
+    @patch.dict('os.environ', {
+        'HART_CENTRAL_ELEMENT': 'stone',
+        'HART_REGIONAL_SPIRIT': 'hawk',
+    })
     def test_full_generate_has_tag(self):
         result = generate_hart_name('en', 'games_strategy', 'building_something')
         tag = result['hart_tag']
         self.assertTrue(tag.startswith('@'))
         parts = tag[1:].split('.')
         self.assertEqual(len(parts), 3)
-        self.assertEqual(parts[0], result['element'])
-        self.assertEqual(parts[1], result['spirit'])
+        # Tag format: @central.regional.name
+        self.assertEqual(parts[0], 'stone')
+        self.assertEqual(parts[1], 'hawk')
         self.assertEqual(parts[2], result['name'])
 
 

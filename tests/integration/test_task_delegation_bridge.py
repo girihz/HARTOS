@@ -9,13 +9,14 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
+import uuid
+import json
 import pytest
 pytest.importorskip('agent_ledger', reason='agent_ledger not installed')
 
 from integrations.internal_comm import skill_registry, a2a_context, register_agent_with_skills
 from agent_ledger import SmartLedger, TaskType, TaskStatus
 from integrations.internal_comm.task_delegation_bridge import TaskDelegationBridge
-import json
 
 
 def test_delegation_with_task_blocking():
@@ -37,7 +38,6 @@ def test_delegation_with_task_blocking():
     bridge = TaskDelegationBridge(a2a_context, ledger)
 
     # Create parent task
-    import uuid
     from agent_ledger import Task
     parent_task_id = f"task_{uuid.uuid4().hex[:12]}"
     parent_task = Task(

@@ -327,6 +327,7 @@ class TestGossipBeaconVersion:
             gp.version = '1.5.0'
             gp.started_at = None
             gp.tier = 'flat'
+            gp._hart_tag = ''  # set by __init__ via _ensure_hart_identity()
 
         mock_orch = MagicMock()
         mock_orch.get_status.return_value = {
@@ -353,6 +354,7 @@ class TestGossipBeaconVersion:
             gp.version = '1.5.0'
             gp.started_at = None
             gp.tier = 'flat'
+            gp._hart_tag = ''  # set by __init__ via _ensure_hart_identity()
 
         mock_orch = MagicMock()
         mock_orch.get_status.return_value = {'stage': 'idle', 'version': ''}

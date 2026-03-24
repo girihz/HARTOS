@@ -277,10 +277,10 @@ class TestEnforcementModes:
         with patch.dict(os.environ, {'HEVOLVE_ENFORCEMENT_MODE': 'soft'}):
             assert get_enforcement_mode() == 'soft'
 
-    def test_enforcement_invalid_defaults_warn(self):
+    def test_enforcement_invalid_defaults_hard(self):
         from security.master_key import get_enforcement_mode
         with patch.dict(os.environ, {'HEVOLVE_ENFORCEMENT_MODE': 'invalid'}):
-            assert get_enforcement_mode() == 'warn'
+            assert get_enforcement_mode() == 'hard'
 
 
 class TestBootVerification:

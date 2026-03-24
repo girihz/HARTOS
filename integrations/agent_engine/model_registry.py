@@ -235,6 +235,9 @@ def _register_defaults():
     """Register default model backends. Only available if API keys are set."""
 
     # 1. Local Qwen3.5-4B VL — default local model (256K context, vision+text, llama.cpp b8148+)
+    from core.port_registry import get_local_llm_url
+    _local_url = get_local_llm_url()
+
     model_registry.register(ModelBackend(
         model_id='qwen3.5-4b-local',
         display_name='Qwen3.5 4B VL (Local)',
@@ -242,7 +245,7 @@ def _register_defaults():
         config_list_entry={
             'model': 'Qwen3.5-4B',
             'api_key': 'dummy',
-            'base_url': f'http://localhost:{os.environ.get("LLAMA_CPP_PORT", "8080")}/v1',
+            'base_url': _local_url,
             'price': [0, 0],
         },
         avg_latency_ms=700.0,
@@ -261,7 +264,7 @@ def _register_defaults():
         config_list_entry={
             'model': 'Qwen3-VL-4B-Instruct',
             'api_key': 'dummy',
-            'base_url': f'http://localhost:{os.environ.get("LLAMA_CPP_PORT", "8080")}/v1',
+            'base_url': _local_url,
             'price': [0, 0],
         },
         avg_latency_ms=800.0,

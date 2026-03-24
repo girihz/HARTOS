@@ -282,8 +282,9 @@ class QwenEncoderAdapter(BenchmarkAdapter):
         try:
             from hevolveai.embodied_ai.models.qwen_benchmark import (
                 benchmark_llamacpp)
-            result = benchmark_llamacpp(
-                server_url=api_url or f'http://localhost:{os.environ.get("LLAMA_CPP_PORT", "8080")}')
+            from core.port_registry import get_local_llm_url
+            _llm_url = api_url or get_local_llm_url().replace('/v1', '')
+            result = benchmark_llamacpp(server_url=_llm_url)
             return {'metrics': {
                 'tokens_per_second': {
                     'value': result.get('tokens_per_second', 0),

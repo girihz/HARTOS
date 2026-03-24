@@ -2,12 +2,23 @@
 import ast
 import autogen
 import os
+
+# Qwen3.5's Jinja chat template rejects system messages mid-conversation:
+#   "System message must be at the beginning"
+# Autogen's GroupChat sends system-role speaker selection prompts mid-conversation.
+# Patch the httpx transport to rewrite system→user before sending to llama-server.
+# This catches ALL LLM calls from autogen regardless of which method triggers them.
+# No httpx monkey-patch needed.
+# Qwen3.5 mid-conversation system messages are handled by autogen's
+# role_for_select_speaker_messages='user' parameter (set in GroupChat kwargs).
+# The previous monkey-patch that rewrote system→user caused Connection errors
+# from double-wrapping httpx.Client.send. Removed entirely.
 from typing import Annotated, Optional, Dict, Tuple, List, Any
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from core.http_pool import pooled_get, pooled_post, pooled_patch, pooled_request
-from core.port_registry import get_port as _get_llm_port
+from core.port_registry import get_port as _get_llm_port, get_local_llm_url
 from autobahn.asyncio.component import Component, run
 import uuid
 import asyncio
@@ -273,7 +284,7 @@ scheduler.start()
 user_agents: Dict[str, Tuple[Any, Any, Any, Any, Any, Any, Any]] = TTLCache(ttl_seconds=7200, max_size=500, name='create_user_agents')
 time_agents = TTLCache(ttl_seconds=7200, max_size=500, name='create_time_agents')
 # Mode-aware config_list: cloud/regional use external LLM, flat uses local
-# (user's wizard-configured endpoint via HEVOLVE_LOCAL_LLM_URL or LLAMA_CPP_PORT)
+# (user's wizard-configured endpoint via HEVOLVE_LOCAL_LLM_URL)
 _node_tier = os.environ.get('HEVOLVE_NODE_TIER', 'flat')
 _active_cloud = os.environ.get('HEVOLVE_ACTIVE_CLOUD_PROVIDER', '')
 if _node_tier in ('regional', 'central') and os.environ.get('HEVOLVE_LLM_ENDPOINT_URL'):
@@ -294,15 +305,13 @@ elif _active_cloud and os.environ.get('HEVOLVE_LLM_API_KEY'):
         _cloud_cfg["base_url"] = os.environ['HEVOLVE_LLM_ENDPOINT_URL']
     config_list = [_cloud_cfg]
 else:
-    # Dynamic: reads from user's LLM Setup Wizard config (set by Nunba app.py)
-    _llama_port = os.environ.get('LLAMA_CPP_PORT', str(_get_llm_port('llm')))
-    _local_llm_url = os.environ.get('HEVOLVE_LOCAL_LLM_URL', f'http://localhost:{_llama_port}/v1')
     config_list = [{
         "model": os.environ.get('HEVOLVE_LOCAL_LLM_MODEL', 'local'),
         "api_key": 'dummy',
-        "base_url": _local_llm_url,
-        "price": [0, 0]
+        "base_url": get_local_llm_url(),
+        "price": [0, 0],
     }]
+
 # Per-request model config override (speculative execution, hive compute routing)
 # Canonical implementation lives in helper.py — thin wrapper passes local config_list.
 def get_llm_config():
@@ -901,6 +910,13 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
     core_tools = build_core_tool_closures(_tool_ctx)
     register_core_tools(core_tools, helper, assistant)
     register_memory_graph_tools(memory_graph, helper, assistant, user_id, user_prompt)
+
+    # Channel tools: send to channels, register channels, list status, get context
+    try:
+        from integrations.channels.agent_tools import register_channel_tools
+        register_channel_tools(helper, assistant, _tool_ctx)
+    except Exception as e:
+        tool_logger.debug(f"Channel tools registration skipped: {e}")
 
 
     # Unified media generation tools (already DRY)
@@ -1743,8 +1759,28 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
         Determines the next speaker in the group chat based on various conditions.
         Preserves ChatInstructor's appropriate agent selection logic.
         """
+        # Heartbeat: tell watchdog this thread is alive (recipe runs many rounds)
+        try:
+            from security.node_watchdog import get_watchdog
+            _wd = get_watchdog()
+            if _wd:
+                for _dn in ('agent_daemon', 'coding_daemon'):
+                    _wd.heartbeat(_dn)
+        except Exception:
+            pass
+
         user_prompt = f'{user_id}_{prompt_id}'
         current_action_id = user_tasks[user_prompt].current_action
+
+        # Preempt: if user started chatting, abort this daemon recipe
+        # so the LLM is free for the user's request immediately.
+        try:
+            from integrations.agent_engine.dispatch import is_user_recently_active
+            if is_user_recently_active():
+                current_app.logger.info("[PREEMPT] User active — aborting daemon recipe to free LLM")
+                raise KeyboardInterrupt("User preemption")
+        except ImportError:
+            pass
 
         current_app.logger.info(
             f'Inside state_transition with action id {user_tasks.get(user_prompt, Action([])).current_action}')
@@ -1757,6 +1793,9 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
                 f"STATE_TRANSITION - Last message role: {groupchat.messages[last_idx].get('role')}, name: {groupchat.messages[last_idx].get('name')}")
 
         messages = groupchat.messages
+        if not messages:
+            current_app.logger.warning("state_transition called with empty messages list")
+            return assistant
         new_role = 'user'
         if messages[-1]['name'] != 'UserProxy':
             new_role = 'AI'
@@ -1830,8 +1869,10 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             current_app.logger.error(f"Error in error detection logic: {e}")
 
         # Get metadata once for potential use later
+        # get_saved_metadata is a tool closure — access agent_data directly here
         try:
-            metadata = get_saved_metadata()
+            _ad = agent_data.get(prompt_id, {})
+            metadata = json.dumps(list(_ad.keys())) if _ad else "{}"
         except Exception as e:
             current_app.logger.error(f"Error getting metadata: {e}")
             metadata = "{}"
@@ -2009,8 +2050,8 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             return assistant
 
         if last_speaker.name == 'Executor' or last_speaker.name == 'Helper' or last_speaker.name == 'UserProxy' or last_speaker.name == 'UserProxy' or last_speaker.name == 'ChatInstructor':
-
-            group_chat.messages[-1]['content'] = f"{group_chat.messages[-1]['content']}\n Metadata/skeleton of all keys for retrieving data from memory:{metadata}"
+            if group_chat.messages:
+                group_chat.messages[-1]['content'] = f"{group_chat.messages[-1]['content']}\n Metadata/skeleton of all keys for retrieving data from memory:{metadata}"
             current_app.logger.info('Got last speaker as executor or helper or author or chat_instructor & reutrning next speaker as assistant')
             return assistant
         json_obj = None
@@ -2137,14 +2178,22 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
     )
 
     # Try to use select_speaker_transform_messages if supported (added in AutoGen 0.2.36+)
+    # Seed autogen with recent messages from shared LangChain/autogen buffer
+    try:
+        from integrations.channels.memory.shared_history import seed_autogen_from_shared_history
+        _seed_msgs = seed_autogen_from_shared_history(user_id, max_messages=8)
+    except Exception:
+        _seed_msgs = []
+
     group_chat_kwargs = {
         'agents': all_agents,
-        'messages': [],
+        'messages': _seed_msgs,
         'max_round': 30,
         'select_speaker_prompt_template': f"Read the above conversation, select the next person from [Assistant, Helper, Executor, ChatInstructor, StatusVerifier & User] & only return the role as agent. Return User only if the previous message demands it",
         'speaker_selection_method': state_transition,  # using an LLM to decide
         'allow_repeat_speaker': False,  # Prevent same agent speaking twice
-        'send_introductions': False
+        'send_introductions': False,
+        'role_for_select_speaker_messages': 'user',  # Qwen3.5 Jinja template rejects system messages mid-conversation
     }
 
     # Check if GroupChat supports select_speaker_transform_messages parameter
@@ -2159,31 +2208,87 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
     except Exception as e:
         current_app.logger.warning(f"Could not check AutoGen version compatibility: {e}")
 
-    group_chat = autogen.GroupChat(**group_chat_kwargs)
+    # Guard: filter out any non-Agent items that might have crept in via
+    # custom_agents or Agent Lightning wrapping
+    valid_agents = [a for a in all_agents if isinstance(a, autogen.Agent)]
+    if len(valid_agents) != len(all_agents):
+        current_app.logger.warning(
+            f"Filtered {len(all_agents) - len(valid_agents)} non-Agent items: "
+            f"{[(type(a).__name__, getattr(a, 'name', '?')) for a in all_agents if not isinstance(a, autogen.Agent)]}")
+        group_chat_kwargs['agents'] = valid_agents
+    current_app.logger.info(
+        f"GroupChat creating with {len(group_chat_kwargs['agents'])} agents: "
+        f"{[a.name for a in group_chat_kwargs['agents']]}")
+
+    try:
+        group_chat = autogen.GroupChat(**group_chat_kwargs)
+    except ValueError as e:
+        if 'allowed_speaker_transitions_dict' in str(e):
+            # Retry without select_speaker_transform_messages — known compatibility issue
+            # with certain autogen versions when agents are wrapped or modified
+            current_app.logger.warning(
+                f"GroupChat speaker transitions failed, retrying without "
+                f"select_speaker_transform_messages: {e}")
+            group_chat_kwargs.pop('select_speaker_transform_messages', None)
+            group_chat = autogen.GroupChat(**group_chat_kwargs)
+        else:
+            raise
 
     manager = autogen.GroupChatManager(
         groupchat=group_chat,
         llm_config={"config_list": config_list,"cache_seed": None,"max_tokens": 1500}
     )
 
-    # Auto-ingest group_chat messages into SimpleMem
-    if simplemem_store is not None:
-        _original_append = group_chat.messages.append
-        def _simplemem_ingest_hook(msg):
-            _original_append(msg)
+    # Auto-ingest group_chat messages into SimpleMem + shared LangChain buffer
+    _original_append = group_chat.messages.append
+    def _unified_ingest_hook(msg):
+        _original_append(msg)
+        if isinstance(msg, dict) and msg.get('_from_shared'):
+            return  # seeded message, already in buffer
+        content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
+        if not content or len(content.strip()) <= 5 or content == 'TERMINATE':
+            return
+        speaker = msg.get("name", "Agent") if isinstance(msg, dict) else "Agent"
+        # SimpleMem ingest
+        if simplemem_store is not None:
             try:
-                content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
-                speaker = msg.get("name", "Agent") if isinstance(msg, dict) else "Agent"
-                if content and len(content.strip()) > 5:
-                    loop = get_or_create_event_loop()
-                    loop.run_until_complete(simplemem_store.add(content, {
-                        "sender_name": speaker,
-                        "user_id": user_id,
-                        "prompt_id": prompt_id,
-                    }))
+                loop = get_or_create_event_loop()
+                loop.run_until_complete(simplemem_store.add(content, {
+                    "sender_name": speaker,
+                    "user_id": user_id,
+                    "prompt_id": prompt_id,
+                }))
             except Exception:
-                pass  # Non-blocking
-        group_chat.messages.append = _simplemem_ingest_hook
+                pass
+        # Shared PersistentChatHistory write-back (dedup-aware)
+        try:
+            from integrations.channels.memory.shared_history import _get_persistent_history
+            hist = _get_persistent_history(user_id)
+            if hist:
+                from langchain_core.messages import HumanMessage, AIMessage
+                role = msg.get("role", "assistant") if isinstance(msg, dict) else "assistant"
+                lc_msg = HumanMessage(content=content) if role == "user" else AIMessage(content=content)
+                last_msgs = hist.messages[-3:] if hist.messages else []
+                if not any(m.content == content for m in last_msgs):
+                    from datetime import datetime
+                    hist.add_message(lc_msg, metadata={
+                        'timestamp': datetime.now().isoformat(),
+                        'source': 'autogen',
+                    })
+        except Exception:
+            pass
+    # Hook into message flow using a wrapper list instead of overriding append
+    # (plain list.append is read-only in Python — can't be replaced on instances)
+    class _HookedList(list):
+        def append(self, msg):
+            super().append(msg)
+            try:
+                _unified_ingest_hook(msg)
+            except Exception:
+                pass
+
+    _hooked = _HookedList(group_chat.messages)
+    group_chat.messages = _hooked
 
     # Auto-ingest group_chat messages into MemoryGraph (provenance tracking)
     if memory_graph is not None:
@@ -2640,6 +2745,12 @@ def create_time_agents(user_id, prompt_id,role,goal,actions):
     core_tools_time = build_core_tool_closures(_tool_ctx_time)
     register_core_tools(core_tools_time, helper1, time_agent)
 
+    # Channel tools for time_agent too
+    try:
+        from integrations.channels.agent_tools import register_channel_tools
+        register_channel_tools(helper1, time_agent, _tool_ctx_time)
+    except Exception:
+        pass
 
     context_handling = transform_messages.TransformMessages(
         transforms=[
@@ -2674,6 +2785,9 @@ def create_time_agents(user_id, prompt_id,role,goal,actions):
     def state_transition1(last_speaker, groupchat):
         current_app.logger.info('INSIDE TIMER STATE TRANSITION')
         messages = groupchat.messages
+        if not messages:
+            current_app.logger.warning("state_transition1 called with empty messages list")
+            return time_agent
         # visual_context = helper_fun.get_visual_context(user_id)
         # if visual_context:
         #     groupchat.messages.insert(-1,{'content':visual_context,'role':'user','name':'helper'})
@@ -2747,12 +2861,13 @@ def create_time_agents(user_id, prompt_id,role,goal,actions):
     )
     time_group_chat = autogen.GroupChat(
         agents=[time_agent, helper1, time_user,multi_role_agent1,executor1,chat_instructor1,verify1],
-        messages=[],
+        messages=_seed_msgs,  # shared history seed (same as main group_chat)
         max_round=10,
         select_speaker_transform_messages=select_speaker_transforms,
         speaker_selection_method=state_transition1,  # using an LLM to decide
         allow_repeat_speaker=True,  # Prevent same agent speaking twice
-        send_introductions=False
+        send_introductions=False,
+        role_for_select_speaker_messages='user',
     )
 
     time_manager = autogen.GroupChatManager(
@@ -3256,7 +3371,7 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
             current_app.logger.info('inside while')
             current_state = get_action_state(user_prompt, current_action_id)
 
-            if group_chat.messages[-1]['name'] == 'ChatInstructor' and group_chat.messages[-1]['content'] == 'TERMINATE':
+            if group_chat.messages and group_chat.messages[-1]['name'] == 'ChatInstructor' and group_chat.messages[-1]['content'] == 'TERMINATE':
                 current_app.logger.info(f"group_chat.messages[-2]['content'] {group_chat.messages[-2]['content'][:10]}..")
                 json_obj = retrieve_json(group_chat.messages[-2]["content"])
 
@@ -3382,7 +3497,7 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
                 else:
                     current_app.logger.warning(f'it is not a json object the error is:')
                     current_app.logger.info('it is not a json object You should ask status verifier to give response in proper format & not move ahead to next action')
-                    if group_chat.messages[-1]['role'] == 'tool':
+                    if group_chat.messages and group_chat.messages[-1]['role'] == 'tool':
                         current_app.logger.info('GOT role is tool')
                         break
                     # FIX: Better message construction based on current state
@@ -3449,7 +3564,8 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
                             current_app.logger.info(f'DELETE CURRENT AGENTS AND CREATE NEW')
                             config = get_prompt_config_json(prompt_id)
                             # recipe_for_persona[user_prompt] += 1
-                            user_tasks[user_prompt] = Action(config['flows'][get_current_flow(user_prompt)]['actions'])
+                            flow_actions = config['flows'][get_current_flow(user_prompt)]['actions']
+                            user_tasks[user_prompt] = create_action_with_ledger(flow_actions, user_id, prompt_id, user_prompt)
                             del user_agents[user_prompt]
                             x = get_response_group(user_id,text,prompt_id)
                             continue
@@ -3534,7 +3650,7 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
 
                 continue
 
-            elif group_chat.messages[-1]['content'].startswith('Focus on the current task at hand'):
+            elif group_chat.messages and group_chat.messages[-1]['content'].startswith('Focus on the current task at hand'):
                 result = agents_object['assistant'].initiate_chat(recipient=manager, message=message, clear_history=False,silent=False)
                 continue
             elif user_tasks[user_prompt].current_action <= len(user_tasks[user_prompt].actions):
@@ -3542,6 +3658,7 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
 
                 if len(group_chat.messages) == 0:
                     current_app.logger.warning("No messages in group chat after processing")
+                    break
                 last_message = group_chat.messages[-1]
 
                 if 'tool_calls' in last_message:
@@ -3594,9 +3711,10 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
 
                 if len(group_chat.messages) == 0:
                     current_app.logger.warning("No messages in group chat after processing")
+                    return "I encountered an issue processing your request. Please try again."
 
                 last_message = group_chat.messages[-1]
-                if last_message['content'] == 'TERMINATE':
+                if last_message['content'] == 'TERMINATE' and len(group_chat.messages) > 1:
                     last_message = group_chat.messages[-2]
 
                 if f'message2user'.lower() in last_message['content'].lower():
@@ -3647,9 +3765,10 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
 
         if len(group_chat.messages) == 0:
             current_app.logger.warning("No messages in group chat after processing")
+            return "I encountered an issue processing your request. Please try again."
 
         last_message = group_chat.messages[-1]
-        if last_message['content'] == 'TERMINATE':
+        if last_message['content'] == 'TERMINATE' and len(group_chat.messages) > 1:
             last_message = group_chat.messages[-2]
 
         if f'message2user'.lower() in last_message['content'].lower():
@@ -4143,7 +4262,8 @@ def safe_action_boundary_check(user_prompt, prompt_id, text, user_id):
             # Simple flow increment
             recipe_for_persona[user_prompt] += 1
             next_flow_actions = config['flows'][get_current_flow(user_prompt)]['actions']
-            user_tasks[user_prompt] = Action(next_flow_actions)
+            user_id = user_prompt.split('_')[0]
+            user_tasks[user_prompt] = create_action_with_ledger(next_flow_actions, user_id, prompt_id, user_prompt)
             user_tasks[user_prompt].current_action = 1
 
             # Initialize states for new flow actions
@@ -4318,9 +4438,22 @@ def initialise_current_flow_to_zero(user_prompt):
     recipe_for_persona[user_prompt] = 0
 
 
-def increment_current_flow(user_prompt):
+def increment_current_flow(user_prompt, prompt_id):
+    """Advance to next flow and create Action with ledger for the new flow's actions.
+
+    Args:
+        user_prompt: Cache key (user_id_prompt_id)
+        prompt_id: Required — used to load the prompt config JSON
+    """
     recipe_for_persona[user_prompt] += 1
-    user_tasks[user_prompt] = Action(config['flows'][get_current_flow(user_prompt)]['actions'])
+    prompt_config = get_prompt_config_json(prompt_id)
+    flow_idx = get_current_flow(user_prompt)
+    if flow_idx < len(prompt_config['flows']):
+        user_id = user_prompt.split('_')[0]
+        user_tasks[user_prompt] = create_action_with_ledger(
+            prompt_config['flows'][flow_idx]['actions'], user_id, prompt_id, user_prompt)
+    else:
+        user_tasks[user_prompt] = Action([])
     user_tasks[user_prompt].current_action = 1
 
 
@@ -4336,7 +4469,7 @@ def safe_increment_flow(user_prompt, prompt_id):
         if get_action_state(user_prompt, action_id) != ActionState.TERMINATED:
             raise StateTransitionError(f"Cannot increment flow: Action {action_id} not terminated")
 
-    increment_current_flow(user_prompt)
+    increment_current_flow(user_prompt, prompt_id)
 
     # Reset action states for new flow
     next_flow = get_current_flow(user_prompt)
@@ -4389,8 +4522,10 @@ def create_time_agents_and_create_scheduled_jobs(flows, number_of_flows, prompt_
 def get_total_actions_for_current_flow_and_reset_actions(prompt_id, user_prompt):
     flow_idx = get_current_flow(user_prompt)
     config = get_prompt_config_json(prompt_id)
-    user_tasks[user_prompt] = Action(config['flows'][flow_idx]['actions'])
-    total_actions = get_total_actions_length_for_flow(config,flow_idx)
+    user_id = user_prompt.split('_')[0]
+    user_tasks[user_prompt] = create_action_with_ledger(
+        config['flows'][flow_idx]['actions'], user_id, prompt_id, user_prompt)
+    total_actions = get_total_actions_length_for_flow(config, flow_idx)
     return config, total_actions
 
 

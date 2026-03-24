@@ -39,6 +39,7 @@ APP_PORTS = {
     'mesh_wg':      6795,
     'mesh_relay':   6796,
     'model_bus':    6790,
+    'mcp':          6791,
 }
 
 # OS mode: privileged ports (HART OS is the operating system)
@@ -53,6 +54,7 @@ OS_PORTS = {
     'mesh_wg':      679,
     'mesh_relay':   680,
     'model_bus':    681,
+    'mcp':          682,
 }
 
 # Environment variable overrides (takes precedence over both modes)
@@ -67,6 +69,7 @@ ENV_OVERRIDES = {
     'mesh_wg':      'HART_MESH_WG_PORT',
     'mesh_relay':   'HART_MESH_RELAY_PORT',
     'model_bus':    'HART_MODEL_BUS_PORT',
+    'mcp':          'HART_MCP_PORT',
 }
 
 
@@ -173,3 +176,144 @@ def check_port_available(port: int, host: str = '0.0.0.0') -> bool:
 def get_mode_label() -> str:
     """Return 'OS' or 'APP' for display."""
     return 'OS' if is_os_mode() else 'APP'
+
+
+# ── LLM URL Resolution ──────────────────────────────────────
+
+_llm_url_cache: str = ''
+
+
+def get_local_llm_url() -> str:
+    """Single source of truth for the local LLM endpoint URL.
+
+    Resolution order (first non-empty wins):
+      1. HEVOLVE_LOCAL_LLM_URL  — canonical, full URL (set by Nunba/HARTOS)
+      2. CUSTOM_LLM_BASE_URL    — user-provided custom endpoint (backwards compat)
+      3. LLAMA_CPP_PORT          — deprecated port-only var (backwards compat)
+      4. port_registry default   — construct from get_port('llm')
+
+    The result always includes /v1 suffix for OpenAI-compatible endpoints.
+    Caches the resolved URL; call invalidate_llm_url() to clear after
+    port changes (warm start, conflict reassignment).
+
+    Returns:
+        Full URL string, e.g. 'http://127.0.0.1:8081/v1'
+    """
+    global _llm_url_cache
+    if _llm_url_cache:
+        return _llm_url_cache
+
+    url = ''
+
+    # 1. Canonical env var
+    url = os.environ.get('HEVOLVE_LOCAL_LLM_URL', '')
+
+    # 2. Custom LLM base URL (user-provided via wizard)
+    if not url:
+        url = os.environ.get('CUSTOM_LLM_BASE_URL', '')
+
+    # 3. Deprecated: reconstruct from port-only var
+    if not url:
+        port = os.environ.get('LLAMA_CPP_PORT', '')
+        if port:
+            url = f'http://127.0.0.1:{port}/v1'
+
+    # 4. Read from Nunba's llama_config.json (wizard-configured port)
+    if not url:
+        try:
+            import json as _json
+            _cfg_path = os.path.join(os.path.expanduser('~'), '.nunba', 'llama_config.json')
+            if os.path.isfile(_cfg_path):
+                with open(_cfg_path) as _f:
+                    _cfg = _json.load(_f)
+                _port = _cfg.get('server_port')
+                if _port:
+                    url = f'http://127.0.0.1:{_port}/v1'
+        except Exception:
+            pass
+
+    # 5. Fallback: port registry default
+    if not url:
+        url = f'http://127.0.0.1:{get_port("llm")}/v1'
+
+    # Normalize: ensure /v1 suffix
+    url = url.rstrip('/')
+    if not url.endswith('/v1'):
+        url += '/v1'
+
+    # Validate URL format
+    if not _validate_llm_url(url):
+        logger.warning(f"Invalid LLM URL '{url}', falling back to port registry default")
+        url = f'http://127.0.0.1:{get_port("llm")}/v1'
+
+    _llm_url_cache = url
+    return url
+
+
+def set_local_llm_url(url: str) -> None:
+    """Set the local LLM URL and propagate to env.
+
+    Called by Nunba when:
+    - start_server() detects/starts a server on a port
+    - Port conflict causes reassignment to a new port
+    - User provides a custom endpoint via the wizard
+
+    Validates the URL, sets HEVOLVE_LOCAL_LLM_URL, and invalidates cache.
+    """
+    url = url.rstrip('/')
+    if not url.endswith('/v1'):
+        url += '/v1'
+
+    if not _validate_llm_url(url):
+        logger.error(f"Refusing to set invalid LLM URL: {url}")
+        return
+
+    os.environ['HEVOLVE_LOCAL_LLM_URL'] = url
+    invalidate_llm_url()
+    logger.info(f"LLM URL set: {url}")
+
+
+def invalidate_llm_url() -> None:
+    """Clear the cached LLM URL. Call after port changes."""
+    global _llm_url_cache
+    _llm_url_cache = ''
+
+
+def is_local_llm() -> bool:
+    """Check if the configured LLM is a local endpoint (zero cost).
+
+    Returns True if the resolved URL points to localhost/127.0.0.1,
+    or if a local LLM model name is configured.
+    """
+    if os.environ.get('HEVOLVE_LOCAL_LLM_MODEL'):
+        return True
+    url = get_local_llm_url()
+    return any(h in url for h in ('localhost', '127.0.0.1', '0.0.0.0', '[::1]'))
+
+
+def _validate_llm_url(url: str) -> bool:
+    """Validate that a URL is well-formed for an LLM endpoint.
+
+    Checks: has scheme (http/https), has host, port is numeric if present.
+    Does NOT check connectivity — that's a runtime concern.
+    """
+    if not url:
+        return False
+    if not url.startswith(('http://', 'https://')):
+        return False
+    # Extract host:port portion
+    try:
+        after_scheme = url.split('://', 1)[1]
+        host_port = after_scheme.split('/')[0]
+        if ':' in host_port:
+            host, port_str = host_port.rsplit(':', 1)
+            if not host or not port_str.isdigit():
+                return False
+            port = int(port_str)
+            if port < 1 or port > 65535:
+                return False
+        elif not host_port:
+            return False
+    except (IndexError, ValueError):
+        return False
+    return True

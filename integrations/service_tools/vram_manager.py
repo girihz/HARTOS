@@ -9,6 +9,7 @@ Pattern from: integrations/vision/minicpm_installer.py (detect_gpu)
 """
 
 import logging
+import os
 import subprocess
 import sys
 from typing import Dict, Optional, Tuple
@@ -42,7 +43,10 @@ class VRAMManager:
         self._allocations: Dict[str, float] = {}  # tool → GB reserved
         self._gpu_info: Optional[Dict] = None
         self._gpu_info_ts: float = 0.0  # timestamp of last nvidia-smi call
-        self._refresh_ttl: float = 30.0  # seconds between nvidia-smi calls
+        # Bundled mode: GPU state is stable (one model loaded at startup).
+        # Poll every 120s not 30s to reduce subprocess overhead.
+        _bundled = os.environ.get('NUNBA_BUNDLED') == '1'
+        self._refresh_ttl: float = 120.0 if _bundled else 30.0
 
     # ── GPU Detection ────────────────────────────────────────────
 
@@ -140,6 +144,16 @@ class VRAMManager:
         if "torch" in sys.modules:
             try:
                 import torch
+                # Detect frozen build torch stub (version 0.0.0, _is_stub=True).
+                # Replace with real torch so CUDA detection works across all
+                # deployments (Nunba frozen, HART OS standalone, cloud).
+                if getattr(torch, '_is_stub', False):
+                    import importlib
+                    _stale = [k for k in sys.modules if k == 'torch' or k.startswith('torch.')]
+                    for _k in _stale:
+                        del sys.modules[_k]
+                    torch = importlib.import_module('torch')
+                    logger.info(f"Replaced torch stub with real torch {torch.__version__}")
                 if torch.cuda.is_available():
                     props = torch.cuda.get_device_properties(0)
                     total = props.total_memory / (1024 ** 3)

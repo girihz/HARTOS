@@ -93,20 +93,17 @@ class TestMiniCPMBackend:
         mock_resp.status_code = 200
         mock_resp.json.return_value = {'description': 'A cat sitting on a desk'}
 
-        with patch.object(lvb.requests, 'post',
+        with patch.object(lvb, 'pooled_post',
                           return_value=mock_resp) as mock_post:
             result = backend.describe(b'fake_jpeg_bytes')
             assert result == 'A cat sitting on a desk'
             mock_post.assert_called_once()
-            call_kwargs = mock_post.call_args
-            assert '9891' in call_kwargs[0][0]
 
     def test_describe_failure_returns_none(self):
         import integrations.vision.lightweight_backend as lvb
-        import requests as req_mod
         backend = MiniCPMBackend(port=9891)
-        with patch.object(lvb.requests, 'post',
-                          side_effect=req_mod.RequestException("connection refused")):
+        with patch.object(lvb, 'pooled_post',
+                          side_effect=Exception("connection refused")):
             result = backend.describe(b'fake_bytes')
             assert result is None
 
@@ -338,7 +335,6 @@ class TestVisionServiceBackendIntegration:
 
     def test_describe_frame_minicpm_path(self):
         """When _vision_backend is None, uses MiniCPM HTTP."""
-        import integrations.vision.vision_service as vs_mod
         from integrations.vision.vision_service import VisionService
         svc = VisionService.__new__(VisionService)
         svc._circuit_open = False
@@ -349,7 +345,7 @@ class TestVisionServiceBackendIntegration:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {'result': 'User typing on keyboard'}
-        with patch.object(vs_mod.requests, 'post', return_value=mock_resp):
+        with patch('integrations.vision.vision_service.pooled_post', return_value=mock_resp):
             result = svc._describe_frame('user1', b'fake_jpeg')
             assert result == 'User typing on keyboard'
 

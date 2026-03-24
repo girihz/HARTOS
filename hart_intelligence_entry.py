@@ -305,7 +305,7 @@ class ChatQwen3VL(LLM):
     - Drop-in replacement for ChatOpenAI
     """
 
-    base_url: str = os.environ.get('HEVOLVE_LOCAL_LLM_URL', "http://localhost:8000/v1")
+    base_url: str = None  # resolved lazily via get_local_llm_url()
     model_name: str = "local"
     temperature: float = 0.7
     max_tokens: int = 1500
@@ -325,6 +325,10 @@ class ChatQwen3VL(LLM):
         Returns:
             The generated response text
         """
+        if not self.base_url:
+            from core.port_registry import get_local_llm_url
+            self.base_url = get_local_llm_url()
+
         payload = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -349,14 +353,14 @@ class ChatQwen3VL(LLM):
         except Exception as e:
             _log.warning(f"[LocalLLM] {self.base_url} unavailable: {e}")
 
-        # Fallback: llama.cpp (Nunba always starts it)
-        _llama_port = os.environ.get('LLAMA_CPP_PORT', '8080')
-        _llama_url = f"http://127.0.0.1:{_llama_port}/v1"
-        if _llama_url not in self.base_url:
+        # Fallback: resolved LLM URL (handles port conflicts, warm starts)
+        from core.port_registry import get_local_llm_url
+        _llm_url = get_local_llm_url()
+        if _llm_url not in self.base_url:
             try:
-                _log.info(f"[LocalLLM] Falling back to llama.cpp at {_llama_url}")
+                _log.info(f"[LocalLLM] Falling back to llama.cpp at {_llm_url}")
                 response = pooled_post(
-                    f"{_llama_url}/chat/completions",
+                    f"{_llm_url}/chat/completions",
                     json=payload,
                     timeout=120
                 )
@@ -435,8 +439,9 @@ def get_llm(model_name="gpt-3.5-turbo", temperature=0.7, max_tokens=1500):
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        if _active == 'custom_openai' and os.environ.get('CUSTOM_LLM_BASE_URL'):
-            _kwargs['openai_api_base'] = os.environ['CUSTOM_LLM_BASE_URL']
+        if _active == 'custom_openai':
+            from core.port_registry import get_local_llm_url
+            _kwargs['openai_api_base'] = get_local_llm_url()
         return ChatOpenAI(**_kwargs)
 
     if USE_QWEN3VL:
@@ -582,6 +587,17 @@ except ImportError:
     pass
 except Exception as e:
     app.logger.warning(f"Consent service init skipped: {e}")
+
+# MCP HTTP Bridge — exposes local MCP tools via REST for Nunba/external clients
+try:
+    from integrations.mcp.mcp_http_bridge import mcp_local_bp, auto_register_local_mcp
+    app.register_blueprint(mcp_local_bp)
+    auto_register_local_mcp()
+    app.logger.info("MCP HTTP bridge registered at /api/mcp/local")
+except ImportError:
+    app.logger.info("MCP HTTP bridge not available, skipping")
+except Exception as e:
+    app.logger.warning(f"MCP HTTP bridge init skipped: {e}")
 
 # Instruction Queue API — never miss a user instruction
 try:
@@ -923,6 +939,23 @@ if config.get('CLOUD_FALLBACK_URL'):
 # in cloud/dev mode it has flat top-level keys.
 _ip = config.get('IP_ADDRESS', {})
 GPT_API = config.get('GPT_API', _ip.get('gpt3_url', ''))
+# If GPT_API is empty (no config.json in local/bundled mode), resolve from
+# the local LLM URL that Nunba/setup-wizard configured. This ensures
+# CustomGPT._call() can reach the llama-server for agent reasoning.
+if not GPT_API:
+    try:
+        from core.port_registry import get_local_llm_url
+        _resolved = get_local_llm_url()
+        if _resolved:
+            # get_local_llm_url returns base like http://127.0.0.1:8081/v1
+            # CustomGPT._call() needs the chat completions endpoint
+            GPT_API = _resolved.rstrip('/') + '/chat/completions'
+    except Exception:
+        pass
+    if not GPT_API:
+        _llm_url = os.environ.get('HEVOLVE_LOCAL_LLM_URL', '')
+        if _llm_url:
+            GPT_API = _llm_url.rstrip('/') + '/chat/completions'
 FAV_TEACHER_API = config.get('FAV_TEACHER_API', '')
 DREAMBOOTH_API = config.get('DREAMBOOTH_API', '')
 STABLE_DIFF_API = config.get('STABLE_DIFF_API', '')
@@ -971,8 +1004,8 @@ def _has_cloud_api() -> bool:
 
 def _wait_for_llm_server(url=None, timeout=15):
     if url is None:
-        _port = os.environ.get('LLAMA_CPP_PORT', '8080')
-        url = f'http://localhost:{_port}'
+        from core.port_registry import get_local_llm_url
+        url = get_local_llm_url().replace('/v1', '')
     """Wait for llama.cpp server, giving parent process time to start it.
 
     In Nunba (flat mode), the desktop app starts llama.cpp in a background
@@ -2702,7 +2735,7 @@ class CustomGPT(LLM):
                 thread_local_data.update_recognize_intents(intents["action"])
             except Exception as e:
                 app.logger.info(
-                    f"Exception occur while intent calcualtion and calling exception {e}")
+                    f"LangChain action parse failed (non-JSON response): {e}")
                 # thread_local_data.update_recognize_intents("Final Answer")
             # time.sleep(10)
 
@@ -2735,7 +2768,7 @@ class CustomGPT(LLM):
                 thread_local_data.update_recognize_intents(intents["action"])
             except Exception as e:
                 app.logger.info(
-                    f"Exception occur while intent calcualtion and calling exception {e}")
+                    f"LangChain action parse failed (non-JSON response): {e}")
                 # thread_local_data.update_recognize_intents("Final Answer")
                 # time.sleep(10)
 
@@ -3014,8 +3047,21 @@ def get_action_user_details(user_id):
     if response.status_code == 200:
         user_data = response.json()
 
+        # Privacy-first: use .get() with graceful defaults for local/guest users
+        # who have no cloud profile. Missing fields are noted so the agent can
+        # ask the user naturally and store in local DB when volunteered.
+        _uname = user_data.get("name") or user_data.get("display_name") or user_data.get("username") or "User"
+        _gender = user_data.get("gender", "not specified")
+        _lang = user_data.get("preferred_language", "not specified")
+        _dob = user_data.get("dob", "not specified")
+        _eng = user_data.get("english_proficiency", "not specified")
+        _created = user_data.get("created_date", "unknown")
+        _standard = user_data.get("standard", "not specified")
+        _pays = user_data.get("who_pays_for_course", "not specified")
+
         user_details = f'''Below are the information about the user.
-        user_name: {user_data["name"]} (Call the user by this name only when required and not always),gender: {user_data["gender"]}, who_pays_for_course: {user_data["who_pays_for_course"]}(Entity Responsible for Paying the Course Fees), preferred_language: {user_data["preferred_language"]}(User's Preferred Language), date_of_birth: {user_data["dob"]}, english_proficiency: {user_data["english_proficiency"]}(User's English Proficiency Level), created_date: {user_data["created_date"]}(user creation date), standard: {user_data["standard"]}(User's Standard in which user studying)
+        user_name: {_uname} (Call the user by this name only when required and not always), gender: {_gender}, who_pays_for_course: {_pays}(Entity Responsible for Paying the Course Fees), preferred_language: {_lang}(User's Preferred Language), date_of_birth: {_dob}, english_proficiency: {_eng}(User's English Proficiency Level), created_date: {_created}(user creation date), standard: {_standard}(User's Standard in which user studying)
+        If any of the above fields show "not specified", do not ask the user for this information proactively. Only note it when naturally relevant. The user's privacy is paramount — store preferences locally when volunteered, never push for personal data.
         '''
     else:
         post_dict = {'user_id': user_id, 'status': TaskStatus.ERROR.value, 'task_name': TaskNames.GET_ACTION_USER_DETAILS.value, 'uid': thread_local_data.get_request_id(
@@ -4317,6 +4363,15 @@ def chat():
     channel_context = data.get('channel_context', None)
     if channel_context:
         thread_local_data.channel_context = channel_context
+
+    # USER PRIORITY: mark user activity so daemon dispatch yields the LLM
+    if not autonomous:
+        try:
+            from integrations.agent_engine.dispatch import mark_user_chat_activity
+            mark_user_chat_activity()
+        except ImportError:
+            pass
+
     app.logger.info(f"casual_conv type {casual_conv}")
 
     # Security: sanitize prompt_id to prevent path traversal
@@ -4516,14 +4571,50 @@ def chat():
                 return jsonify({'response': 'Need user_id and text to create agent', 'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0, 'history_request_id': []})
             if autonomous:
                 # Autonomous dispatch (from daemon or API): LLM self-generates agent config
+                # AND immediately creates recipe — no human review step needed.
+                # Full pipeline: gather_info → save config → recipe() → completed
                 auto_response = _autonomous_gather_info(user_id, prompt, prompt_id)
+
+                # Now immediately create the recipe so next dispatch enters REUSE
+                _config_path = os.path.join(PROMPTS_DIR, f'{prompt_id}.json')
+                if os.path.exists(_config_path):
+                    try:
+                        recipe_response = recipe(user_id, prompt, prompt_id, file_id, request_id)
+                        if recipe_response == 'Agent Created Successfully':
+                            with _user_lock:
+                                review_agents[_ak] = True
+                                conversation_agent[_ak] = True
+                                _touch_agent_timestamp(_ak)
+                            try:
+                                _create_social_agent_from_prompt(user_id, prompt_id)
+                            except Exception:
+                                pass
+                            _record_lifecycle('completed', user_id, prompt_id,
+                                             f'Autonomous full pipeline: gather + recipe in one shot')
+                            _push_workflow_flowchart(user_id, prompt_id, request_id)
+                            return jsonify({'response': recipe_response, 'intent': ['FINAL_ANSWER'],
+                                            'req_token_count': 0, 'res_token_count': 0,
+                                            'history_request_id': [],
+                                            'Agent_status': 'completed',
+                                            'autonomous_creation': True, 'prompt_id': prompt_id})
+                        else:
+                            app.logger.info(f'Autonomous recipe() returned: {str(recipe_response)[:100]}')
+                    except Exception as e:
+                        app.logger.warning(f'Autonomous recipe creation failed (will retry on next dispatch): {e}')
+
+                # Fallback: config saved but recipe failed — next dispatch will retry
                 with _user_lock:
                     review_agents[_ak] = True
                     conversation_agent[_ak] = False
                     _touch_agent_timestamp(_ak)
-                _record_lifecycle('Review Mode', user_id, prompt_id, f'Autonomous creation via dispatch: {prompt[:100]}')
+                _record_lifecycle('Review Mode', user_id, prompt_id,
+                                 f'Autonomous creation via dispatch: {prompt[:100]}')
                 _push_workflow_flowchart(user_id, prompt_id, request_id)
-                return jsonify({'response': auto_response, 'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0, 'history_request_id': [], 'Agent_status': 'Review Mode', 'autonomous_creation': True, 'prompt_id': prompt_id})
+                return jsonify({'response': auto_response, 'intent': ['FINAL_ANSWER'],
+                                'req_token_count': 0, 'res_token_count': 0,
+                                'history_request_id': [],
+                                'Agent_status': 'Review Mode',
+                                'autonomous_creation': True, 'prompt_id': prompt_id})
             from gather_agentdetails import gather_info
 
             # --- Turn counter: force-complete after MAX_GATHER_TURNS ---
@@ -5149,7 +5240,7 @@ def get_public_prompts():
                         'image_url': data.get('image_url', ''),
                         'video_text': data.get('video_text', ''),
                         'has_recipe': os.path.exists(
-                            os.path.join(prompts_dir, f'{pid}_0_recipe.json')),
+                            os.path.join(PROMPTS_DIR, f'{pid}_0_recipe.json')),
                         'flow_count': len(data.get('flows', [])),
                         'source': 'local',
                     })
@@ -6599,7 +6690,7 @@ def _init_runtime_tools():
         from integrations.service_tools.runtime_manager import runtime_tool_manager
         runtime_tool_manager.load_state()
     except Exception as e:
-        logger.warning(f"Runtime tool init failed: {e}")
+        klogger.warning(f"Runtime tool init failed: {e}")
 
 
 def _validate_startup():

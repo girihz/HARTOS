@@ -97,7 +97,8 @@ class AgentDaemon:
             if self._running:
                 return
             self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name='agent_daemon')
         self._thread.start()
         logger.info(f"Agent daemon started (interval={self._interval}s)")
 
@@ -202,7 +203,8 @@ class AgentDaemon:
             try:
                 self._tick()
             except Exception as e:
-                logger.debug(f"Agent daemon tick error: {e}")
+                import traceback
+                logger.error(f"Agent daemon tick error: {e}\n{traceback.format_exc()}")
 
     def _tick(self):
         """Find active goals, find idle agents, dispatch via /chat.
@@ -282,9 +284,26 @@ class AgentDaemon:
             # Reduce concurrency proportional to system pressure
             max_concurrent = max(1, int(max_concurrent * _throttle))
 
+            # Minimum interval between dispatches for continuous goals.
+            # Without this, a continuous goal (e.g. autoresearch coordinator)
+            # gets re-dispatched every 30s tick even if the previous dispatch
+            # is still running — causing repeated identical actions.
+            _CONTINUOUS_COOLDOWN_S = 300  # 5 minutes
+
             for goal in goals:
                 if dispatched >= len(idle_agents) or dispatched >= max_concurrent:
                     break
+
+                # Skip continuous goals dispatched recently — let the previous
+                # dispatch complete before re-dispatching.
+                cfg = goal.config_json or {}
+                if cfg.get('continuous', False) and goal.last_dispatched_at:
+                    elapsed = (datetime.utcnow() - goal.last_dispatched_at).total_seconds()
+                    if elapsed < _CONTINUOUS_COOLDOWN_S:
+                        logger.debug(
+                            f"Continuous goal {goal.id} dispatched {elapsed:.0f}s ago "
+                            f"(cooldown={_CONTINUOUS_COOLDOWN_S}s), skipping")
+                        continue
 
                 # ── PARALLEL DISPATCH: check for goals with parallel subtasks ──
                 parallel_dispatched = self._try_parallel_dispatch(
@@ -376,8 +395,12 @@ class AgentDaemon:
                     logger.warning("hive_guardrails not available — dispatch proceeds without guardrail pre-check")
 
                 # Store prompt_id on goal for REUSE tracking
-                prompt_id = f"{goal.goal_type}_{goal.id[:8]}"
-                if not goal.prompt_id:
+                # Must be NUMERIC — the adapter and /chat handler reject non-integer prompt_ids.
+                # Use deterministic hash of goal.id so same goal always gets same prompt_id.
+                import hashlib
+                _gh = int(hashlib.md5(str(goal.id).encode()).hexdigest()[:10], 16) % 100_000_000_000
+                prompt_id = str(max(1, _gh))
+                if not goal.prompt_id or not str(goal.prompt_id).isdigit():
                     goal.prompt_id = prompt_id
 
                 # BACKOFF: skip goals that have failed repeatedly
@@ -613,7 +636,7 @@ class AgentDaemon:
                     for k in stale_backoff:
                         del _dispatch_backoff[k]
                     stale_budget = _budget_blocked_goals - active_goal_ids
-                    _budget_blocked_goals -= stale_budget
+                    _budget_blocked_goals.difference_update(stale_budget)
                     # _hitl_notified: keep entries to avoid re-notifying on restart,
                     # but cap size to prevent unbounded growth
                     if len(_hitl_notified) > 10000:

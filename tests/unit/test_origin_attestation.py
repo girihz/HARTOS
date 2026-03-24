@@ -29,7 +29,7 @@ class TestOriginIdentity(unittest.TestCase):
         self.assertEqual(ORIGIN_IDENTITY['name'], 'HART OS')
         self.assertEqual(ORIGIN_IDENTITY['full_name'], 'Hevolve Hive Agentic Runtime')
         self.assertEqual(ORIGIN_IDENTITY['organization'], 'Hevolve.ai')
-        self.assertEqual(ORIGIN_IDENTITY['license'], 'BSL-1.1')
+        self.assertEqual(ORIGIN_IDENTITY['license'], 'Apache-2.0')
         self.assertEqual(ORIGIN_IDENTITY['revenue_split'], '90/9/1')
         self.assertEqual(ORIGIN_IDENTITY['kill_switch'], 'master_key_only')
 
@@ -164,7 +164,7 @@ class TestVerifyOrigin(unittest.TestCase):
         summary = get_origin_summary()
         self.assertEqual(summary['name'], 'HART OS')
         self.assertEqual(summary['organization'], 'Hevolve.ai')
-        self.assertEqual(summary['license'], 'BSL-1.1')
+        self.assertEqual(summary['license'], 'Apache-2.0')
 
 
 class TestFederationAttestation(unittest.TestCase):
@@ -322,35 +322,37 @@ class TestNativeHiveLoader(unittest.TestCase):
 class TestLicenseContent(unittest.TestCase):
     """Verify LICENSE file has anti-rebranding clauses."""
 
-    def test_license_is_bsl(self):
+    def test_license_is_apache(self):
         code_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         license_path = os.path.join(code_root, 'LICENSE')
         with open(license_path, 'r') as f:
             content = f.read()
-        self.assertIn('BUSINESS SOURCE LICENSE', content)
+        self.assertIn('Apache License', content)
+        self.assertIn('Version 2.0', content)
         self.assertIn('Hevolve.ai', content)
 
-    def test_license_has_no_rebranding_clause(self):
+    def test_license_has_redistribution_clause(self):
         code_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         license_path = os.path.join(code_root, 'LICENSE')
         with open(license_path, 'r') as f:
             content = f.read()
-        self.assertIn('NO REBRANDING', content)
-        self.assertIn('NO COMPETING OS', content)
+        self.assertIn('Redistribution', content)
+        self.assertIn('TERMS AND CONDITIONS', content)
 
-    def test_license_has_master_key_integrity_clause(self):
+    def test_license_has_disclaimer(self):
         code_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         license_path = os.path.join(code_root, 'LICENSE')
         with open(license_path, 'r') as f:
             content = f.read()
-        self.assertIn('MASTER KEY INTEGRITY', content)
+        self.assertIn('AS IS', content)
+        self.assertIn('WITHOUT WARRANTIES', content)
 
-    def test_license_has_change_date(self):
+    def test_license_has_apache_url(self):
         code_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         license_path = os.path.join(code_root, 'LICENSE')
         with open(license_path, 'r') as f:
             content = f.read()
-        self.assertIn('2030-01-01', content)
+        self.assertIn('http://www.apache.org/licenses/', content)
         self.assertIn('Apache License', content)
 
 

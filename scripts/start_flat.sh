@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 export HEVOLVE_NODE_TIER=flat
-export LLAMA_CPP_PORT="${LLM_PORT}"
+export HEVOLVE_LOCAL_LLM_URL="http://127.0.0.1:${LLM_PORT}/v1"
 # Diarization: auto-started as sidecar. Set URL only to override with external service.
 # export HEVOLVE_DIARIZATION_URL="ws://external-host:8004"
 
