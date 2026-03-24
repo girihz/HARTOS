@@ -380,11 +380,16 @@ class TestNoCoordinatorLocalFallback:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {'response': 'local result'}
+        mock_response.get_json.return_value = {'response': 'local result'}
 
         with patch('integrations.agent_engine.dispatch._get_distributed_coordinator',
                    return_value=None), \
-             patch('integrations.agent_engine.dispatch.requests.post',
-                   return_value=mock_response):
+             patch('integrations.agent_engine.dispatch.pooled_post',
+                   return_value=mock_response), \
+             patch.dict('sys.modules', {
+                 'routes.hartos_backend_adapter': None,
+                 'hartos_backend_adapter': None,
+             }):
 
             with patch('security.hive_guardrails.GuardrailEnforcer') as mock_guard:
                 mock_guard.before_dispatch.return_value = (True, None, 'test prompt')
@@ -407,13 +412,18 @@ class TestNoCoordinatorLocalFallback:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {'response': 'local single-node'}
+        mock_response.get_json.return_value = {'response': 'local single-node'}
 
         with patch('integrations.agent_engine.dispatch._get_distributed_coordinator',
                    return_value=mock_coordinator), \
              patch('integrations.agent_engine.dispatch._has_hive_peers',
                    return_value=False), \
-             patch('integrations.agent_engine.dispatch.requests.post',
-                   return_value=mock_response):
+             patch('integrations.agent_engine.dispatch.pooled_post',
+                   return_value=mock_response), \
+             patch.dict('sys.modules', {
+                 'routes.hartos_backend_adapter': None,
+                 'hartos_backend_adapter': None,
+             }):
 
             with patch('security.hive_guardrails.GuardrailEnforcer') as mock_guard:
                 mock_guard.before_dispatch.return_value = (True, None, 'test prompt')
@@ -440,13 +450,18 @@ class TestNoCoordinatorLocalFallback:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {'response': 'fallback result'}
+        mock_response.get_json.return_value = {'response': 'fallback result'}
 
         with patch('integrations.agent_engine.dispatch._get_distributed_coordinator',
                    return_value=mock_coordinator), \
              patch('integrations.agent_engine.dispatch._has_hive_peers',
                    return_value=True), \
-             patch('integrations.agent_engine.dispatch.requests.post',
-                   return_value=mock_response):
+             patch('integrations.agent_engine.dispatch.pooled_post',
+                   return_value=mock_response), \
+             patch.dict('sys.modules', {
+                 'routes.hartos_backend_adapter': None,
+                 'hartos_backend_adapter': None,
+             }):
 
             with patch('security.hive_guardrails.GuardrailEnforcer') as mock_guard:
                 mock_guard.before_dispatch.return_value = (True, None, 'test prompt')

@@ -723,8 +723,12 @@ class TestDrainWithWaves(unittest.TestCase):
             call_count['n'] += 1
             return mock_resp
 
-        with patch('integrations.agent_engine.dispatch.requests.post',
-                   side_effect=mock_post):
+        with patch('integrations.agent_engine.dispatch.pooled_post',
+                   side_effect=mock_post), \
+             patch.dict('sys.modules', {
+                 'routes.hartos_backend_adapter': None,
+                 'hartos_backend_adapter': None,
+             }):
             from integrations.agent_engine.dispatch import drain_instruction_queue
             result = drain_instruction_queue('drain_user')
 
@@ -769,8 +773,12 @@ class TestDrainWithWaves(unittest.TestCase):
             dispatch_order.append(prompt)
             return mock_resp
 
-        with patch('integrations.agent_engine.dispatch.requests.post',
-                   side_effect=mock_post):
+        with patch('integrations.agent_engine.dispatch.pooled_post',
+                   side_effect=mock_post), \
+             patch.dict('sys.modules', {
+                 'routes.hartos_backend_adapter': None,
+                 'hartos_backend_adapter': None,
+             }):
             from integrations.agent_engine.dispatch import drain_instruction_queue
             result = drain_instruction_queue('wave_user')
 
@@ -808,8 +816,12 @@ class TestDrainWithWaves(unittest.TestCase):
                 resp.json.return_value = {'response': 'Success'}
             return resp
 
-        with patch('integrations.agent_engine.dispatch.requests.post',
-                   side_effect=mock_post):
+        with patch('integrations.agent_engine.dispatch.pooled_post',
+                   side_effect=mock_post), \
+             patch.dict('sys.modules', {
+                 'routes.hartos_backend_adapter': None,
+                 'hartos_backend_adapter': None,
+             }):
             from integrations.agent_engine.dispatch import drain_instruction_queue
             result = drain_instruction_queue('partial_user')
 

@@ -212,7 +212,7 @@ def test_headless_mode(runner):
     mock_response = MagicMock()
     mock_response.json.return_value = {'response': 'Hello from HART'}
 
-    with patch('requests.post', return_value=mock_response):
+    with patch('hart_cli.pooled_post', return_value=mock_response):
         result = runner.invoke(hart, ['-p', 'say hello'])
         assert result.exit_code == 0
         assert 'Hello from HART' in result.output
@@ -223,7 +223,7 @@ def test_headless_mode_json(runner):
     mock_response = MagicMock()
     mock_response.json.return_value = {'response': 'Hello'}
 
-    with patch('requests.post', return_value=mock_response):
+    with patch('hart_cli.pooled_post', return_value=mock_response):
         result = runner.invoke(hart, ['-p', 'say hello', '--json'])
         assert result.exit_code == 0
         data = json.loads(result.output)
@@ -234,7 +234,7 @@ def test_headless_connection_error(runner):
     """hart -p handles connection error gracefully."""
     import requests as real_requests
 
-    with patch('requests.post', side_effect=real_requests.ConnectionError):
+    with patch('hart_cli.pooled_post', side_effect=real_requests.ConnectionError):
         result = runner.invoke(hart, ['-p', 'say hello'])
         assert result.exit_code != 0
 

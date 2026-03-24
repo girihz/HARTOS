@@ -445,10 +445,10 @@ def get_default_llm_client():
     class SimpleLLMClient:
         def complete(self, prompt: str) -> str:
             from core.http_pool import pooled_post
+            from core.port_registry import get_local_llm_url
             try:
-                _lp = os.environ.get('LLAMA_CPP_PORT', '8080')
                 response = pooled_post(
-                    f"http://localhost:{_lp}/v1/chat/completions",
+                    f"{get_local_llm_url()}/chat/completions",
                     json={
                         "model": "Qwen3-VL-4B-Instruct",
                         "messages": [{"role": "user", "content": prompt}],

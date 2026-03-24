@@ -22,28 +22,29 @@ MAX_ITERATIONS = 30
 
 # System prompt matching OmniParser vlm_agent.py _get_system_prompt()
 _os_name = platform.system()  # 'Windows', 'Linux', 'Darwin', etc.
-SYSTEM_PROMPT = f"""You are using a {_os_name} device.
-You are able to use a mouse and keyboard to interact with the computer based on the given task and screenshot.
-You have access to every app running in the device via the mouse and keyboard interfaces mentioned above for GUI actions.
-
-Available actions:
-- GUI: left_click, right_click, double_click, type, key, hotkey, hover, mouse_move, wait, scroll_up, scroll_down
-- File: list_folders_and_files, open_file_gui, Open_file_and_copy_paste, write_file, read_file_and_understand
-
-IMPORTANT: After the first action, verify if the expected outcome of previous actions is visible on the screen before taking any new action.
-
-Output your response in JSON format:
-{
-    "Reasoning": "Brief explanation of what you see and why this action is needed",
-    "Next Action": "action_name or None if task is complete",
-    "Box ID": <element_id if clicking an element>,
-    "coordinate": [x, y],
-    "value": "text for type/hotkey actions",
-    "Status": "IN_PROGRESS or DONE"
-}
-
-When the task is complete, set "Next Action": "None" and "Status": "DONE".
-"""
+SYSTEM_PROMPT = (
+    "You are using a " + _os_name + " device.\n"
+    "You are able to use a mouse and keyboard to interact with the computer based on the given task and screenshot.\n"
+    "You have access to every app running in the device via the mouse and keyboard interfaces mentioned above for GUI actions.\n"
+    "\n"
+    "Available actions:\n"
+    "- GUI: left_click, right_click, double_click, type, key, hotkey, hover, mouse_move, wait, scroll_up, scroll_down\n"
+    "- File: list_folders_and_files, open_file_gui, Open_file_and_copy_paste, write_file, read_file_and_understand\n"
+    "\n"
+    "IMPORTANT: After the first action, verify if the expected outcome of previous actions is visible on the screen before taking any new action.\n"
+    "\n"
+    "Output your response in JSON format:\n"
+    '{\n'
+    '    "Reasoning": "Brief explanation of what you see and why this action is needed",\n'
+    '    "Next Action": "action_name or None if task is complete",\n'
+    '    "Box ID": <element_id if clicking an element>,\n'
+    '    "coordinate": [x, y],\n'
+    '    "value": "text for type/hotkey actions",\n'
+    '    "Status": "IN_PROGRESS or DONE"\n'
+    '}\n'
+    "\n"
+    'When the task is complete, set "Next Action": "None" and "Status": "DONE".\n'
+)
 
 
 def run_local_agentic_loop(
@@ -265,8 +266,8 @@ def _call_local_llm(messages: list) -> str:
         api_key = os.environ['OPENAI_API_KEY']
     else:
         # Last resort: local llama.cpp / Qwen3-VL
-        llama_port = os.environ.get('LLAMA_CPP_PORT', '8080')
-        base_url = f'http://localhost:{llama_port}/v1'
+        from core.port_registry import get_local_llm_url
+        base_url = get_local_llm_url()
         model = 'Qwen3-VL-4B-Instruct'
         api_key = 'dummy'
 

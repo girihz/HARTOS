@@ -86,6 +86,7 @@ venv310/
 *.db-journal
 .trueflow/
 .agent_ledger/
+deploy/kong/*.json
 .pytest_cache/
 .secrets.baseline
 .cache/
@@ -93,7 +94,7 @@ venv310/
 # Vendored / one-off directories that should not be committed
 autogen-*/
 framework/
-media/
+/media/
 pycharm-plugin/
 hevolvebot-admin-dashboard/
 secrets_to_scrub.txt
@@ -101,3 +102,7 @@ coauthor_scrub.txt
 plan.md
 *_reddit_*.txt
 *_reddit_*.md
+# HevolveArmor build artifacts
+hevolvearmor/target/
+vendor/hevolveai_armored/modules/
+vendor/hevolveai_armored/_key.bin

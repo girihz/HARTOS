@@ -27,7 +27,7 @@ if "%~1"=="--llm-port" (
 )
 
 set HEVOLVE_NODE_TIER=flat
-set LLAMA_CPP_PORT=%LLM_PORT%
+set HEVOLVE_LOCAL_LLM_URL=http://127.0.0.1:%LLM_PORT%/v1
 
 echo [MODE] HEVOLVE_NODE_TIER=flat
 echo [LLM]  llama.cpp on localhost:%LLM_PORT%

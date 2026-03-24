@@ -525,7 +525,11 @@ class TestBootstrapSeeding:
 class TestCodingDispatchReview:
     """E2E: coding goals pass through constitutional review post-dispatch."""
 
-    @patch('integrations.agent_engine.dispatch.requests.post')
+    @patch('integrations.agent_engine.dispatch.pooled_post')
+    @patch.dict('sys.modules', {
+        'routes.hartos_backend_adapter': None,
+        'hartos_backend_adapter': None,
+    })
     def test_coding_dispatch_passes_constitutional_review(self, mock_post):
         """Normal coding output passes review."""
         from integrations.agent_engine.dispatch import dispatch_goal
@@ -535,15 +539,22 @@ class TestCodingDispatchReview:
         mock_resp.json.return_value = {
             'response': 'Added unit tests for the authentication module.'
         }
+        mock_resp.get_json.return_value = {
+            'response': 'Added unit tests for the authentication module.'
+        }
         mock_post.return_value = mock_resp
 
         result = dispatch_goal(
             'Fix auth tests', 'user1', 'goal123', goal_type='coding')
         assert result is not None
 
-    @patch('integrations.agent_engine.dispatch.requests.post')
+    @patch('integrations.agent_engine.dispatch.pooled_post')
     @patch('security.hive_guardrails.ConstitutionalFilter.check_goal',
            return_value=(False, 'Violates constructive humanity rule'))
+    @patch.dict('sys.modules', {
+        'routes.hartos_backend_adapter': None,
+        'hartos_backend_adapter': None,
+    })
     def test_coding_dispatch_blocked_by_constitution(self, mock_check, mock_post):
         """Coding output blocked by constitutional filter."""
         from integrations.agent_engine.dispatch import dispatch_goal
@@ -551,6 +562,9 @@ class TestCodingDispatchReview:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
+            'response': 'Some harmful code output'
+        }
+        mock_resp.get_json.return_value = {
             'response': 'Some harmful code output'
         }
         mock_post.return_value = mock_resp
@@ -1335,7 +1349,7 @@ class TestComputerUseLocalLoop:
 class TestComputerUseOmniParser:
     """E2E: local_omniparser.py — HTTP and in-process screen parsing."""
 
-    @patch('requests.post')
+    @patch('core.http_pool.pooled_post')
     def test_parse_screen_http(self, mock_post):
         """HTTP POST to :8080/parse/ with base64 image."""
         mock_resp = MagicMock()
@@ -1353,10 +1367,10 @@ class TestComputerUseOmniParser:
         assert result['screen_info'] == 'Button[0]: OK'
         assert len(result['parsed_content_list']) == 1
         mock_post.assert_called_once()
-        call_json = mock_post.call_args[1].get('json', {})
-        assert 'base64_image' in call_json
+        call_kwargs = mock_post.call_args[1]
+        assert 'base64_image' in call_kwargs.get('json', {})
 
-    @patch('requests.post')
+    @patch('core.http_pool.pooled_post')
     def test_parse_screen_returns_screen_info(self, mock_post):
         """Response has screen_info, parsed_content_list, width, height."""
         mock_resp = MagicMock()
@@ -1374,7 +1388,7 @@ class TestComputerUseOmniParser:
         assert 'parsed_content_list' in result
         assert 'width' in result
 
-    @patch('requests.post')
+    @patch('core.http_pool.pooled_post')
     def test_parse_screen_measures_latency(self, mock_post):
         """latency field present in result."""
         mock_resp = MagicMock()

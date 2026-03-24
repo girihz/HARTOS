@@ -161,7 +161,7 @@ def main():
     parser.add_argument('--output-dir', type=str, default=None,
                         help='Output directory (default: in-place)')
     parser.add_argument('--manifest-out', type=str,
-                        default='security/hevolveai_manifest.json',
+                        default='dist/hevolveai_manifest.json',
                         help='Manifest output path')
     args = parser.parse_args()
 

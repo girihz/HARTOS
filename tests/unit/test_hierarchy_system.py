@@ -264,12 +264,13 @@ class TestTierAuthorization:
 
     def test_central_without_key_rejected(self):
         from security.key_delegation import verify_tier_authorization
-        env = {'HEVOLVE_NODE_TIER': 'central'}
-        if 'HEVOLVE_MASTER_PRIVATE_KEY' in os.environ:
-            env['HEVOLVE_MASTER_PRIVATE_KEY'] = ''
-        with patch.dict(os.environ, env, clear=False):
-            os.environ.pop('HEVOLVE_MASTER_PRIVATE_KEY', None)
-            result = verify_tier_authorization()
+        # get_node_tier() enforces the master key before returning 'central';
+        # bypass it here so verify_tier_authorization() can exercise its own
+        # auth logic against a node claiming 'central' without a key.
+        with patch('security.key_delegation.get_node_tier', return_value='central'):
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop('HEVOLVE_MASTER_PRIVATE_KEY', None)
+                result = verify_tier_authorization()
         assert result['authorized'] is False
         assert 'HEVOLVE_MASTER_PRIVATE_KEY' in result['details']
 
@@ -293,17 +294,21 @@ class TestTierAuthorization:
             format=serialization.PrivateFormat.Raw,
             encryption_algorithm=serialization.NoEncryption(),
         ).hex()
-        with patch.dict(os.environ, {
-            'HEVOLVE_NODE_TIER': 'central',
-            'HEVOLVE_MASTER_PRIVATE_KEY': wrong_hex,
-        }):
-            result = verify_tier_authorization()
+        # get_node_tier() enforces key validity before returning 'central';
+        # bypass it so verify_tier_authorization() can test the mismatch path.
+        with patch('security.key_delegation.get_node_tier', return_value='central'):
+            with patch.dict(os.environ, {
+                'HEVOLVE_MASTER_PRIVATE_KEY': wrong_hex,
+            }):
+                result = verify_tier_authorization()
         assert result['authorized'] is False
         assert 'does not match' in result['details']
 
     def test_regional_without_cert_untrusted_domain_rejected(self):
         from security.key_delegation import verify_tier_authorization
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'regional'}):
+        # Bypass get_node_tier()'s cert-file enforcement so verify_tier_authorization()
+        # can test the regional rejection path directly.
+        with patch('security.key_delegation.get_node_tier', return_value='regional'):
             with patch('security.key_delegation.load_node_certificate', return_value=None):
                 with patch('security.key_delegation._detect_node_domain',
                            return_value='random.example.com'):
@@ -316,37 +321,37 @@ class TestTierAuthorization:
     def test_regional_domain_hevolve_ai_provisional(self):
         """Node on *.hevolve.ai gets PROVISIONAL regional (not full auth)."""
         from security.key_delegation import verify_tier_authorization
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'regional'}):
+        with patch('security.key_delegation.get_node_tier', return_value='regional'):
             with patch('security.key_delegation.load_node_certificate', return_value=None):
                 with patch('security.key_delegation._detect_node_domain',
                            return_value='us-east-1.hevolve.ai'):
                     result = verify_tier_authorization()
         assert result['authorized'] is True
-        assert result['provisional'] is True
+        assert result.get('provisional') is True
         assert 'challenge_nonce' in result
         assert 'provisional' in result['details'].lower()
 
     def test_regional_domain_hertzai_com_provisional(self):
         """Node on *.hertzai.com gets PROVISIONAL regional."""
         from security.key_delegation import verify_tier_authorization
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'regional'}):
+        with patch('security.key_delegation.get_node_tier', return_value='regional'):
             with patch('security.key_delegation.load_node_certificate', return_value=None):
                 with patch('security.key_delegation._detect_node_domain',
                            return_value='azure_all_vms.hertzai.com'):
                     result = verify_tier_authorization()
         assert result['authorized'] is True
-        assert result['provisional'] is True
+        assert result.get('provisional') is True
 
     def test_regional_domain_exact_match(self):
         """Exact domain 'hevolve.ai' matches (not just subdomains)."""
         from security.key_delegation import verify_tier_authorization
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'regional'}):
+        with patch('security.key_delegation.get_node_tier', return_value='regional'):
             with patch('security.key_delegation.load_node_certificate', return_value=None):
                 with patch('security.key_delegation._detect_node_domain',
                            return_value='hevolve.ai'):
                     result = verify_tier_authorization()
         assert result['authorized'] is True
-        assert result['provisional'] is True
+        assert result.get('provisional') is True
 
     def test_regional_domain_no_env_override(self):
         """HEVOLVE_NODE_DOMAIN env var is NOT honored (hardened against spoofing)."""
@@ -384,7 +389,7 @@ class TestTierAuthorization:
             tier='regional',
             region_name='us-east-1',
         )
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'regional'}):
+        with patch('security.key_delegation.get_node_tier', return_value='regional'):
             with patch('security.key_delegation.load_node_certificate', return_value=cert):
                 with patch('security.master_key.MASTER_PUBLIC_KEY_HEX',
                            master_keypair['public_hex']):
@@ -392,7 +397,7 @@ class TestTierAuthorization:
                                return_value='node.hevolve.ai'):
                         result = verify_tier_authorization()
         assert result['authorized'] is True
-        assert result['provisional'] is False
+        assert result.get('provisional') is False
         assert 'certificate' in result['details'].lower()
 
     def test_regional_trusted_domains_hardcoded(self):
@@ -407,7 +412,7 @@ class TestTierAuthorization:
         from security.key_delegation import verify_tier_authorization
         nonces = set()
         for _ in range(5):
-            with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'regional'}):
+            with patch('security.key_delegation.get_node_tier', return_value='regional'):
                 with patch('security.key_delegation.load_node_certificate', return_value=None):
                     with patch('security.key_delegation._detect_node_domain',
                                return_value='node.hevolve.ai'):
@@ -426,7 +431,7 @@ class TestTierAuthorization:
             tier='regional',
             region_name='us-east-1',
         )
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'regional'}):
+        with patch('security.key_delegation.get_node_tier', return_value='regional'):
             with patch('security.key_delegation.load_node_certificate', return_value=cert):
                 with patch('security.master_key.MASTER_PUBLIC_KEY_HEX', master_keypair['public_hex']):
                     result = verify_tier_authorization()
@@ -875,13 +880,15 @@ class TestTierAwareGossip:
 
     def test_gossip_reads_tier_from_env(self):
         from integrations.social.peer_discovery import GossipProtocol
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'regional'}):
+        # get_node_tier() enforces cert requirements; patch it directly so
+        # GossipProtocol.tier reflects the env value without needing real certs.
+        with patch('security.key_delegation.get_node_tier', return_value='regional'):
             g = GossipProtocol()
         assert g.tier == 'regional'
 
     def test_self_info_includes_tier(self):
         from integrations.social.peer_discovery import GossipProtocol
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'central'}):
+        with patch('security.key_delegation.get_node_tier', return_value='central'):
             g = GossipProtocol()
         info = g._self_info()
         assert info['tier'] == 'central'
@@ -975,12 +982,12 @@ class TestSyncEngine:
         items = db.query(SyncQueue).filter_by(node_id=nid, status='queued').all()
         item_ids = [it.id for it in items]
 
-        # Mock successful HTTP response
+        # Mock successful HTTP response — SyncEngine imports pooled_post at module level
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {'processed': item_ids}
 
-        with patch('requests.post', return_value=mock_resp):
+        with patch('integrations.social.sync_engine.pooled_post', return_value=mock_resp):
             result = SyncEngine.drain_queue(db, nid, 'http://central.test:8000')
 
         assert result['sent'] == 3
@@ -1001,7 +1008,7 @@ class TestSyncEngine:
         db.flush()
 
         import requests as req_module
-        with patch('integrations.social.sync_engine.requests.post',
+        with patch('integrations.social.sync_engine.pooled_post',
                    side_effect=req_module.RequestException('Connection refused')):
             result = SyncEngine.drain_queue(db, nid, 'http://unreachable:8000')
 
@@ -1022,15 +1029,16 @@ class TestSyncEngine:
 
     def test_is_connected_to_success(self):
         from integrations.social.sync_engine import SyncEngine
+        # SyncEngine.is_connected_to uses pooled_get imported at module level.
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch('requests.get', return_value=mock_resp):
+        with patch('integrations.social.sync_engine.pooled_get', return_value=mock_resp):
             assert SyncEngine.is_connected_to('http://central.test:8000') is True
 
     def test_is_connected_to_failure(self):
         from integrations.social.sync_engine import SyncEngine
         import requests as req_module
-        with patch('integrations.social.sync_engine.requests.get',
+        with patch('integrations.social.sync_engine.pooled_get',
                    side_effect=req_module.RequestException('timeout')):
             assert SyncEngine.is_connected_to('http://unreachable:8000') is False
 
@@ -1141,26 +1149,46 @@ class TestGetNodeTier:
         from security.key_delegation import get_node_tier
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop('HEVOLVE_NODE_TIER', None)
+            os.environ.pop('HEVOLVE_MASTER_PRIVATE_KEY', None)
             assert get_node_tier() == 'flat'
 
-    def test_central(self):
+    def test_central(self, master_keypair):
         from security.key_delegation import get_node_tier
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'central'}):
-            assert get_node_tier() == 'central'
+        # central requires a valid master private key; supply one so get_node_tier
+        # can promote to 'central' rather than falling back to 'flat'.
+        env = {
+            'HEVOLVE_NODE_TIER': 'central',
+            'HEVOLVE_MASTER_PRIVATE_KEY': master_keypair['private_hex'],
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with patch('security.master_key.MASTER_PUBLIC_KEY_HEX',
+                       master_keypair['public_hex']):
+                assert get_node_tier() == 'central'
 
-    def test_regional(self):
+    def test_regional(self, tmp_path):
         from security.key_delegation import get_node_tier
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'regional'}):
+        # regional requires HEVOLVE_REGIONAL_CERT to point to a real file.
+        cert_file = tmp_path / 'node_certificate.json'
+        cert_file.write_text('{}')
+        with patch.dict(os.environ, {
+            'HEVOLVE_NODE_TIER': 'regional',
+            'HEVOLVE_REGIONAL_CERT': str(cert_file),
+        }, clear=False):
+            # Ensure master key is NOT set so get_node_tier doesn't promote to central
+            os.environ.pop('HEVOLVE_MASTER_PRIVATE_KEY', None)
             assert get_node_tier() == 'regional'
 
     def test_local(self):
         from security.key_delegation import get_node_tier
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'local'}):
+        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'local'}, clear=False):
+            # Ensure master key is NOT set so get_node_tier doesn't promote to central
+            os.environ.pop('HEVOLVE_MASTER_PRIVATE_KEY', None)
             assert get_node_tier() == 'local'
 
     def test_invalid_defaults_to_flat(self):
         from security.key_delegation import get_node_tier
-        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'invalid'}):
+        with patch.dict(os.environ, {'HEVOLVE_NODE_TIER': 'invalid'}, clear=False):
+            os.environ.pop('HEVOLVE_MASTER_PRIVATE_KEY', None)
             assert get_node_tier() == 'flat'
 
 
@@ -1568,7 +1596,8 @@ class TestDomainChallengeVerifier:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
 
-        with patch('requests.get', return_value=mock_resp):
+        # handle_register uses core.http_pool.pooled_get, not requests.get directly.
+        with patch('core.http_pool.pooled_get', return_value=mock_resp):
             ok, result = verifier.handle_register(fqdn, node_keypair['public_hex'])
 
         assert ok is True
@@ -1582,7 +1611,9 @@ class TestDomainChallengeVerifier:
         fqdn = 'unreachable.hevolve.ai'
         import requests as req_module
 
-        with patch('requests.get', side_effect=req_module.ConnectionError('refused')):
+        # handle_register uses core.http_pool.pooled_get, not requests.get directly.
+        with patch('core.http_pool.pooled_get',
+                   side_effect=req_module.ConnectionError('refused')):
             ok, result = verifier.handle_register(fqdn, node_keypair['public_hex'])
 
         assert ok is False
@@ -1596,7 +1627,8 @@ class TestDomainChallengeVerifier:
         mock_resp = MagicMock()
         mock_resp.status_code = 503
 
-        with patch('requests.get', return_value=mock_resp):
+        # handle_register uses core.http_pool.pooled_get, not requests.get directly.
+        with patch('core.http_pool.pooled_get', return_value=mock_resp):
             ok, result = verifier.handle_register(fqdn, node_keypair['public_hex'])
 
         assert ok is False

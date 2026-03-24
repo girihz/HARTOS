@@ -430,7 +430,7 @@ class TestAgentDaemon:
 
         daemon = AgentDaemon()
         with patch('integrations.social.models.get_db', return_value=db), \
-             patch('integrations.agent_engine.dispatch.requests.post') as mock_post, \
+             patch('integrations.agent_engine.dispatch.pooled_post') as mock_post, \
              patch('security.secret_redactor._model_detect_pii',
                    side_effect=lambda t: t), \
              patch('integrations.agent_engine.budget_gate.pre_dispatch_budget_gate',
@@ -458,38 +458,95 @@ class TestAgentDaemon:
 # =============================================================================
 
 class TestDispatch:
-    @patch('requests.post')
+    # Tier-1 in-process import must fail so dispatch falls through to Tier-2 HTTP.
+    # Budget gate + guardrails must also be mocked to allow the dispatch path.
+    _DISPATCH_PATCHES = [
+        patch('integrations.agent_engine.dispatch.is_user_recently_active', return_value=False),
+        patch('integrations.agent_engine.budget_gate.pre_dispatch_budget_gate',
+              return_value=(True, 'OK')),
+        patch('security.hive_guardrails.GuardrailEnforcer.before_dispatch',
+              side_effect=lambda prompt, *a: (True, '', prompt)),
+        patch('security.hive_guardrails.GuardrailEnforcer.after_response',
+              return_value=(True, 'ok')),
+    ]
+
+    @patch('integrations.agent_engine.dispatch.pooled_post')
     def test_dispatch_goal_success(self, mock_post):
         from integrations.agent_engine.dispatch import dispatch_goal
         mock_post.return_value = MagicMock(
             status_code=200,
-            json=lambda: {'response': 'Agent created'}
+            json=lambda: {'response': 'Agent created'},
+            get_json=lambda: {'response': 'Agent created'},
         )
-        result = dispatch_goal('Market product X', '123', 'goal_abc', 'marketing')
+        import builtins
+        _real_import = builtins.__import__
+        def _block_adapter(name, *args, **kwargs):
+            if 'hartos_backend_adapter' in name:
+                raise ImportError('blocked for test')
+            return _real_import(name, *args, **kwargs)
+        with patch('builtins.__import__', side_effect=_block_adapter):
+            for p in self._DISPATCH_PATCHES:
+                p.start()
+            try:
+                result = dispatch_goal('Market product X', '123', 'goal_abc', 'marketing')
+            finally:
+                for p in self._DISPATCH_PATCHES:
+                    p.stop()
         assert result == 'Agent created'
         call_json = mock_post.call_args[1]['json']
         assert call_json['autonomous'] is True
         assert call_json['create_agent'] is True
-        assert call_json['prompt_id'] == 'marketing_goal_abc'
+        # prompt_id is now a numeric MD5 hash: int(md5('goal_abc')[:10], 16) % 100_000_000_000
+        assert call_json['prompt_id'] == '95535448866'
 
-    @patch('integrations.agent_engine.dispatch.requests.post')
+    @patch('integrations.agent_engine.dispatch.pooled_post')
     def test_dispatch_goal_failure(self, mock_post):
-        import requests as req
         from integrations.agent_engine.dispatch import dispatch_goal
-        mock_post.side_effect = req.RequestException('Connection refused')
-        result = dispatch_goal('Market product X', '123', 'goal_abc', 'marketing')
+        mock_post.return_value = MagicMock(
+            status_code=503,
+            text='Service Unavailable',
+        )
+        import builtins
+        _real_import = builtins.__import__
+        def _block_adapter(name, *args, **kwargs):
+            if 'hartos_backend_adapter' in name:
+                raise ImportError('blocked for test')
+            return _real_import(name, *args, **kwargs)
+        with patch('builtins.__import__', side_effect=_block_adapter):
+            for p in self._DISPATCH_PATCHES:
+                p.start()
+            try:
+                result = dispatch_goal('Market product X', '123', 'goal_abc', 'marketing')
+            finally:
+                for p in self._DISPATCH_PATCHES:
+                    p.stop()
         assert result is None
 
-    @patch('requests.post')
+    @patch('integrations.agent_engine.dispatch.pooled_post')
     def test_dispatch_goal_coding_type(self, mock_post):
         from integrations.agent_engine.dispatch import dispatch_goal
         mock_post.return_value = MagicMock(
             status_code=200,
-            json=lambda: {'response': 'ok'}
+            json=lambda: {'response': 'ok'},
+            get_json=lambda: {'response': 'ok'},
         )
-        dispatch_goal('Fix bugs', '123', 'goal_xyz', 'coding')
+        import builtins
+        _real_import = builtins.__import__
+        def _block_adapter(name, *args, **kwargs):
+            if 'hartos_backend_adapter' in name:
+                raise ImportError('blocked for test')
+            return _real_import(name, *args, **kwargs)
+        with patch('builtins.__import__', side_effect=_block_adapter):
+            for p in self._DISPATCH_PATCHES:
+                p.start()
+            try:
+                dispatch_goal('Fix bugs', '123', 'goal_xyz', 'coding')
+            finally:
+                for p in self._DISPATCH_PATCHES:
+                    p.stop()
         call_json = mock_post.call_args[1]['json']
-        assert call_json['prompt_id'] == 'coding_goal_xyz'
+        # prompt_id is now a numeric MD5 hash: int(md5('goal_xyz')[:10], 16) % 100_000_000_000
+        assert call_json['prompt_id'] == '28638000281'
 
 
 # =============================================================================
@@ -1585,12 +1642,13 @@ class TestWorldModelBridge:
             model_id='qwen3', latency_ms=100)
         assert len(bridge._experience_queue) == 0  # Filtered
 
-    @patch('integrations.agent_engine.world_model_bridge.requests.post')
+    @patch('integrations.agent_engine.world_model_bridge.pooled_post')
     def test_flush_forwards_to_chat_completions(self, mock_post):
         """Flush sends experiences to /v1/chat/completions in OpenAI format."""
         from integrations.agent_engine.world_model_bridge import WorldModelBridge
         mock_post.return_value = Mock(status_code=200)
         bridge = WorldModelBridge()
+        bridge._http_disabled = False
         bridge._api_url = 'http://localhost:8000'
         batch = [{
             'prompt': 'hello world',
@@ -1617,7 +1675,7 @@ class TestWorldModelBridge:
         assert body['messages'][2]['content'] == 'hi there'
         assert bridge._stats['total_flushed'] == 1
 
-    @patch('integrations.agent_engine.world_model_bridge.requests.post')
+    @patch('integrations.agent_engine.world_model_bridge.pooled_post')
     def test_submit_correction(self, mock_post):
         """submit_correction forwards to POST /v1/corrections."""
         from integrations.agent_engine.world_model_bridge import WorldModelBridge
@@ -1626,6 +1684,7 @@ class TestWorldModelBridge:
             json=lambda: {'success': True, 'domain': 'general',
                           'expert_id': 'expert1'})
         bridge = WorldModelBridge()
+        bridge._http_disabled = False
         bridge._api_url = 'http://localhost:8000'
         result = bridge.submit_correction(
             original_response='Paris is in Germany',
@@ -1646,7 +1705,7 @@ class TestWorldModelBridge:
         assert body['valid_until'] == '2026-12-31T00:00:00Z'
         assert bridge._stats['total_corrections'] == 1
 
-    @patch('integrations.agent_engine.world_model_bridge.requests.post')
+    @patch('integrations.agent_engine.world_model_bridge.pooled_post')
     def test_query_hivemind(self, mock_post):
         """query_hivemind forwards to POST /v1/hivemind/think."""
         from integrations.agent_engine.world_model_bridge import WorldModelBridge
@@ -1659,6 +1718,7 @@ class TestWorldModelBridge:
                 'confidence': 0.85,
             })
         bridge = WorldModelBridge()
+        bridge._http_disabled = False
         bridge._api_url = 'http://localhost:8000'
         with patch.object(bridge, '_check_cct_access', return_value=True):
             result = bridge.query_hivemind('What is in this image?', timeout_ms=2000)
@@ -1671,7 +1731,7 @@ class TestWorldModelBridge:
         assert body['timeout_ms'] == 2000
         assert bridge._stats['total_hivemind_queries'] == 1
 
-    @patch('integrations.agent_engine.world_model_bridge.requests.get')
+    @patch('integrations.agent_engine.world_model_bridge.pooled_get')
     def test_get_learning_stats(self, mock_get):
         """get_learning_stats merges /v1/stats + /v1/hivemind/stats."""
         from integrations.agent_engine.world_model_bridge import WorldModelBridge
@@ -1688,13 +1748,14 @@ class TestWorldModelBridge:
             return Mock(status_code=404)
         mock_get.side_effect = side_effect
         bridge = WorldModelBridge()
+        bridge._http_disabled = False
         bridge._api_url = 'http://localhost:8000'
         stats = bridge.get_learning_stats()
         assert stats['learning']['total_interactions'] == 100
         assert stats['hivemind']['connected_agents'] == 3
         assert 'bridge' in stats
 
-    @patch('integrations.agent_engine.world_model_bridge.requests.get')
+    @patch('integrations.agent_engine.world_model_bridge.pooled_get')
     def test_get_hivemind_agents(self, mock_get):
         """get_hivemind_agents returns agent list from /v1/hivemind/agents."""
         from integrations.agent_engine.world_model_bridge import WorldModelBridge
@@ -1705,12 +1766,13 @@ class TestWorldModelBridge:
                 {'agent_id': 'language', 'capabilities': ['REASON', 'DECODE']},
             ]})
         bridge = WorldModelBridge()
+        bridge._http_disabled = False
         bridge._api_url = 'http://localhost:8000'
         agents = bridge.get_hivemind_agents()
         assert len(agents) == 2
         assert agents[0]['agent_id'] == 'vision'
 
-    @patch('integrations.agent_engine.world_model_bridge.requests.get')
+    @patch('integrations.agent_engine.world_model_bridge.pooled_get')
     def test_check_health(self, mock_get):
         """check_health calls GET /health."""
         from integrations.agent_engine.world_model_bridge import WorldModelBridge
@@ -1719,6 +1781,7 @@ class TestWorldModelBridge:
             json=lambda: {'status': 'ok', 'uptime': 3600},
             headers={'content-type': 'application/json'})
         bridge = WorldModelBridge()
+        bridge._http_disabled = False
         bridge._api_url = 'http://localhost:8000'
         health = bridge.check_health()
         assert health['healthy'] is True
@@ -1902,7 +1965,7 @@ class TestFrozenValues:
     def test_guardian_purpose_is_tuple(self):
         from security.hive_guardrails import VALUES
         assert isinstance(VALUES.GUARDIAN_PURPOSE, tuple)
-        assert len(VALUES.GUARDIAN_PURPOSE) == 9
+        assert len(VALUES.GUARDIAN_PURPOSE) == 11
         assert 'guardian angel' in VALUES.GUARDIAN_PURPOSE[0]
         assert any('addictive' in p for p in VALUES.GUARDIAN_PURPOSE)
         assert any('sentient tool' in p for p in VALUES.GUARDIAN_PURPOSE)
@@ -1978,7 +2041,7 @@ class TestGuardrailHash:
         from security.hive_guardrails import GuardrailNetwork
         status = GuardrailNetwork.get_network_status()
         assert 'guardian_purpose' in status
-        assert len(status['guardian_purpose']) == 9
+        assert len(status['guardian_purpose']) == 11
 
 
 class TestModuleLevelGuard:
@@ -2948,7 +3011,7 @@ class TestCloudConsentGate:
             bridge._api_url = url
             assert not bridge._is_external_target(), f"Expected local: {url}"
 
-    @patch('integrations.agent_engine.world_model_bridge.requests.post')
+    @patch('integrations.agent_engine.world_model_bridge.pooled_post')
     def test_external_flush_requires_consent(self, mock_post):
         """External target + no consent = batch filtered out."""
         from integrations.agent_engine.world_model_bridge import WorldModelBridge
@@ -2963,12 +3026,13 @@ class TestCloudConsentGate:
         # Should not have called the external endpoint
         mock_post.assert_not_called()
 
-    @patch('integrations.agent_engine.world_model_bridge.requests.post')
+    @patch('integrations.agent_engine.world_model_bridge.pooled_post')
     def test_external_flush_with_consent_proceeds(self, mock_post):
         """External target + consent = batch sent."""
         from integrations.agent_engine.world_model_bridge import WorldModelBridge
         mock_post.return_value = Mock(status_code=200)
         bridge = WorldModelBridge()
+        bridge._http_disabled = False
         bridge._api_url = 'http://cloud.example.com:8000'
         # Pre-populate consent cache (bypass DB lookup)
         bridge._consent_cache['consented_user'] = (True, 9999999999.0)
@@ -3345,41 +3409,31 @@ class TestVLMLocalComputerTool:
         finally:
             lct.pyautogui = orig
 
-    def test_http_tier_screenshot(self):
+    @patch('integrations.vlm.local_computer_tool.pooled_get')
+    def test_http_tier_screenshot(self, mock_get):
         """HTTP tier calls localhost:5001/screenshot."""
         import integrations.vlm.local_computer_tool as lct
-        mock_requests = MagicMock()
         mock_resp = Mock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {'base64_image': 'dGVzdA=='}
         mock_resp.raise_for_status = Mock()
-        mock_requests.get.return_value = mock_resp
+        mock_get.return_value = mock_resp
 
-        orig = lct.requests
-        try:
-            lct.requests = mock_requests
-            result = lct.take_screenshot('http')
-            assert result == 'dGVzdA=='
-            mock_requests.get.assert_called_once()
-            assert ':5001/screenshot' in str(mock_requests.get.call_args)
-        finally:
-            lct.requests = orig
+        result = lct.take_screenshot('http')
+        assert result == 'dGVzdA=='
+        mock_get.assert_called_once()
+        assert ':5001/screenshot' in str(mock_get.call_args)
 
-    def test_http_tier_execute(self):
+    @patch('integrations.vlm.local_computer_tool.pooled_post')
+    def test_http_tier_execute(self, mock_post):
         """HTTP tier calls localhost:5001/execute."""
         import integrations.vlm.local_computer_tool as lct
-        mock_requests = MagicMock()
         mock_resp = Mock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {'output': 'Clicked'}
         mock_resp.raise_for_status = Mock()
-        mock_requests.post.return_value = mock_resp
+        mock_post.return_value = mock_resp
 
-        orig = lct.requests
-        try:
-            lct.requests = mock_requests
-            result = lct.execute_action({'action': 'left_click', 'coordinate': [10, 20]}, 'http')
-            assert result.get('output') == 'Clicked'
-            mock_requests.post.assert_called_once()
-        finally:
-            lct.requests = orig
+        result = lct.execute_action({'action': 'left_click', 'coordinate': [10, 20]}, 'http')
+        assert result.get('output') == 'Clicked'
+        mock_post.assert_called_once()

@@ -8,6 +8,7 @@ except ImportError:
 import os
 import pytz
 from core.http_pool import pooled_get, pooled_post, pooled_request
+from core.port_registry import get_port as _get_llm_port
 from typing import Dict, Optional, Tuple, Any, List
 import uuid
 import time
@@ -179,7 +180,7 @@ user_simplemem = TTLCache(ttl_seconds=7200, max_size=500, name='reuse_user_simpl
 # }]
 
 # Mode-aware config_list: cloud/regional use external LLM, flat uses local
-# (user's wizard-configured endpoint via HEVOLVE_LOCAL_LLM_URL or LLAMA_CPP_PORT)
+# (user's wizard-configured endpoint via HEVOLVE_LOCAL_LLM_URL)
 _node_tier = os.environ.get('HEVOLVE_NODE_TIER', 'flat')
 _active_cloud = os.environ.get('HEVOLVE_ACTIVE_CLOUD_PROVIDER', '')
 if _node_tier in ('regional', 'central') and os.environ.get('HEVOLVE_LLM_ENDPOINT_URL'):
@@ -200,14 +201,11 @@ elif _active_cloud and os.environ.get('HEVOLVE_LLM_API_KEY'):
         _cloud_cfg["base_url"] = os.environ['HEVOLVE_LLM_ENDPOINT_URL']
     config_list = [_cloud_cfg]
 else:
-    # Dynamic: reads from user's LLM Setup Wizard config (set by Nunba app.py)
-    from core.port_registry import get_port as _get_llm_port
-    _llama_port = os.environ.get('LLAMA_CPP_PORT', str(_get_llm_port('llm')))
-    _local_llm_url = os.environ.get('HEVOLVE_LOCAL_LLM_URL', f'http://localhost:{_llama_port}/v1')
+    from core.port_registry import get_local_llm_url
     config_list = [{
         "model": os.environ.get('HEVOLVE_LOCAL_LLM_MODEL', 'local'),
         "api_key": 'dummy',
-        "base_url": _local_llm_url,
+        "base_url": get_local_llm_url(),
         "price": [0, 0]
     }]
 
@@ -901,6 +899,13 @@ def create_agents_for_role(user_id: str, prompt_id):
                 return None
             return "auto"
 
+        # Seed autogen with recent messages from shared LangChain/autogen buffer
+        try:
+            from integrations.channels.memory.shared_history import seed_autogen_from_shared_history
+            _seed_msgs = seed_autogen_from_shared_history(user_id, max_messages=8)
+        except Exception:
+            _seed_msgs = []
+
         select_speaker_transforms = transform_messages.TransformMessages(
             transforms=[
                 transforms.MessageHistoryLimiter(max_messages=5),
@@ -909,13 +914,14 @@ def create_agents_for_role(user_id: str, prompt_id):
         )
         group_chat = autogen.GroupChat(
             agents=[assistant, helper, user_proxy],
-            messages=[],
+            messages=_seed_msgs,
             max_round=3,
             select_speaker_prompt_template=f"Read the above conversation, select the next person from [Assistant, Helper, & User] & only return the role as agent. Return User only if the previous message demands it",
             select_speaker_transform_messages=select_speaker_transforms,
             speaker_selection_method=state_transition,  # using an LLM to decide
             allow_repeat_speaker=False,  # Prevent same agent speaking twice
-            send_introductions=False
+            send_introductions=False,
+            role_for_select_speaker_messages='user',  # Qwen3.5 rejects system mid-conversation
         )
 
         manager = autogen.GroupChatManager(
@@ -2299,6 +2305,13 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
     core_tools = build_core_tool_closures(_tool_ctx)
     register_core_tools(core_tools, helper1, time_agent)
 
+    # Channel tools: send to channels, register channels, list status, get context
+    try:
+        from integrations.channels.agent_tools import register_channel_tools
+        register_channel_tools(helper1, time_agent, _tool_ctx)
+    except Exception as e:
+        tool_logger.debug(f"Channel tools registration skipped: {e}")
+
     def connect_time_main(message: Annotated[str, "The message time agent want to send to main agent"]) -> str:
         message = f"Role: Time Agent\n Message: {message}"
         print(f'user_id {user_id}')
@@ -2334,6 +2347,13 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
 
     # --- Core tools for visual_agent (reuse same tool closures) ---
     register_core_tools(core_tools, helper2, visual_agent)
+
+    # Channel tools for visual_agent too
+    try:
+        from integrations.channels.agent_tools import register_channel_tools
+        register_channel_tools(helper2, visual_agent, _tool_ctx)
+    except Exception:
+        pass
 
     # MCP Integration: Load and register user-provided MCP server tools
     try:
@@ -2858,7 +2878,8 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
         select_speaker_transform_messages=select_speaker_transforms,
         speaker_selection_method=state_transition,  # using an LLM to decide
         allow_repeat_speaker=False,  # Prevent same agent speaking twice
-        send_introductions=False
+        send_introductions=False,
+        role_for_select_speaker_messages='user',
     )
 
     manager = autogen.GroupChatManager(
@@ -2873,7 +2894,8 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
         select_speaker_transform_messages=select_speaker_transforms,
         speaker_selection_method=state_transition1,  # using an LLM to decide
         allow_repeat_speaker=False,  # Prevent same agent speaking twice
-        send_introductions=False
+        send_introductions=False,
+        role_for_select_speaker_messages='user',
     )
 
     manager_1 = autogen.GroupChatManager(
@@ -2888,7 +2910,8 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
         select_speaker_transform_messages=select_speaker_transforms,
         speaker_selection_method=state_transition2,  # using an LLM to decide
         allow_repeat_speaker=False,  # Prevent same agent speaking twice
-        send_introductions=False
+        send_introductions=False,
+        role_for_select_speaker_messages='user',
     )
 
     manager_2 = autogen.GroupChatManager(
@@ -2907,44 +2930,107 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
     visual_agent_group['group_chat_2'] = group_chat_2
     visual_agent_group['manager_2'] = manager_2
 
-    # Auto-ingest group_chat messages into SimpleMem
-    if simplemem_store is not None:
-        for gc in [group_chat, group_chat_1, group_chat_2]:
-            _original_append = gc.messages.append
-            def _make_hook(orig_append, store=simplemem_store):
-                def _simplemem_ingest_hook(msg):
-                    orig_append(msg)
+    # Auto-ingest group_chat messages into SimpleMem + shared LangChain buffer
+    # This ensures autogen writes go to the SAME PersistentChatHistory that LangChain reads,
+    # eliminating redundant conversation storage and keeping both frameworks in sync.
+    _shared_hook_factory = None
+    try:
+        from integrations.channels.memory.shared_history import create_autogen_history_hook
+        _shared_hook_factory = create_autogen_history_hook(user_id, simplemem_store)
+    except Exception:
+        pass
+
+    for gc in [group_chat, group_chat_1, group_chat_2]:
+        _original_append = gc.messages.append
+
+        def _make_hook(orig_append, store=simplemem_store, shared_factory=_shared_hook_factory):
+            def _unified_ingest_hook(msg):
+                orig_append(msg)
+                # Skip seeded messages (already in buffer)
+                if isinstance(msg, dict) and msg.get('_from_shared'):
+                    return
+                content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
+                if not content or len(content.strip()) <= 5 or content == 'TERMINATE':
+                    return
+                speaker = msg.get("name", "Agent") if isinstance(msg, dict) else "Agent"
+                # SimpleMem ingest
+                if store is not None:
                     try:
-                        content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
-                        speaker = msg.get("name", "Agent") if isinstance(msg, dict) else "Agent"
-                        if content and len(content.strip()) > 5:
-                            loop = get_or_create_event_loop()
-                            loop.run_until_complete(store.add(content, {
-                                "sender_name": speaker,
-                                "user_id": user_id,
-                                "prompt_id": prompt_id,
-                            }))
+                        loop = get_or_create_event_loop()
+                        loop.run_until_complete(store.add(content, {
+                            "sender_name": speaker,
+                            "user_id": user_id,
+                            "prompt_id": prompt_id,
+                        }))
                     except Exception:
-                        pass  # Non-blocking
-                return _simplemem_ingest_hook
-            gc.messages.append = _make_hook(_original_append)
+                        pass
+                # Shared PersistentChatHistory write-back (dedup-aware)
+                if shared_factory is not None:
+                    try:
+                        from langchain_core.messages import HumanMessage, AIMessage
+                        from integrations.channels.memory.shared_history import _get_persistent_history
+                        hist = _get_persistent_history(user_id)
+                        if hist:
+                            role = msg.get("role", "assistant") if isinstance(msg, dict) else "assistant"
+                            lc_msg = HumanMessage(content=content) if role == "user" else AIMessage(content=content)
+                            # Dedup: skip if last buffer message has same content
+                            last_msgs = hist.messages[-3:] if hist.messages else []
+                            if not any(m.content == content for m in last_msgs):
+                                from datetime import datetime
+                                hist.add_message(lc_msg, metadata={
+                                    'timestamp': datetime.now().isoformat(),
+                                    'source': 'autogen',
+                                })
+                    except Exception:
+                        pass
+            return _unified_ingest_hook
+
+        # Use wrapper list (plain list.append is read-only in Python)
+        class _HookedList(list):
+            def __init__(self, data, hook):
+                super().__init__(data)
+                self._hook = hook
+            def append(self, msg):
+                super().append(msg)
+                try:
+                    self._hook(msg)
+                except Exception:
+                    pass
+        gc.messages = _HookedList(gc.messages, _make_hook(_original_append))
 
     # Auto-ingest group_chat messages into MemoryGraph (provenance tracking)
     if memory_graph is not None:
         for gc in [group_chat, group_chat_1, group_chat_2]:
-            _prev_append = gc.messages.append
-            def _make_graph_hook(prev_append, graph=memory_graph, session=user_prompt):
+            def _make_graph_hook(graph=memory_graph, session=user_prompt):
                 def _graph_ingest_hook(msg):
-                    prev_append(msg)
                     try:
                         content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
                         speaker = msg.get("name", "Agent") if isinstance(msg, dict) else "Agent"
                         if content and len(content.strip()) > 5:
                             graph.register_conversation(speaker, content, session)
                     except Exception:
-                        pass  # Non-blocking
+                        pass
                 return _graph_ingest_hook
-            gc.messages.append = _make_graph_hook(_prev_append)
+            if isinstance(gc.messages, _HookedList):
+                # Already hooked — chain the graph hook into the existing one
+                _existing_hook = gc.messages._hook
+                _graph_h = _make_graph_hook()
+                def _chained(msg, _eh=_existing_hook, _gh=_graph_h):
+                    _eh(msg)
+                    _gh(msg)
+                gc.messages._hook = _chained
+            else:
+                class _GraphHookedList(list):
+                    def __init__(self, data, hook):
+                        super().__init__(data)
+                        self._hook = hook
+                    def append(self, msg):
+                        super().append(msg)
+                        try:
+                            self._hook(msg)
+                        except Exception:
+                            pass
+                gc.messages = _GraphHookedList(gc.messages, _make_graph_hook())
 
     return assistant, user_proxy, group_chat, manager, helper, multi_role_agent, time_agent, time_user, group_chat_1, manager_1, chat_instructor, visual_agent_group
 

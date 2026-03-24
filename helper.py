@@ -1806,12 +1806,11 @@ if _node_tier in ('regional', 'central') and os.environ.get('HEVOLVE_LLM_ENDPOIN
         "price": [0.0025, 0.01]
     }]
 else:
-    from core.port_registry import get_port as _get_llm_port
-    _llama_port = os.environ.get('LLAMA_CPP_PORT', str(_get_llm_port('llm')))
+    from core.port_registry import get_local_llm_url
     config_list = [{
         "model": 'Qwen3-VL-4B-Instruct',
         "api_key": 'dummy',
-        "base_url": f'http://localhost:{_llama_port}/v1',
+        "base_url": get_local_llm_url(),
         "price": [0, 0]
     }]
 

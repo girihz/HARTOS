@@ -161,7 +161,7 @@ class TestGossipTaskBridge:
             {'host_url': 'http://peer1:6777', 'node_id': 'n1'},
             {'host_url': 'http://peer2:6777', 'node_id': 'n2'},
         ]):
-            with patch('requests.post', return_value=mock_response) as mock_post:
+            with patch('core.http_pool.pooled_post', return_value=mock_response) as mock_post:
                 notified = bridge.announce_goal(
                     'goal_1', 'test objective',
                     [{'task_id': 't1', 'description': 'do stuff'}],
@@ -180,7 +180,7 @@ class TestGossipTaskBridge:
         with patch.object(bridge, '_get_active_peers', return_value=[
             {'host_url': 'http://dead-peer:6777', 'node_id': 'n1'},
         ]):
-            with patch('requests.post', side_effect=req_lib.RequestException("timeout")):
+            with patch('core.http_pool.pooled_post', side_effect=req_lib.RequestException("timeout")):
                 notified = bridge.announce_goal('goal_2', 'test', [], {})
 
         assert notified == 0  # Graceful degradation
@@ -198,7 +198,7 @@ class TestGossipTaskBridge:
         with patch.object(bridge, '_get_active_peers', return_value=[
             {'host_url': 'http://peer1:6777', 'node_id': 'n1'},
         ]):
-            with patch('requests.get', return_value=mock_response):
+            with patch('core.http_pool.pooled_get', return_value=mock_response):
                 tasks = bridge.pull_tasks_from_peers()
 
         assert len(tasks) == 1
