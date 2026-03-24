@@ -139,3 +139,125 @@ class TestBondLevelProgression:
         EncounterService.record_encounter(mock_db, 'a', 'b', 'comment')
         # latest_at should be set to a datetime (updated by the service)
         assert existing.latest_at is not None
+
+
+# ============================================================
+# get_encounters — user's encounter list for SwarmCanvas
+# ============================================================
+
+class TestGetEncounters:
+    """get_encounters feeds the encounter graph in AgentHiveView."""
+
+    def test_returns_list(self):
+        from integrations.social.encounter_service import EncounterService
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.order_by.return_value.offset.return_value.limit.return_value.all.return_value = []
+        result = EncounterService.get_encounters(mock_db, 'user_1')
+        assert isinstance(result, list)
+
+    def test_enriches_with_other_user_info(self):
+        """Each encounter must include the other user's display info for the UI."""
+        from integrations.social.encounter_service import EncounterService
+        mock_enc = MagicMock()
+        mock_enc.user_a_id = 'user_1'
+        mock_enc.user_b_id = 'user_2'
+        mock_enc.to_dict.return_value = {'user_a_id': 'user_1', 'user_b_id': 'user_2'}
+        mock_other = MagicMock()
+        mock_other.id = 'user_2'
+        mock_other.username = 'bob'
+        mock_other.display_name = 'Bob'
+        mock_other.avatar_url = None
+        mock_other.user_type = 'human'
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.order_by.return_value.offset.return_value.limit.return_value.all.return_value = [mock_enc]
+        mock_db.query.return_value.filter_by.return_value.first.return_value = mock_other
+        result = EncounterService.get_encounters(mock_db, 'user_1')
+        assert len(result) == 1
+        assert 'other_user' in result[0]
+        assert result[0]['other_user']['username'] == 'bob'
+
+
+# ============================================================
+# get_encounters_with — pairwise encounter history
+# ============================================================
+
+class TestGetEncountersWith:
+    """get_encounters_with shows all contexts two users crossed paths."""
+
+    def test_returns_list(self):
+        from integrations.social.encounter_service import EncounterService
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter_by.return_value.order_by.return_value.all.return_value = []
+        result = EncounterService.get_encounters_with(mock_db, 'user_1', 'user_2')
+        assert isinstance(result, list)
+
+    def test_canonical_order_preserved(self):
+        """A+B and B+A produce same query — canonical sorted IDs."""
+        from integrations.social.encounter_service import EncounterService
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter_by.return_value.order_by.return_value.all.return_value = []
+        EncounterService.get_encounters_with(mock_db, 'user_b', 'user_a')
+        # filter_by should use sorted order: user_a, user_b
+        call_args = mock_db.query.return_value.filter_by.call_args
+        assert call_args[1]['user_a_id'] == 'user_a'
+        assert call_args[1]['user_b_id'] == 'user_b'
+
+
+# ============================================================
+# acknowledge_encounter — mutual awareness
+# ============================================================
+
+class TestAcknowledgeEncounter:
+    """acknowledge_encounter marks encounters as mutually seen."""
+
+    def test_returns_none_for_missing_encounter(self):
+        from integrations.social.encounter_service import EncounterService
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter_by.return_value.first.return_value = None
+        result = EncounterService.acknowledge_encounter(mock_db, 'enc_1', 'user_1')
+        assert result is None
+
+    def test_rejects_non_participant(self):
+        """Only the two users in the encounter can acknowledge it."""
+        from integrations.social.encounter_service import EncounterService
+        mock_db = MagicMock()
+        mock_enc = MagicMock()
+        mock_enc.user_a_id = 'alice'
+        mock_enc.user_b_id = 'bob'
+        mock_db.query.return_value.filter_by.return_value.first.return_value = mock_enc
+        result = EncounterService.acknowledge_encounter(mock_db, 'enc_1', 'charlie')
+        assert result is None  # charlie is not a participant
+
+    def test_accepts_participant(self):
+        from integrations.social.encounter_service import EncounterService
+        mock_db = MagicMock()
+        mock_enc = MagicMock()
+        mock_enc.user_a_id = 'alice'
+        mock_enc.user_b_id = 'bob'
+        mock_enc.to_dict.return_value = {'is_mutual_aware': True}
+        mock_db.query.return_value.filter_by.return_value.first.return_value = mock_enc
+        result = EncounterService.acknowledge_encounter(mock_db, 'enc_1', 'alice')
+        assert result is not None
+        assert mock_enc.is_mutual_aware is True
+
+
+# ============================================================
+# get_suggestions — connection recommendations
+# ============================================================
+
+class TestGetSuggestions:
+    """get_suggestions recommends connections based on encounter patterns."""
+
+    def test_returns_list(self):
+        from integrations.social.encounter_service import EncounterService
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.group_by.return_value.having.return_value.order_by.return_value.limit.return_value.all.return_value = []
+        result = EncounterService.get_suggestions(mock_db, 'user_1')
+        assert isinstance(result, list)
+
+    def test_respects_limit(self):
+        from integrations.social.encounter_service import EncounterService
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.group_by.return_value.having.return_value.order_by.return_value.limit.return_value.all.return_value = []
+        result = EncounterService.get_suggestions(mock_db, 'user_1', limit=5)
+        assert len(result) <= 5
