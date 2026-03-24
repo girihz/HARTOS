@@ -159,3 +159,92 @@ class TestGetAchievements:
         mock_db.query.return_value.join.return_value.filter.return_value.all.return_value = []
         result = GamificationService.get_user_achievements(mock_db, 'user_1')
         assert isinstance(result, list)
+
+
+# ============================================================
+# Achievement criteria types — what triggers each achievement
+# ============================================================
+
+class TestAchievementCriteriaTypes:
+    """SEED_ACHIEVEMENTS criteria_json must have valid types matching check_achievements."""
+
+    KNOWN_CRITERIA_TYPES = {
+        'post_count', 'comment_count', 'follower_count', 'following_count',
+        'streak_days', 'signal_threshold', 'level', 'upvotes_received',
+        'onboarding_complete', 'agent_created', 'recipe_shared',
+        'task_completed', 'referral_activated', 'spark_spent',
+        'compute_opt_in', 'compute_gpu_hours', 'compute_users_helped',
+        'campaign_launched', 'game_count', 'game_win_streak',
+        'community_created', 'encounter_count', 'max_bond_level',
+        'boost_count', 'collab_puzzle_count', 'region_joined', 'region_role',
+    }
+
+    def test_all_criteria_types_are_known(self):
+        """Unknown criteria types would silently fail to unlock."""
+        import json
+        from integrations.social.gamification_service import SEED_ACHIEVEMENTS
+        for ach in SEED_ACHIEVEMENTS:
+            criteria = json.loads(ach.get('criteria_json', '{}'))
+            ctype = criteria.get('type', '')
+            assert ctype in self.KNOWN_CRITERIA_TYPES, (
+                f"Achievement '{ach['slug']}' has unknown criteria type '{ctype}'")
+
+    def test_thresholds_are_positive(self):
+        """Threshold 0 would unlock immediately — probably a bug."""
+        import json
+        from integrations.social.gamification_service import SEED_ACHIEVEMENTS
+        for ach in SEED_ACHIEVEMENTS:
+            criteria = json.loads(ach.get('criteria_json', '{}'))
+            threshold = criteria.get('threshold')
+            if threshold is not None and criteria.get('type') != 'onboarding_complete':
+                assert threshold > 0, (
+                    f"Achievement '{ach['slug']}' has non-positive threshold: {threshold}")
+
+
+# ============================================================
+# Challenge methods — callable verification
+# ============================================================
+
+class TestChallengesMethods:
+    """Challenge system drives time-limited engagement events."""
+
+    def test_get_active_challenges_callable(self):
+        from integrations.social.gamification_service import GamificationService
+        assert callable(GamificationService.get_active_challenges)
+
+    def test_get_challenge_callable(self):
+        from integrations.social.gamification_service import GamificationService
+        assert callable(GamificationService.get_challenge)
+
+    def test_update_challenge_progress_callable(self):
+        from integrations.social.gamification_service import GamificationService
+        assert callable(GamificationService.update_challenge_progress)
+
+    def test_claim_challenge_reward_callable(self):
+        from integrations.social.gamification_service import GamificationService
+        assert callable(GamificationService.claim_challenge_reward)
+
+
+# ============================================================
+# Season methods
+# ============================================================
+
+class TestSeasonMethods:
+    """Seasons group achievements and leaderboards into time periods."""
+
+    def test_get_current_season_callable(self):
+        from integrations.social.gamification_service import GamificationService
+        assert callable(GamificationService.get_current_season)
+
+    def test_get_season_leaderboard_callable(self):
+        from integrations.social.gamification_service import GamificationService
+        assert callable(GamificationService.get_season_leaderboard)
+
+    def test_get_season_achievements_callable(self):
+        from integrations.social.gamification_service import GamificationService
+        assert callable(GamificationService.get_season_achievements)
+
+    def test_toggle_showcase_callable(self):
+        """Users can showcase favorite achievements on their profile."""
+        from integrations.social.gamification_service import GamificationService
+        assert callable(GamificationService.toggle_showcase)
