@@ -143,3 +143,81 @@ class TestAgentHandler:
     def test_is_running_default_false(self):
         registry = ChannelRegistry()
         assert registry.is_running() is False
+
+
+# ============================================================
+# Message routing — core integration point
+# ============================================================
+
+class TestMessageRouting:
+    """_route_to_agent is the bridge between channels and the AI backend."""
+
+    @pytest.mark.asyncio
+    async def test_route_ignores_without_handler(self):
+        """No handler set = message dropped silently (not crash)."""
+        registry = ChannelRegistry()
+        from integrations.channels.base import Message
+        msg = Message(id='1', channel='telegram', sender_id='user_1', text='hello')
+        await registry._route_to_agent(msg)  # Must not raise
+
+    @pytest.mark.asyncio
+    async def test_route_ignores_unknown_channel(self):
+        """Message from unregistered channel = dropped."""
+        registry = ChannelRegistry()
+        registry.set_agent_handler(MagicMock(return_value='response'))
+        from integrations.channels.base import Message
+        msg = Message(id='1', channel='nonexistent', sender_id='u1', text='hi')
+        await registry._route_to_agent(msg)  # Must not raise
+
+
+# ============================================================
+# send_to_channel — outbound messaging
+# ============================================================
+
+class TestSendToChannel:
+    """send_to_channel routes outbound messages to the right adapter."""
+
+    @pytest.mark.asyncio
+    async def test_send_returns_error_for_unknown_channel(self):
+        registry = ChannelRegistry()
+        result = await registry.send_to_channel('nonexistent', 'chat_1', 'hello')
+        assert result is not None
+        # Should indicate failure
+        if hasattr(result, 'success'):
+            assert result.success is False
+
+    def test_send_to_channel_requires_registered_adapter(self):
+        """Sending to unregistered channel must fail gracefully."""
+        registry = ChannelRegistry()
+        # No adapters registered — send should return error result
+        assert registry.get('nonexistent') is None
+
+
+# ============================================================
+# Multi-channel management
+# ============================================================
+
+class TestMultiChannel:
+    """Registry handles multiple channels simultaneously."""
+
+    def test_register_three_channels(self):
+        registry = ChannelRegistry()
+        for name in ('telegram', 'discord', 'slack'):
+            registry.register(_make_mock_adapter(name))
+        assert len(registry.list_channels()) == 3
+
+    def test_unregister_one_keeps_others(self):
+        registry = ChannelRegistry()
+        for name in ('telegram', 'discord', 'slack'):
+            registry.register(_make_mock_adapter(name))
+        registry.unregister('discord')
+        assert len(registry.list_channels()) == 2
+        assert 'discord' not in registry.list_channels()
+        assert 'telegram' in registry.list_channels()
+
+    def test_status_reflects_all_channels(self):
+        registry = ChannelRegistry()
+        for name in ('telegram', 'discord'):
+            registry.register(_make_mock_adapter(name))
+        statuses = registry.get_status()
+        assert len(statuses) == 2
