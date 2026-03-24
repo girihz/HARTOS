@@ -140,7 +140,97 @@ class TestQueueStats:
     def test_returns_dict(self):
         from integrations.social.sync_engine import SyncEngine
         mock_db = MagicMock()
-        # Mock the count queries
         mock_db.query.return_value.filter.return_value.count.return_value = 0
         result = SyncEngine.get_queue_stats(mock_db, 'node_abc')
         assert isinstance(result, dict)
+
+
+# ============================================================
+# receive_sync_batch — process incoming items from child nodes
+# ============================================================
+
+class TestReceiveSyncBatch:
+    """receive_sync_batch processes items from child nodes in the hierarchy."""
+
+    def test_returns_dict_with_processed_and_errors(self):
+        from integrations.social.sync_engine import SyncEngine
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter_by.return_value.first.return_value = None
+        result = SyncEngine.receive_sync_batch(mock_db, [
+            {'id': 'item_1', 'operation_type': 'register_agent', 'payload': {}},
+        ])
+        assert isinstance(result, dict)
+        assert 'processed' in result
+        assert 'errors' in result
+
+    def test_processes_known_operation_types(self):
+        """Known op types must be processed without errors."""
+        from integrations.social.sync_engine import SyncEngine
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter_by.return_value.first.return_value = None
+        items = [
+            {'id': '1', 'operation_type': 'register_agent', 'payload': {}},
+            {'id': '2', 'operation_type': 'sync_post', 'payload': {}},
+            {'id': '3', 'operation_type': 'update_stats', 'payload': {}},
+        ]
+        result = SyncEngine.receive_sync_batch(mock_db, items)
+        assert len(result['processed']) == 3
+        assert len(result['errors']) == 0
+
+    def test_handles_unknown_operation_type(self):
+        """Unknown op types are logged but not errored — forward compatibility."""
+        from integrations.social.sync_engine import SyncEngine
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter_by.return_value.first.return_value = None
+        result = SyncEngine.receive_sync_batch(mock_db, [
+            {'id': '1', 'operation_type': 'future_op_type_v2', 'payload': {}},
+        ])
+        assert '1' in result['processed']
+
+    def test_empty_batch_returns_empty(self):
+        from integrations.social.sync_engine import SyncEngine
+        result = SyncEngine.receive_sync_batch(MagicMock(), [])
+        assert result == {'processed': [], 'errors': []}
+
+    def test_idempotency_skips_already_completed(self):
+        """Already-processed items must be skipped — prevents double processing."""
+        from integrations.social.sync_engine import SyncEngine
+        mock_db = MagicMock()
+        mock_existing = MagicMock()
+        mock_existing.status = 'completed'
+        mock_db.query.return_value.filter_by.return_value.first.return_value = mock_existing
+        result = SyncEngine.receive_sync_batch(mock_db, [
+            {'id': 'already_done', 'operation_type': 'sync_post', 'payload': {}},
+        ])
+        assert 'already_done' in result['processed']
+
+
+# ============================================================
+# queue_user_sync — convenience for user data sync
+# ============================================================
+
+class TestQueueUserSync:
+    """queue_user_sync queues user profile changes for regional sync."""
+
+    def test_method_exists(self):
+        from integrations.social.sync_engine import SyncEngine
+        assert callable(SyncEngine.queue_user_sync)
+
+
+# ============================================================
+# Sync loop internals
+# ============================================================
+
+class TestSyncLoopInternals:
+    """Internal methods of the background sync loop."""
+
+    def test_do_sync_drain_exists(self):
+        from integrations.social.sync_engine import SyncEngine
+        engine = SyncEngine()
+        assert callable(engine._do_sync_drain)
+
+    def test_lock_exists(self):
+        """Sync engine must have a threading lock for concurrent access."""
+        from integrations.social.sync_engine import SyncEngine
+        engine = SyncEngine()
+        assert engine._lock is not None
