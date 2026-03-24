@@ -4262,7 +4262,8 @@ def safe_action_boundary_check(user_prompt, prompt_id, text, user_id):
             # Simple flow increment
             recipe_for_persona[user_prompt] += 1
             next_flow_actions = config['flows'][get_current_flow(user_prompt)]['actions']
-            user_tasks[user_prompt] = Action(next_flow_actions)
+            user_id = user_prompt.split('_')[0]
+            user_tasks[user_prompt] = create_action_with_ledger(next_flow_actions, user_id, prompt_id, user_prompt)
             user_tasks[user_prompt].current_action = 1
 
             # Initialize states for new flow actions
@@ -4521,8 +4522,10 @@ def create_time_agents_and_create_scheduled_jobs(flows, number_of_flows, prompt_
 def get_total_actions_for_current_flow_and_reset_actions(prompt_id, user_prompt):
     flow_idx = get_current_flow(user_prompt)
     config = get_prompt_config_json(prompt_id)
-    user_tasks[user_prompt] = Action(config['flows'][flow_idx]['actions'])
-    total_actions = get_total_actions_length_for_flow(config,flow_idx)
+    user_id = user_prompt.split('_')[0]
+    user_tasks[user_prompt] = create_action_with_ledger(
+        config['flows'][flow_idx]['actions'], user_id, prompt_id, user_prompt)
+    total_actions = get_total_actions_length_for_flow(config, flow_idx)
     return config, total_actions
 
 
