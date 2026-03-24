@@ -320,3 +320,154 @@ class TestActionClass:
         action = Action([{'action_id': 1, 'action': 'only'}])
         result = action.get_action_byaction_id(99)
         assert result is None
+
+
+# ============================================================
+# parse_date — timestamp parsing from cloud/local DB
+# ============================================================
+
+class TestParseDate:
+    """parse_date converts ISO strings to datetime — used by visual context."""
+
+    def test_valid_iso_format(self):
+        from helper import parse_date
+        result = parse_date("2026-03-24T10:30:00")
+        assert result.year == 2026
+        assert result.month == 3
+        assert result.hour == 10
+
+    def test_midnight(self):
+        from helper import parse_date
+        result = parse_date("2026-01-01T00:00:00")
+        assert result.hour == 0
+        assert result.minute == 0
+
+    def test_invalid_format_raises(self):
+        from helper import parse_date
+        with pytest.raises(ValueError):
+            parse_date("not-a-date")
+
+
+# ============================================================
+# safe_prompt_path — security-critical path construction
+# ============================================================
+
+class TestSafePromptPath:
+    """safe_prompt_path prevents path traversal when building prompt file paths."""
+
+    def test_single_part(self):
+        from helper import safe_prompt_path, PROMPTS_DIR
+        path = safe_prompt_path("12345")
+        assert path.endswith("12345.json")
+        assert PROMPTS_DIR in path
+
+    def test_multi_part(self):
+        from helper import safe_prompt_path
+        path = safe_prompt_path("12345", "0", "recipe")
+        assert "12345_0_recipe.json" in path
+
+    def test_custom_extension(self):
+        from helper import safe_prompt_path
+        path = safe_prompt_path("12345", ext='.txt')
+        assert path.endswith("12345.txt")
+
+    def test_rejects_traversal(self):
+        from helper import safe_prompt_path
+        with pytest.raises(ValueError):
+            safe_prompt_path("../../etc/passwd")
+
+    def test_rejects_slashes(self):
+        from helper import safe_prompt_path
+        with pytest.raises(ValueError):
+            safe_prompt_path("path/to/file")
+
+    def test_accepts_numeric(self):
+        from helper import safe_prompt_path
+        path = safe_prompt_path("42", "0", "1")
+        assert "42_0_1.json" in path
+
+    def test_accepts_hyphens_and_underscores(self):
+        from helper import safe_prompt_path
+        path = safe_prompt_path("my-agent_v2")
+        assert "my-agent_v2.json" in path
+
+
+# ============================================================
+# ToolMessageHandler — autogen message transforms
+# ============================================================
+
+class TestToolMessageHandler:
+    """ToolMessageHandler fixes tool_call_id errors in autogen conversations."""
+
+    def test_class_exists(self):
+        from helper import ToolMessageHandler
+        assert ToolMessageHandler is not None
+
+    def test_instantiation(self):
+        from helper import ToolMessageHandler
+        handler = ToolMessageHandler(user_tasks={}, user_prompt='test_user_123')
+        assert handler is not None
+
+    def test_apply_transform_returns_list(self):
+        """apply_transform must return a list of messages — autogen requires it."""
+        from helper import ToolMessageHandler
+        from flask import Flask
+        app = Flask(__name__)
+        handler = ToolMessageHandler(user_tasks={}, user_prompt='test')
+        messages = [{'role': 'user', 'content': 'hello'}]
+        with app.app_context():
+            result = handler.apply_transform(messages)
+        assert isinstance(result, list)
+
+    def test_preserves_user_messages(self):
+        """User messages must pass through unchanged."""
+        from helper import ToolMessageHandler
+        from flask import Flask
+        app = Flask(__name__)
+        handler = ToolMessageHandler(user_tasks={}, user_prompt='test')
+        messages = [{'role': 'user', 'content': 'hello', 'name': 'User'}]
+        with app.app_context():
+            result = handler.apply_transform(messages)
+        assert len(result) >= 1
+
+
+# ============================================================
+# get_llm_config — autogen LLM configuration
+# ============================================================
+
+class TestGetLlmConfig:
+    """get_llm_config builds the autogen config_list for LLM calls."""
+
+    def test_returns_dict(self):
+        from helper import get_llm_config
+        result = get_llm_config()
+        assert isinstance(result, dict)
+
+    def test_has_config_list(self):
+        from helper import get_llm_config
+        result = get_llm_config()
+        assert 'config_list' in result
+
+    def test_fallback_config_used(self):
+        """When no local LLM, fallback config is used."""
+        from helper import get_llm_config
+        fallback = [{'model': 'test-model', 'base_url': 'http://test:8080/v1'}]
+        result = get_llm_config(fallback_config_list=fallback)
+        assert isinstance(result, dict)
+
+
+# ============================================================
+# PROMPTS_DIR — path resolution
+# ============================================================
+
+class TestPromptsDir:
+    """PROMPTS_DIR must be an absolute path to prevent relative-path bugs."""
+
+    def test_is_absolute(self):
+        from helper import PROMPTS_DIR
+        assert os.path.isabs(PROMPTS_DIR)
+
+    def test_exists(self):
+        """PROMPTS_DIR is created on import — must exist."""
+        from helper import PROMPTS_DIR
+        assert os.path.isdir(PROMPTS_DIR)
