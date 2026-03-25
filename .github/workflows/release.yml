@@ -31,7 +31,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
@@ -53,14 +53,6 @@ jobs:
             tests/unit/ \
             tests/functional/ \
             --ignore=tests/unit/test_social_models.py \
-            --ignore=tests/unit/test_social_api.py \
-            --ignore=tests/unit/test_social_feed.py \
-            --ignore=tests/unit/test_social_karma.py \
-            --ignore=tests/unit/test_social_search.py \
-            --ignore=tests/unit/test_regional_host_service.py \
-            --ignore=tests/unit/test_distro_tools.py \
-            --ignore=tests/unit/test_network_provisioner.py \
-            --ignore=tests/unit/test_secret_redactor_integration.py \
             -p no:capture \
             -q --tb=line
 
