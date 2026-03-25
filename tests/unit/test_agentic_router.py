@@ -384,7 +384,7 @@ class TestTimeoutGuard:
         source_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
             'hart_intelligence_entry.py')
-        with open(source_path, 'r') as f:
+        with open(source_path, 'r', encoding='utf-8') as f:
             src = f.read()
         assert 'concurrent.futures' in src
         assert 'timeout' in src.lower()
