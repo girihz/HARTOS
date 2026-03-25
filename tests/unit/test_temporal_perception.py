@@ -19,6 +19,16 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
+# Guard: skip all tests if hart_intelligence_entry doesn't fully load.
+# On CI, heavy imports (LangChain, autogen) fail silently leaving module
+# state as MagicMock instead of real objects.
+try:
+    from hart_intelligence_entry import _active_watchers
+    if not isinstance(_active_watchers, dict):
+        pytest.skip("hart_intelligence_entry partially loaded (no _active_watchers dict)", allow_module_level=True)
+except (ImportError, AttributeError):
+    pytest.skip("hart_intelligence_entry not importable", allow_module_level=True)
+
 
 # ══════════════════════════════════════════════════════════════════
 # 1. Watcher Data Structures
