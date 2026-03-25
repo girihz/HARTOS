@@ -444,7 +444,7 @@ class TestGoalRegistration:
             'native_skills': [],
         }
         with patch(
-            'integrations.robotics.robot_prompt_builder.get_capability_advertiser',
+            'integrations.robotics.capability_advertiser.get_capability_advertiser',
             return_value=mock_adv,
         ):
             prompt = GoalManager.build_prompt(goal_dict)
