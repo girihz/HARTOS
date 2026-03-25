@@ -104,6 +104,7 @@ class _FakeLedgerTaskStatus(_Enum):
                           _FakeLedgerTaskStatus.TERMINATED)
 
 
+_orig_agent_ledger_TaskStatus = getattr(sys.modules.get("agent_ledger"), "TaskStatus", None)
 sys.modules["agent_ledger"].TaskStatus = _FakeLedgerTaskStatus
 
 # ---------------------------------------------------------------------------
@@ -165,6 +166,11 @@ def _restore_modules():
             sys.modules[name] = original
 
 _restore_modules()
+
+# Restore agent_ledger.TaskStatus to prevent cross-test pollution
+if _orig_agent_ledger_TaskStatus is not None:
+    import agent_ledger
+    agent_ledger.TaskStatus = _orig_agent_ledger_TaskStatus
 
 # After restoring modules, try to get the REAL TaskStatus so that tests
 # using _FakeLedgerTaskStatus are compatible with lifecycle_hooks'
