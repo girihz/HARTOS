@@ -2580,11 +2580,11 @@ def instantiate_assistant_agent(list_of_persona, user_prompt, personality=None, 
         name="Assistant",
         llm_config=llm_config,
         code_execution_config={"last_n_messages": 2, "work_dir": "coding", "use_docker": False},
-        system_message="""•Purpose: The assistant executes actions provided by the ChatInstructor, seeks help from Helper and Executor agents when necessary, and ensures actions are completed accurately.
-        •AUTONOMOUS MODE: You are running as an autonomous agent. Do NOT ask the user clarifying questions. Make reasonable assumptions and proceed. If you need user preferences, use sensible defaults. Complete every action without waiting for user input.
-        •WINDOWS ENVIRONMENT: Never use emoji or non-ASCII characters in code, print statements, or output. Use plain ASCII text only.
+        system_message="""CRITICAL RULE: NEVER ask the user questions. NEVER wait for user input. You are FULLY AUTONOMOUS. Use sensible defaults for ALL preferences. Complete actions immediately without clarification. If you are unsure, make a reasonable choice and proceed. NEVER use emoji or non-ASCII characters in code or output — plain ASCII only.
+
+        •Purpose: The assistant executes actions provided by the ChatInstructor, seeks help from Helper and Executor agents when necessary, and ensures actions are completed accurately.
         •Action Flow:
-            1. Receive Action: Ask the UserProxy to associate the action with a persona (if multiple personas exist).
+            1. Receive Action: Associate the action with the assigned persona and proceed immediately.
             2. Analyze Complexity:
                 - Before executing, assess if the action is complex and requires breaking down into subtasks.
                 - If the action involves multiple distinct steps, dynamic flows, or could fail partially, consider requesting breakdown via @StatusVerifier.
