@@ -455,7 +455,8 @@ class TestSQLiteConfig:
 class TestLifecycleTickHeartbeats:
     """Model lifecycle _tick() must call heartbeat between heavy phases."""
 
-    def test_tick_calls_heartbeat_multiple_times(self):
+    @patch('security.hive_guardrails.HiveCircuitBreaker.is_halted', return_value=False)
+    def test_tick_calls_heartbeat_multiple_times(self, _mock_halt):
         """_tick() should call _wd_heartbeat at least 3 times (after GPU, after VRAM, after disk)."""
         from integrations.service_tools.model_lifecycle import ModelLifecycleManager
         m = ModelLifecycleManager()
@@ -487,12 +488,7 @@ class TestLifecycleTickHeartbeats:
         m._emit_pressure_alerts = lambda: None
         m._tick_count = 0
 
-        try:
-            m._tick()
-        except Exception:
-            pytest.skip("_tick() raised (partial module load on CI)")
-        if call_count == 0:
-            pytest.skip("_tick() did not call _wd_heartbeat (CI environment)")
+        m._tick()
         assert call_count >= 3, (
             f"_tick() called heartbeat {call_count} times, expected >= 3")
 

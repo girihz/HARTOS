@@ -106,7 +106,8 @@ class ErxesCRMClient:
                 return
 
             payload = json.dumps({
-                'query': f'mutation {{ login(email: "{self.email}", password: "{self.password}") }}'
+                'query': 'mutation Login($email: String!, $password: String!) { login(email: $email, password: $password) }',
+                'variables': {'email': self.email, 'password': self.password}
             }).encode('utf-8')
             req = urllib.request.Request(
                 self.graphql_url, data=payload,
@@ -144,12 +145,16 @@ class ErxesCRMClient:
         # Discover pipeline if needed — prefer the one that has stages
         if self._board_id and not self._pipeline_id:
             r = self._gql(
-                '{ pipelines(boardId: "%s") { _id name } }' % self._board_id
+                'query($boardId: String!) { pipelines(boardId: $boardId) { _id name } }',
+                {'boardId': self._board_id}
             )
             pipelines = r.get('data', {}).get('pipelines', [])
             best = None
             for p in pipelines:
-                sr = self._gql('{ stages(pipelineId: "%s") { _id } }' % p['_id'])
+                sr = self._gql(
+                    'query($pid: String!) { stages(pipelineId: $pid) { _id } }',
+                    {'pid': p['_id']}
+                )
                 stages = sr.get('data', {}).get('stages', [])
                 if stages:
                     best = p
@@ -164,7 +169,8 @@ class ErxesCRMClient:
         # Load stages
         if self._pipeline_id:
             r = self._gql(
-                '{ stages(pipelineId: "%s") { _id name order } }' % self._pipeline_id
+                'query($pid: String!) { stages(pipelineId: $pid) { _id name order } }',
+                {'pid': self._pipeline_id}
             )
             stages = r.get('data', {}).get('stages', [])
             for s in stages:
@@ -348,7 +354,8 @@ class ErxesCRMClient:
         total = 0
         for stage_name, stage_id in self._stage_map.items():
             r = self._gql(
-                '{ deals(stageId: "%s") { _id name } }' % stage_id
+                'query($sid: String!) { deals(stageId: $sid) { _id name } }',
+                {'sid': stage_id}
             )
             deals = r.get('data', {}).get('deals', [])
             pipeline[stage_name] = {
@@ -469,8 +476,11 @@ def get_erxes_client() -> Optional[ErxesCRMClient]:
 
     with _client_lock:
         if _client_instance is None:
-            email = os.environ.get('ERXES_EMAIL', 'sathish@hevolve.ai')
-            password = os.environ.get('ERXES_PASSWORD', 'Hertzai2021')
+            email = os.environ.get('ERXES_EMAIL', '')
+            password = os.environ.get('ERXES_PASSWORD', '')
+            if not email or not password:
+                logger.warning('ERXES_EMAIL and ERXES_PASSWORD must be set')
+                return None
             _client_instance = ErxesCRMClient(api_url, email, password)
             logger.info('Erxes client initialized: %s', api_url)
         return _client_instance
