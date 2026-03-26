@@ -1780,11 +1780,14 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
         user_prompt = f'{user_id}_{prompt_id}'
         current_action_id = user_tasks[user_prompt].current_action
 
-        # Preempt: if user started chatting, abort this daemon recipe
+        # Preempt: if user started chatting, abort daemon-initiated recipes
         # so the LLM is free for the user's request immediately.
+        # Only preempt if THIS request is from the daemon (not user/CREATE).
         try:
             from integrations.agent_engine.dispatch import is_user_recently_active
-            if is_user_recently_active():
+            from threadlocal import get_task_source
+            _source = get_task_source()
+            if _source in ('daemon', 'idle') and is_user_recently_active():
                 current_app.logger.info("[PREEMPT] User active — aborting daemon recipe to free LLM")
                 raise KeyboardInterrupt("User preemption")
         except ImportError:
