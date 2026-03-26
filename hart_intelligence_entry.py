@@ -489,9 +489,15 @@ if _is_bundled:
 else:
     _langchain_log_path = 'langchain.log'
 
-handler = RotatingFileHandler(_langchain_log_path, maxBytes=5_000_000, backupCount=2)
+handler = RotatingFileHandler(_langchain_log_path, maxBytes=5_000_000, backupCount=2, encoding='utf-8')
 handler.setLevel(logging.INFO)
 
+# Prevent UnicodeEncodeError on Windows (cp1252) when LLM output contains emoji
+# by reconfiguring stdout to replace unencodable characters
+try:
+    sys.stdout.reconfigure(errors='replace')
+except (AttributeError, OSError):
+    pass  # Python < 3.7 or redirected stdout
 stream_handler = logging.StreamHandler(sys.stdout)
 
 # Create a logging format
@@ -4607,7 +4613,8 @@ def chat():
                         else:
                             app.logger.info(f'Autonomous recipe() returned: {str(recipe_response)[:100]}')
                     except Exception as e:
-                        app.logger.warning(f'Autonomous recipe creation failed (will retry on next dispatch): {e}')
+                        import traceback
+                        app.logger.error(f'Autonomous recipe creation failed: {e}\n{traceback.format_exc()}')
 
                 # Fallback: config saved but recipe failed — next dispatch will retry
                 with _user_lock:
