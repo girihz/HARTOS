@@ -1676,7 +1676,7 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
         # Add context sharing tool
         @log_tool_execution
         def share_context_with_agents(context_key: Annotated[str, "Unique identifier for the context"],
-                                      context_value: Annotated[Any, "Context data to share"]) -> str:
+                                      context_value: Annotated[str, "Context data to share (as JSON string)"]) -> str:
             """Share context information with other agents"""
             sharing_func = create_context_sharing_function('assistant')
             return sharing_func(context_key, context_value)
@@ -2037,11 +2037,41 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
                                 # Transition to TERMINATED so next action can start
                                 force_state_through_valid_path(user_prompt, int(json_obj['action_id']), ActionState.TERMINATED, "Recipe saved and action complete")
                             else:
-                                current_app.logger.info(f'Current state is {current_state}, Recipe Already Saved in get response group')
-                                # Even if recipe already saved, ensure action is TERMINATED via proper state path
+                                current_app.logger.info(f'Current state is {current_state}, checking if recipe still needs saving')
+                                # Save recipe even if action is already TERMINATED/COMPLETED
+                                # (state_transition handled completion, while loop requested recipe,
+                                #  but this handler saw action already terminated — recipe still valid)
+                                if 'recipe' in json_obj and json_obj.get('recipe'):
+                                    flow = get_current_flow(user_prompt)
+                                    name = os.path.join(PROMPTS_DIR, f'{prompt_id}_{flow}_{json_obj["action_id"]}.json')
+                                    if not os.path.exists(name):
+                                        metadata = strip_json_values(agent_data.get(prompt_id, {}))
+                                        json_obj['metadata'] = metadata
+                                        if prompt_id in task_time and task_time[prompt_id].get('times'):
+                                            json_obj['time_took_to_complete'] = task_time[prompt_id]['times'][-1]
+                                        for i in json_obj['recipe']:
+                                            if 'tool_name' in i and i['tool_name'] != "":
+                                                i['agent_to_perform_this_action'] = 'Helper'
+                                            elif 'generalized_functions' in i and i['generalized_functions'] != "":
+                                                i['agent_to_perform_this_action'] = 'Executor'
+                                            else:
+                                                i['agent_to_perform_this_action'] = 'Assistant'
+                                        try:
+                                            from security.secret_redactor import redact_secrets
+                                            for _ri in json_obj.get('recipe', []):
+                                                for _rk in ('tool_input', 'task_description', 'output'):
+                                                    if isinstance(_ri.get(_rk), str):
+                                                        _ri[_rk], _ = redact_secrets(_ri[_rk])
+                                        except ImportError:
+                                            pass
+                                        with open(name, "w") as json_file:
+                                            json.dump(json_obj, json_file)
+                                        current_app.logger.info(f'Saved Individual recipe (late) at: {name}')
+                                        user_tasks[user_prompt].current_action = int(json_obj['action_id'])
+                                        individual_json[user_prompt] = json_obj
+                                # Ensure action is TERMINATED via proper state path
                                 if current_state == ActionState.COMPLETED:
-                                    # Must go through RECIPE_RECEIVED before TERMINATED
-                                    safe_set_state(user_prompt, user_tasks[user_prompt].current_action, ActionState.RECIPE_RECEIVED, "Recipe already saved, set to RECIPE_RECEIVED")
+                                    safe_set_state(user_prompt, user_tasks[user_prompt].current_action, ActionState.RECIPE_RECEIVED, "Recipe saved, set to RECIPE_RECEIVED")
                                     force_state_through_valid_path(user_prompt, user_tasks[user_prompt].current_action, ActionState.TERMINATED, "Now terminate action")
 
 
@@ -2062,6 +2092,14 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
                 group_chat.messages[-1]['content'] = f"{group_chat.messages[-1]['content']}\n Metadata/skeleton of all keys for retrieving data from memory:{metadata}"
             current_app.logger.info('Got last speaker as executor or helper or author or chat_instructor & reutrning next speaker as assistant')
             return assistant
+
+        # FIX: After Assistant speaks (no JSON, no @mention), route to StatusVerifier
+        # to evaluate the action result. Without this, 'auto' speaker selection may
+        # pick UserProxy (max_consecutive_auto_reply=0) which terminates the conversation.
+        if last_speaker.name == 'Assistant':
+            current_app.logger.info('Assistant spoke, routing to StatusVerifier for action evaluation')
+            return verify
+
         json_obj = None
 
         if last_speaker == verify:
@@ -2246,6 +2284,10 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
         groupchat=group_chat,
         llm_config={"config_list": config_list,"cache_seed": None,"max_tokens": 1500}
     )
+    # FIX: Ensure group_chat references the SAME object autogen uses internally.
+    # GroupChatManager may store a different reference. The state_transition closure
+    # captures this variable, so it must point to the real GroupChat.
+    group_chat = manager._groupchat
 
     # Auto-ingest group_chat messages into SimpleMem + shared LangChain buffer
     _original_append = group_chat.messages.append
@@ -2351,6 +2393,8 @@ def instantiate_executor_agent():
 {_executor_cultural}
         Focus: Running, and debugging code.
 
+        CRITICAL: This runs on Windows (cp1252 encoding). NEVER use emoji or non-ASCII characters in code output (print statements, strings, comments). Use plain text only. Replace emoji with descriptive text like [SUN], [OK], [ERROR].
+
         Responsibilities:
             1. Code Execution:
                 Execute code provided by the Assistant Agent.
@@ -2400,7 +2444,7 @@ def instantiate_status_verifier_agent(user_prompt):
         Spirit: Kintsugi (Japan) — broken things repaired with care become more beautiful than before. When actions fail, frame errors constructively and with warmth. Celebrate completed actions genuinely.
         Role: Your primary responsibility is to track, validate and verify the status of actions performed by other agents. You must provide updates strictly in JSON format with the following response structures:
         Response formats:
-            1. Action Completed Successfully: {"status": "completed","action": "current action","action_id": 1/2/3...,"message": "message here","can_perform_without_user_input":"can you perform this action on your own without user input in future. only say no when it is absolutely mandatory and you cannot proceed without it, if you can proceed by checking with other agents you should say yes.  say yes/no if no they give the reason as well e.g. no-i need user's likes and dislike","persona_name":"persona name this action belongs to","fallback_action": "Automatically determine and provide intelligent fallback strategy here based on the action type. Examples: For file operations - retry with alternate path; For API calls - implement exponential backoff; For calculations - use alternative algorithm; For data processing - validate and sanitize inputs before retry. NEVER leave this empty."}
+            1. Action Completed Successfully: {"status": "completed","action": "current action","action_id": 1/2/3...,"message": "message here","can_perform_without_user_input":"can you perform this action on your own without user input in future. Default to YES — only say no when it is absolutely impossible to proceed (e.g. payment authorization, physical access). If the action involves preferences, questions, or personalization, simulate reasonable defaults and say YES. The agent is designed to work autonomously.","persona_name":"persona name this action belongs to","fallback_action": "Automatically determine and provide intelligent fallback strategy here based on the action type. Examples: For file operations - retry with alternate path; For API calls - implement exponential backoff; For calculations - use alternative algorithm; For data processing - validate and sanitize inputs before retry. NEVER leave this empty."}
             2. Action Error: {"status": "error","action": "current action","action_id": 1/2/3...,"message": "message here"}
             3. Current Action Updated: {"status": "updated","action": "current action text","updated_action": "updated current action text","action_id": 1/2/3...,"message": "message here","persona_name":"persona name this action belongs to","fallback_action": "Provide intelligent fallback strategy based on the updated action"}
             4. Action pending: {"status": "pending","action": "current action","action_id": 1/2/3...,"message": "what steps are pending message here"}
@@ -2536,6 +2580,8 @@ def instantiate_assistant_agent(list_of_persona, user_prompt, personality=None, 
         llm_config=llm_config,
         code_execution_config={"last_n_messages": 2, "work_dir": "coding", "use_docker": False},
         system_message="""•Purpose: The assistant executes actions provided by the ChatInstructor, seeks help from Helper and Executor agents when necessary, and ensures actions are completed accurately.
+        •AUTONOMOUS MODE: You are running as an autonomous agent. Do NOT ask the user clarifying questions. Make reasonable assumptions and proceed. If you need user preferences, use sensible defaults. Complete every action without waiting for user input.
+        •WINDOWS ENVIRONMENT: Never use emoji or non-ASCII characters in code, print statements, or output. Use plain ASCII text only.
         •Action Flow:
             1. Receive Action: Ask the UserProxy to associate the action with a persona (if multiple personas exist).
             2. Analyze Complexity:
@@ -3332,8 +3378,13 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
                     f"Expected ASSIGNED state but found {current_state.value} for action {current_action_id}")
             result = chat_instructor.initiate_chat(recipient=manager, message=message, clear_history=False,silent=False)
 
-        current_app.logger.info("\n=== Chat Summary ===")
-        current_app.logger.info("\n=== Full response ===")
+        # FIX: autogen clears group_chat.messages after initiate_chat() returns.
+        # Recover from chat_instructor's own chat_messages which ARE preserved.
+        _chat_history = chat_instructor.chat_messages.get(manager, [])
+        if _chat_history and len(group_chat.messages) == 0:
+            group_chat.messages.extend(_chat_history)
+            current_app.logger.info(f"[MSG-RECOVERY] Recovered {len(_chat_history)} messages from chat_instructor")
+        current_app.logger.info(f"group_chat.messages len={len(group_chat.messages)}")
 
         # Main processing loop
         while_loop_iterations = 0
@@ -3450,37 +3501,67 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
                             _claimed_task = _claim_ledger.tasks.get(_claimed_task_id)
 
                             if _claimed_task:
-                                # Check 2: Is the task in a state where completion makes sense?
                                 from agent_ledger import TaskStatus as _TS
+                                # Already completed (e.g. by state_transition during initiate_chat)?
+                                # Skip re-processing, just advance to next action.
                                 if _claimed_task.status in (_TS.COMPLETED, _TS.TERMINATED,
                                                             _TS.CANCELLED, _TS.SKIPPED):
-                                    _claim_valid = False
-                                    _rejection_reason = (
-                                        f"Task {_claimed_task_id} already in terminal state "
-                                        f"{_claimed_task.status.value} — LLM cannot re-complete it")
+                                    # Check if recipe was already saved for this action
+                                    flow = get_current_flow(user_prompt)
+                                    _recipe_file = os.path.join(PROMPTS_DIR, f'{prompt_id}_{flow}_{json_action_id}.json')
+                                    if not os.path.exists(_recipe_file):
+                                        # Recipe not yet saved — request it directly
+                                        current_app.logger.info(
+                                            f"[RECIPE-NEEDED] {_claimed_task_id} completed but recipe not saved, requesting")
+                                        user_tasks[user_prompt].recipe = True
+                                        user_tasks[user_prompt].fallback = False
+                                        _recipe_msg = request_recipe_for_action(json_action_id, prompt_id, role, user_prompt)
+                                        result = chat_instructor.initiate_chat(
+                                            recipient=manager, message=_recipe_msg, clear_history=False, silent=False)
+                                        _rh = chat_instructor.chat_messages.get(manager, [])
+                                        if _rh and len(group_chat.messages) == 0:
+                                            group_chat.messages.extend(_rh)
+                                    else:
+                                        current_app.logger.info(
+                                            f"[ALREADY DONE] {_claimed_task_id} completed + recipe saved, advancing")
+                                        if json_action_id < len(user_tasks[user_prompt].actions):
+                                            user_tasks[user_prompt].current_action = json_action_id + 1
+                                            user_tasks[user_prompt].recipe = False
+                                            user_tasks[user_prompt].fallback = False
+                                            current_app.logger.info(
+                                                f"[ADVANCE] current_action: {json_action_id} -> {json_action_id + 1}")
+                                        else:
+                                            user_tasks[user_prompt].current_action = json_action_id
+                                            user_tasks[user_prompt].fallback = True
+                                            user_tasks[user_prompt].recipe = False
+                                            current_app.logger.info(
+                                                f"[LAST-ACTION] action {json_action_id} is last in flow")
+                                    if json_action_id < len(user_tasks[user_prompt].actions) and os.path.exists(_recipe_file):
+                                        continue
 
-                                # Check 3: Integrity — has task data been corrupted?
-                                if _claim_valid and not _claimed_task.verify_integrity():
+                                # Check: Integrity — has task data been corrupted?
+                                elif _claim_valid and not _claimed_task.verify_integrity():
                                     _claim_valid = False
                                     _rejection_reason = (
                                         f"Task {_claimed_task_id} integrity check failed — "
                                         f"data_hash mismatch, possible corruption")
                             else:
-                                # Check 4: Task doesn't exist in ledger at all
                                 _claim_valid = False
                                 _rejection_reason = f"Task {_claimed_task_id} not found in ledger"
 
                         if not _claim_valid:
                             current_app.logger.error(f"[CLAIM REJECTED] {_rejection_reason}")
-                            # Don't accept — force the LLM to retry
                             message = (f"Your completion claim was rejected: {_rejection_reason}. "
                                        f"Continue working on action {current_action_id}.")
                             result = chat_instructor.initiate_chat(
                                 recipient=manager, message=message, clear_history=False)
                             continue
 
-                        force_state_through_valid_path(user_prompt, json_action_id, ActionState.COMPLETED,
-                                                       "verified complete")
+                        # Only set COMPLETED if not already done by state_transition
+                        _current_state = get_action_state(user_prompt, json_action_id)
+                        if _current_state != ActionState.COMPLETED:
+                            force_state_through_valid_path(user_prompt, json_action_id, ActionState.COMPLETED,
+                                                           "verified complete")
                         # Auto-sync handles ledger update via force_state_through_valid_path above
 
                         # Use smart ledger routing to complete and find next task
@@ -3662,7 +3743,79 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
                 result = agents_object['assistant'].initiate_chat(recipient=manager, message=message, clear_history=False,silent=False)
                 continue
             elif user_tasks[user_prompt].current_action <= len(user_tasks[user_prompt].actions):
+                # Check if the current action was already completed by state_transition
+                # or ledger routing. If so, advance instead of spinning.
+                _ca = user_tasks[user_prompt].current_action
+                _ca_state = get_action_state(user_prompt, _ca)
+                # Also check ledger status (state_transition may not have run for this action)
+                _ca_ledger_done = False
+                _ca_ledger = user_ledgers.get(user_prompt)
+                if _ca_ledger:
+                    _ca_task = _ca_ledger.tasks.get(f"action_{_ca}")
+                    if _ca_task:
+                        from agent_ledger import TaskStatus as _TS
+                        _ca_ledger_done = _ca_task.status in (_TS.COMPLETED, _TS.TERMINATED)
+                if _ca_state in (ActionState.COMPLETED, ActionState.TERMINATED) or _ca_ledger_done:
+                    # Check if recipe file exists before advancing
+                    _flow = get_current_flow(user_prompt)
+                    _recipe_path = os.path.join(PROMPTS_DIR, f'{prompt_id}_{_flow}_{_ca}.json')
+                    if not os.path.exists(_recipe_path):
+                        current_app.logger.info(
+                            f'[AUTO-ADVANCE] action {_ca} done but recipe not saved — requesting recipe')
+                        user_tasks[user_prompt].recipe = True
+                        user_tasks[user_prompt].fallback = False
+                        # Directly request recipe via initiate_chat
+                        _recipe_msg = request_recipe_for_action(_ca, prompt_id, role, user_prompt)
+                        result = chat_instructor.initiate_chat(
+                            recipient=manager, message=_recipe_msg, clear_history=False, silent=False)
+                        # Recover messages
+                        _rh = chat_instructor.chat_messages.get(manager, [])
+                        if _rh and len(group_chat.messages) == 0:
+                            group_chat.messages.extend(_rh)
+                    else:
+                        current_app.logger.info(
+                            f'[AUTO-ADVANCE] action {_ca} already {_ca_state.value}, advancing')
+                        if _ca < len(user_tasks[user_prompt].actions):
+                            user_tasks[user_prompt].current_action = _ca + 1
+                            user_tasks[user_prompt].recipe = False
+                            user_tasks[user_prompt].fallback = False
+                            current_app.logger.info(f'[ADVANCE] current_action: {_ca} -> {_ca + 1}')
+                        else:
+                            user_tasks[user_prompt].fallback = True
+                            user_tasks[user_prompt].recipe = False
+                        continue
                 current_app.logger.info(f'current action {user_tasks[user_prompt].current_action} and length of actions is {len(user_tasks[user_prompt].actions)} but no matching condition found')
+
+                # If the current action hasn't been executed yet, start it
+                _ca_pending = user_tasks[user_prompt].current_action
+                _ca_pending_state = get_action_state(user_prompt, _ca_pending)
+                if _ca_pending_state in (ActionState.ASSIGNED, ActionState.PENDING, ActionState.IN_PROGRESS):
+                    # Track retries to detect actions stuck needing user input
+                    if not hasattr(user_tasks[user_prompt], '_exec_retries'):
+                        user_tasks[user_prompt]._exec_retries = {}
+                    user_tasks[user_prompt]._exec_retries[_ca_pending] = user_tasks[user_prompt]._exec_retries.get(_ca_pending, 0) + 1
+                    _attempt = user_tasks[user_prompt]._exec_retries[_ca_pending]
+
+                    if _attempt > 3:
+                        # Action keeps failing — it likely needs user input.
+                        # Break out and return control so user can respond on next /chat call.
+                        current_app.logger.info(
+                            f'[NEEDS-INPUT] action {_ca_pending} not completing after {_attempt-1} attempts, '
+                            f'returning control to user')
+                        break
+
+                    actions_prompt = user_tasks[user_prompt].get_action(_ca_pending - 1)
+                    current_app.logger.info(f'[EXECUTE-PENDING] Starting action {_ca_pending} (attempt {_attempt}): {actions_prompt}')
+                    safe_set_state(user_prompt, _ca_pending, ActionState.IN_PROGRESS, "executing pending action")
+                    _exec_msg = f'Execute Action {_ca_pending}: {actions_prompt} ,Latest User message: {text}'
+                    result = chat_instructor.initiate_chat(
+                        recipient=manager, message=_exec_msg, clear_history=False, silent=False)
+                    # Recover messages after initiate_chat
+                    _chat_history = chat_instructor.chat_messages.get(manager, [])
+                    if _chat_history and len(group_chat.messages) == 0:
+                        group_chat.messages.extend(_chat_history)
+                        current_app.logger.info(f"[MSG-RECOVERY] Recovered {len(_chat_history)} messages")
+                    continue
 
                 if len(group_chat.messages) == 0:
                     current_app.logger.warning("No messages in group chat after processing")
