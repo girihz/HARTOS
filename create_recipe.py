@@ -3780,10 +3780,45 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
                             user_tasks[user_prompt].recipe = False
                             user_tasks[user_prompt].fallback = False
                             current_app.logger.info(f'[ADVANCE] current_action: {_ca} -> {_ca + 1}')
+                            continue
                         else:
-                            user_tasks[user_prompt].fallback = True
-                            user_tasks[user_prompt].recipe = False
-                        continue
+                            # Last action in flow — ensure all actions are TERMINATED
+                            current_app.logger.info(f'[FLOW-COMPLETE] All {_ca} actions done in flow, ensuring termination')
+                            for _aid in range(1, _ca + 1):
+                                _astate = get_action_state(user_prompt, _aid)
+                                if _astate not in (ActionState.TERMINATED,):
+                                    current_app.logger.info(f'[FLOW-COMPLETE] Forcing action {_aid} from {_astate.value} to TERMINATED')
+                                    force_state_through_valid_path(user_prompt, _aid, ActionState.TERMINATED, "flow complete")
+
+                            # All actions terminated — create flow recipe and advance
+                            current_app.logger.info(f'[FLOW-COMPLETE] All actions terminated, creating flow recipe')
+                            # Ensure group_chat has messages for after_all_actions_terminated
+                            if len(group_chat.messages) == 0:
+                                group_chat.messages.append({
+                                    'content': f'All {_ca} actions completed for this flow.',
+                                    'role': 'user', 'name': 'ChatInstructor'
+                                })
+                            # Ensure json_obj is valid
+                            if not json_obj or not isinstance(json_obj, dict):
+                                json_obj = {'status': 'completed', 'action_id': _ca}
+                            flow, message, text = after_all_actions_terminated(
+                                assistant_agent, chat_instructor, group_chat,
+                                json_obj, manager, prompt_id, text, user_prompt)
+
+                            if get_current_flow(user_prompt) < get_total_flows(user_prompt):
+                                current_app.logger.info(f'[NEXT-FLOW] Completed flow {get_current_flow(user_prompt)}, starting next')
+                                config = get_prompt_config_json(prompt_id)
+                                flow_actions = config['flows'][get_current_flow(user_prompt)]['actions']
+                                user_tasks[user_prompt] = create_action_with_ledger(flow_actions, user_id, prompt_id, user_prompt)
+                                del user_agents[user_prompt]
+                                x = get_response_group(user_id, text, prompt_id)
+                                continue
+
+                            # All flows done
+                            scheduler_check[user_prompt] = True
+                            safe_increment_flow(user_prompt, prompt_id)
+                            current_app.logger.info(f'[ALL-FLOWS-DONE] Agent creation complete')
+                            return 'Agent created successfully'
                 current_app.logger.info(f'current action {user_tasks[user_prompt].current_action} and length of actions is {len(user_tasks[user_prompt].actions)} but no matching condition found')
 
                 # If the current action hasn't been executed yet, start it
