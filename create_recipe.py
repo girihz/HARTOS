@@ -2453,6 +2453,7 @@ def instantiate_status_verifier_agent(user_prompt):
             1. Strict Completion Criteria:
                 i. Only mark an action as "completed" if all steps of the action have been successfully executed.
                 ii. For pending or ongoing tasks, instruct the Assistant to complete them.
+                iii. AUTONOMOUS BIAS: This agent runs autonomously. Prefer "completed" over "updated" or "pending". If the Assistant made a reasonable attempt at the action (even simulated), mark it "completed". Only use "updated" when the action definition itself needs changing. Only use "pending" for genuine blocking dependencies. Do NOT return "updated" just because user preferences are unknown — use sensible defaults.
             2. Ensure Action Accuracy:
                 i. Verify that the last action was performed correctly based on history as per instructions.
                 ii. If the action was not executed correctly or if assistant is incorrectly asking to mark complete, return the original action to the Assistant with pending.
@@ -3824,7 +3825,7 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
                 # If the current action hasn't been executed yet, start it
                 _ca_pending = user_tasks[user_prompt].current_action
                 _ca_pending_state = get_action_state(user_prompt, _ca_pending)
-                if _ca_pending_state in (ActionState.ASSIGNED, ActionState.PENDING, ActionState.IN_PROGRESS):
+                if _ca_pending_state in (ActionState.ASSIGNED, ActionState.PENDING):
                     # Track retries to detect actions stuck needing user input
                     if not hasattr(user_tasks[user_prompt], '_exec_retries'):
                         user_tasks[user_prompt]._exec_retries = {}
