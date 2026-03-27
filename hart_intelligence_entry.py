@@ -5113,6 +5113,21 @@ def visual_agent():
     if not task_description or not user_id or not prompt_id:
         return jsonify({'error':'user_id or task_description or prompt_id is missing'}), 404
     app.logger.info(f'GOT user_id:{user_id} & prompt_id:{prompt_id} & task_description:{task_description}')
+    # Quick VLM health check — fail fast instead of 60s timeout
+    try:
+        import urllib.request
+        urllib.request.urlopen('http://localhost:9001/status', timeout=2)
+    except Exception:
+        # MiniCPM not running — try lightweight VLM or return clear error
+        app.logger.warning('VLM server (MiniCPM:9001) not available')
+        try:
+            from helper import get_frame
+            frame = get_frame(str(user_id))
+            if frame is None:
+                return jsonify({'response': 'Visual agent unavailable: no camera frame and VLM server not running. Start MiniCPM or enable camera.', 'vlm_status': 'offline'}), 200
+        except Exception:
+            pass
+        return jsonify({'response': 'Visual agent: VLM server not running. Start with: python integrations/vision/minicpm_server.py', 'vlm_status': 'offline'}), 200
     _uid = int(user_id) if str(user_id).isdigit() else str(user_id)
     _pid = int(prompt_id) if str(prompt_id).isdigit() else str(prompt_id)
     if request_from == 'Reuse':
