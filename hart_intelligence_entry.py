@@ -4325,7 +4325,15 @@ def chat():
     # Periodically evict stale agent state to prevent unbounded memory growth (M2 fix)
     _cleanup_stale_agents()
 
-    data = request.get_json()
+    data = request.get_json() or {}
+
+    # Early validation — return 400 instead of 500 on missing required fields
+    if not data.get('user_id') and not request.headers.get('Authorization', '').startswith('Bearer '):
+        return jsonify({'error': 'user_id is required (in body or via Bearer token)', 'response': None}), 400
+    if not data.get('prompt_id'):
+        return jsonify({'error': 'prompt_id is required', 'response': None}), 400
+    if not data.get('prompt') and not data.get('input_text'):
+        return jsonify({'error': 'prompt is required', 'response': None}), 400
 
     # ── Two-layer auth: extract user_id from JWT if present ──
     # Layer 1 (LOCAL): Bearer token signed by this node's HS256 secret
