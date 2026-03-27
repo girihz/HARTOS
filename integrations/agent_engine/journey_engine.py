@@ -743,13 +743,18 @@ def journey_daemon_tick() -> Dict:
     """Called by agent_daemon.py on each tick.
 
     Runs the journey engine tick and returns summary.
+    Only saves data back if something actually changed.
     """
     try:
         from integrations.agent_engine.outreach_crm_tools import _load_prospects, _save_prospects
         engine = get_journey_engine()
         data = _load_prospects()
+        if not data.get('prospects'):
+            return {'skipped': True, 'reason': 'no prospects'}
         summary = engine.tick(data.get('prospects', {}))
-        _save_prospects(data)
+        # Only save if something happened
+        if summary.get('transitions', 0) > 0 or summary.get('actions', 0) > 0:
+            _save_prospects(data)
         return summary
     except Exception as e:
         logger.error('Journey daemon tick failed: %s', e)
