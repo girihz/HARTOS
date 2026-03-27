@@ -3356,9 +3356,15 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
 
         # Main processing loop
         while_loop_iterations = 0
-        max_iterations = 30  # Increased to allow more autonomous task completion
+        max_iterations = 300  # Time-based: ~5s per iteration = ~25 min max
+        _pipeline_start = time.time()
+        _pipeline_timeout = 600  # 10 minutes hard timeout for entire pipeline
 
         while while_loop_iterations < max_iterations:
+            # Hard timeout: don't let pipeline run forever
+            if time.time() - _pipeline_start > _pipeline_timeout:
+                current_app.logger.warning(f"Pipeline timeout after {_pipeline_timeout}s, saving progress")
+                break
             while_loop_iterations += 1
             current_action_id = user_tasks[user_prompt].current_action
 
