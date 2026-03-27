@@ -5165,11 +5165,19 @@ def visual_agent():
         return jsonify({'response': 'Visual agent: no VLM server available. Start llama-server with --mmproj or MiniCPM.', 'vlm_status': 'offline'}), 200
     _uid = int(user_id) if str(user_id).isdigit() else str(user_id)
     _pid = int(prompt_id) if str(prompt_id).isdigit() else str(prompt_id)
-    if request_from == 'Reuse':
-        res = visual_based_execution(str(task_description), _uid, _pid)
-    else:
-        res = visual_execution(str(task_description), _uid, _pid)
-    return jsonify({'response':f'{res}'}), 200
+    try:
+        if request_from == 'Reuse':
+            res = visual_based_execution(str(task_description), _uid, _pid)
+        else:
+            res = visual_execution(str(task_description), _uid, _pid)
+        if res is None:
+            return jsonify({'response': 'No camera frame available. Enable camera or send a frame via channel.', 'vlm_status': 'no_frame'}), 200
+        return jsonify({'response': f'{res}'}), 200
+    except KeyError:
+        return jsonify({'response': 'No active visual agent session. Send a frame first via camera or channel.', 'vlm_status': 'no_session'}), 200
+    except Exception as e:
+        app.logger.error(f'Visual agent error: {e}')
+        return jsonify({'response': f'Visual agent error: {str(e)[:100]}', 'vlm_status': 'error'}), 200
 
 @app.route('/response_ack',methods=['POST'])
 def response_ack():
