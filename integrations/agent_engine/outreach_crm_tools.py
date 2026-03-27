@@ -54,8 +54,23 @@ def _load_prospects() -> Dict:
 
 
 def _save_prospects(data: Dict):
-    """Save prospect data to local JSON store. Thread-safe."""
+    """Save prospect data to local JSON store. Thread-safe.
+
+    Safety: refuses to overwrite non-empty data with empty data.
+    """
     with _prospect_lock:
+        prospects = data.get('prospects', {})
+        # Guard: never overwrite existing data with empty
+        if not prospects:
+            try:
+                with open(_PROSPECT_FILE, 'r') as f:
+                    existing = json.load(f)
+                if existing.get('prospects'):
+                    logger.warning('_save_prospects: refusing to overwrite %d prospects with empty data',
+                                   len(existing['prospects']))
+                    return
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
         os.makedirs(os.path.dirname(_PROSPECT_FILE), exist_ok=True)
         with open(_PROSPECT_FILE, 'w') as f:
             json.dump(data, f, indent=2, default=str)
