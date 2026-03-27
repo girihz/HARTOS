@@ -3798,7 +3798,7 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
                 # If the current action hasn't been executed yet, start it
                 _ca_pending = user_tasks[user_prompt].current_action
                 _ca_pending_state = get_action_state(user_prompt, _ca_pending)
-                if _ca_pending_state in (ActionState.ASSIGNED, ActionState.PENDING):
+                if _ca_pending_state in (ActionState.ASSIGNED, ActionState.PENDING, ActionState.IN_PROGRESS):
                     # Track retries to detect actions stuck needing user input
                     if not hasattr(user_tasks[user_prompt], '_exec_retries'):
                         user_tasks[user_prompt]._exec_retries = {}
