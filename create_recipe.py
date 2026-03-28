@@ -986,11 +986,13 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
     @log_tool_execution
     async def execute_windows_or_android_command(
             instructions: Annotated[
-                str, "Command in plain English to execute in the user's windows computer or android machine"],
+                str, "Command in plain English to execute on the user's computer or mobile device"],
             os_to_control: Annotated[
-                str, "The os to control, possible values are 'windows' or 'android' only "]) -> str:
+                str, "The OS to control: 'windows', 'linux', 'macos', or 'android'"]) -> str:
         """
-        Executes a command on a Windows machine or Android device and returns the response with enhanced VLM agent context.
+        Executes a command on any desktop (Windows/Linux/macOS) or Android device.
+        Uses pyautogui for desktop GUI automation (cross-platform).
+        Returns the response with enhanced VLM agent execution context.
         """
 
 
