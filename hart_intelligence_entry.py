@@ -492,12 +492,20 @@ else:
 handler = RotatingFileHandler(_langchain_log_path, maxBytes=5_000_000, backupCount=2, encoding='utf-8')
 handler.setLevel(logging.INFO)
 
-# Prevent UnicodeEncodeError on Windows (cp1252) when LLM output contains emoji
-# by reconfiguring stdout to replace unencodable characters
+# Prevent UnicodeEncodeError on Windows (cp1252) when LLM output contains emoji.
+# In cx_Freeze frozen builds, stdout/stderr may be closed — redirect to devnull.
 try:
-    sys.stdout.reconfigure(errors='replace')
-except (AttributeError, OSError):
-    pass  # Python < 3.7 or redirected stdout
+    if sys.stdout is None or sys.stdout.closed:
+        sys.stdout = open(os.devnull, 'w')
+    else:
+        sys.stdout.reconfigure(errors='replace')
+except Exception:
+    sys.stdout = open(os.devnull, 'w')
+try:
+    if sys.stderr is None or sys.stderr.closed:
+        sys.stderr = open(os.devnull, 'w')
+except Exception:
+    pass
 stream_handler = logging.StreamHandler(sys.stdout)
 
 # Create a logging format
