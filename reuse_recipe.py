@@ -3342,7 +3342,7 @@ creation_signals = TTLCache(ttl_seconds=7200, max_size=500, name='reuse_creation
 def _advance_reuse_action(user_prompt, current_action_id, reason="reuse"):
     """
     Mark action COMPLETED → TERMINATED, advance to next action, set ASSIGNED → IN_PROGRESS.
-    Returns (next_action_id, True) if advanced, or (None, False) if all actions done.
+    Returns (next_action_id, True) if advanced, or (None, False) if all actions done or state error.
     """
     # Mark current action done
     ok1 = force_state_through_valid_path(user_prompt, current_action_id,
@@ -3350,9 +3350,16 @@ def _advance_reuse_action(user_prompt, current_action_id, reason="reuse"):
     ok2 = force_state_through_valid_path(user_prompt, current_action_id,
                                          ActionState.TERMINATED, f"{reason}: done")
     if not ok1 or not ok2:
-        current_app.logger.warning(
-            f"[REUSE] State transition failed for action {current_action_id}: "
-            f"COMPLETED={ok1}, TERMINATED={ok2}")
+        # Check actual state — if already TERMINATED, idempotent (safe to advance).
+        # If stuck in ERROR or another state, don't advance — ledger would desync.
+        actual = get_action_state(user_prompt, current_action_id)
+        if actual != ActionState.TERMINATED:
+            current_app.logger.error(
+                f"[REUSE] Cannot advance action {current_action_id}: "
+                f"state is {actual.value}, not TERMINATED — aborting advance")
+            return None, False
+        current_app.logger.info(
+            f"[REUSE] Action {current_action_id} already TERMINATED (idempotent)")
 
     current_app.logger.info(f'[REUSE] Action {current_action_id} TERMINATED, advancing')
     next_id = current_action_id + 1
@@ -3370,9 +3377,14 @@ def _advance_reuse_action(user_prompt, current_action_id, reason="reuse"):
 def _build_reuse_action_message(user_prompt, action_id):
     """Build the action execution message for REUSE mode."""
     action_message = user_tasks[user_prompt].get_action(action_id - 1)['action']
-    steps = [{x['steps']: {'tool_name': x.get('tool_name', None),
-                           'code': x.get('generalized_functions', None)}} for x in
-             recipes[user_prompt]['actions'][action_id - 1]['recipe']]
+    recipe_actions = recipes[user_prompt].get('actions', [])
+    if action_id - 1 < len(recipe_actions):
+        steps = [{x['steps']: {'tool_name': x.get('tool_name', None),
+                               'code': x.get('generalized_functions', None)}} for x in
+                 recipe_actions[action_id - 1].get('recipe', [])]
+    else:
+        steps = []
+        current_app.logger.warning(f"[REUSE] No recipe for action {action_id} — executing without steps")
     return f"Perform this action -> Action #{action_id}:{action_message}\n follow these steps: {steps}"
 
 

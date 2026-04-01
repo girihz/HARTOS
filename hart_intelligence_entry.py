@@ -4588,9 +4588,15 @@ def chat():
                         no_of_flow = len(data['flows'])-1
                         app.logger.info(f'GOT LEN OF FLOW AS {no_of_flow}')
                     if os.path.exists(os.path.join(PROMPTS_DIR, f'{prompt_id}_{no_of_flow}_recipe.json')):
+                        # All flows complete → REUSE
                         create_agent = set_flags_to_enter_review_mode(no_of_flow, user_id, prompt_id) #returns false
                     else:
-                        app.logger.info(f'{no_of_flow} Recipe JSON doesnot EXISTS')
+                        # Some flows complete, some not.
+                        # Enter CREATE — recipe() has resume logic (initialize_with_resume)
+                        # that will skip completed flows and resume from where it left off.
+                        # It also detects existing sessions (user_prompt in user_tasks) to
+                        # avoid re-creating agents, making this idempotent.
+                        app.logger.info(f'{no_of_flow} Recipe JSON does not exist — resuming CREATE for remaining flows')
                         create_agent = True
                         _ak = f'{user_id}_{prompt_id}'
                         review_agents[_ak] = True

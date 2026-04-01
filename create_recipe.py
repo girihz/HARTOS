@@ -1430,7 +1430,7 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
     async def execute_coding_task(
         task: Annotated[str, "The coding task to execute (e.g., 'review this function for bugs', 'implement a login form')"],
         task_type: Annotated[str, "Task type: code_review, feature, bug_fix, refactor, app_build, debugging, multi_session"] = "feature",
-        preferred_tool: Annotated[str, "Optional tool override: kilocode, claude_code, opencode, or aider_native (empty = auto-select best)"] = "",
+        preferred_tool: Annotated[str, "Optional tool override: kilocode, claude_code, opencode, aider_native, or claw_native (empty = auto-select best)"] = "",
         working_dir: Annotated[str, "Working directory / repo path for the coding task (empty = use HEVOLVE_CODING_WORKDIR env or cwd)"] = "",
     ) -> str:
         """Execute a coding task using the best available coding agent tool (KiloCode, Claude Code, OpenCode, or AiderNative).
@@ -1457,7 +1457,7 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
 
     helper.register_for_llm(
         name="execute_coding_task",
-        description="Execute a coding task (write, review, refactor, debug code) using the best available coding agent tool. Routes to KiloCode, Claude Code, OpenCode, or AiderNative based on benchmarks. Pass working_dir for the target repo path."
+        description="Execute a coding task (write, review, refactor, debug code) using the best available coding agent tool. Routes to KiloCode, Claude Code, OpenCode, AiderNative, or ClawNative (Rust) based on benchmarks. Pass working_dir for the target repo path."
     )(execute_coding_task)
     assistant.register_for_execution(name="execute_coding_task")(execute_coding_task)
 
@@ -3414,6 +3414,7 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
                 break
             while_loop_iterations += 1
             current_action_id = user_tasks[user_prompt].current_action
+            json_obj = None  # Reset each iteration — set by state_transition JSON parse paths
 
             current_app.logger.info(f"WHILE LOOP ITERATION #{while_loop_iterations} , Current Action Id:{current_action_id}")
 
@@ -3858,12 +3859,9 @@ def get_response_group(user_id,text,prompt_id,Failure=False,error=None):
                                     'content': f'All {_ca} actions completed for this flow.',
                                     'role': 'user', 'name': 'ChatInstructor'
                                 })
-                            # Ensure json_obj is valid — may not exist if FLOW-COMPLETE
-                            # was reached without going through the normal JSON parse path
-                            try:
-                                if not json_obj or not isinstance(json_obj, dict):
-                                    json_obj = {'status': 'completed', 'action_id': _ca}
-                            except (UnboundLocalError, NameError):
+                            # json_obj is initialized to None at loop top.
+                            # If state_transition didn't set it, create a default.
+                            if not json_obj or not isinstance(json_obj, dict):
                                 json_obj = {'status': 'completed', 'action_id': _ca}
                             flow, message, text = after_all_actions_terminated(
                                 assistant_agent, chat_instructor, group_chat,
