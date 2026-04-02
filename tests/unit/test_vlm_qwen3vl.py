@@ -572,9 +572,9 @@ class TestQwen3VLConfiguration:
 
         from core.port_registry import get_port
         assert backend.base_url == f'http://127.0.0.1:{get_port("llm")}/v1'
-        assert backend.model_name == 'Qwen3-VL-2B-Instruct'
+        assert backend.model_name == 'local'  # Default from HEVOLVE_LLM_MODEL_NAME fallback
         assert backend.api_key == 'dummy'
-        assert backend.timeout == 60
+        assert backend.timeout == 90
 
     def test_constructor_overrides_env(self, monkeypatch):
         """Explicit constructor arguments override env vars."""
