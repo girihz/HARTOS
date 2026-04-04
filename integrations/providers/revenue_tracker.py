@@ -164,7 +164,30 @@ class RevenueTracker:
     def record_revenue(self, source: str, amount_usd: float,
                        provider_id: str = '', user_id: str = '',
                        event_type: str = 'commission'):
-        """Record a revenue event (affiliate commission, credit purchase, etc.)."""
+        """Record a revenue event and credit the contributing user.
+
+        When a user's compute, API keys, agents, or content generates revenue,
+        they earn spark proportional to the amount. Requires revenue_share consent.
+        """
+        # Credit the contributing user via ResonanceService (if consented)
+        if user_id and amount_usd > 0:
+            try:
+                from integrations.social.consent_service import ConsentService
+                from integrations.social.models import db_session
+                with db_session() as db:
+                    if ConsentService.check_consent(db, user_id, 'revenue_share'):
+                        from integrations.social.resonance_engine import ResonanceService
+                        # 1 USD = 100 spark (configurable exchange rate)
+                        spark_amount = max(1, int(amount_usd * 100))
+                        ResonanceService.award_spark(
+                            db, user_id, spark_amount,
+                            source_type='revenue_share',
+                            description=f'Earned from {source}: ${amount_usd:.4f} ({provider_id})',
+                        )
+                        db.commit()
+            except Exception as _e:
+                logger.debug("Revenue credit failed for user %s: %s", user_id, _e)
+
         entry = RevenueEntry(
             timestamp=time.time(), source=source,
             provider_id=provider_id, amount_usd=amount_usd,

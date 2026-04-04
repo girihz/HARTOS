@@ -240,6 +240,26 @@ class ConsentService:
     has_consent = check_consent
 
     @staticmethod
+    def set_payment_id(db, user_id: str, payment_id: str):
+        """Store user's UPI/payment ID for revenue payouts.
+
+        Uses consent_type='payment_setup', scope=payment_id.
+        Triggers consent.granted event so frontend shows confirmation.
+        """
+        return ConsentService.grant_consent(
+            db, user_id, 'payment_setup', scope=payment_id)
+
+    @staticmethod
+    def get_payment_id(db, user_id: str) -> str:
+        """Get user's stored UPI/payment ID, or empty string."""
+        record = db.query(UserConsent).filter(
+            UserConsent.user_id == user_id,
+            UserConsent.consent_type == 'payment_setup',
+            UserConsent.granted == True,
+        ).first()
+        return record.scope if record else ''
+
+    @staticmethod
     def list_consents(db, user_id: str, consent_type: str = None,
                       agent_id=None):
         """List consent records for a user, optionally filtered."""
