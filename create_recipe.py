@@ -179,19 +179,30 @@ except PermissionError:
         log_dir = os.path.join(os.path.expanduser('~'), 'Documents', 'Nunba', 'logs')
     os.makedirs(log_dir, exist_ok=True)
 
-# Create a custom logger with timestamp in filename
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_file = os.path.join(log_dir, f"agent_system_{timestamp}.log")
+# Single log file with rotation (no more timestamped files that accumulate forever)
+log_file = os.path.join(log_dir, "agent_system.log")
+
+# Clean up old timestamped log files from previous versions (keep last 5)
+try:
+    import glob as _glob
+    old_logs = sorted(_glob.glob(os.path.join(log_dir, "agent_system_*.log")))
+    for old_log in old_logs[:-5]:  # keep newest 5, delete rest
+        try:
+            os.remove(old_log)
+        except OSError:
+            pass
+except Exception:
+    pass
 
 # Configure the logger
 tool_logger = logging.getLogger("agent_logger")
 tool_logger.setLevel(logging.DEBUG)
 
-# File handler with rotation (10 MB max size, keep 10 backup files)
+# File handler with rotation (10 MB max size, keep 5 backup files)
 file_handler = logging.handlers.RotatingFileHandler(
     log_file,
     maxBytes=10*1024*1024,  # 10 MB
-    backupCount=10
+    backupCount=5
 )
 file_handler.setLevel(logging.DEBUG)
 
@@ -782,7 +793,11 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
         try:
             sm_config = SimpleMemConfig.from_env()
             if sm_config.enabled and sm_config.api_key:
-                sm_config.db_path = f"./simplemem_db/{user_prompt}"
+                try:
+                    from core.platform_paths import get_simplemem_dir
+                    sm_config.db_path = get_simplemem_dir(str(user_prompt))
+                except ImportError:
+                    sm_config.db_path = f"./simplemem_db/{user_prompt}"
                 simplemem_store = SimpleMemStore(sm_config)
                 user_simplemem[user_prompt] = simplemem_store
                 tool_logger.info(f"[SIMPLEMEM] Initialized for {user_prompt}")
@@ -838,7 +853,7 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
     except Exception as e:
         tool_logger.debug(f"Resonance profile loading skipped: {e}")
 
-    # Create assistant agent
+    # Create assistant agent (user_language resolved inside build_personality_prompt)
     assistant = instantiate_assistant_agent(list_of_persona, user_prompt, personality=_agent_personality, resonance_profile=_resonance_profile)
 
     # Wrap assistant with Agent Lightning for training and optimization
@@ -2574,7 +2589,11 @@ def instantiate_assistant_agent(list_of_persona, user_prompt, personality=None, 
     if not _personality_block:
         try:
             from cultural_wisdom import get_cultural_prompt_compact
+            from core.agent_personality import get_regional_tone_prompt
             _personality_block = get_cultural_prompt_compact()
+            _regional = get_regional_tone_prompt()  # resolves language internally
+            if _regional:
+                _personality_block += _regional
         except Exception:
             pass
 

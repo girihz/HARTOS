@@ -142,15 +142,10 @@ class TestPythonFFI:
 # Gate 3: Version pin — is the upstream commit what we expect?
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestVersionPin:
-    """Verify upstream hasn't been updated without running compat tests."""
+class TestLicenseAndPin:
+    """Verify license and pin metadata (works without .git)."""
 
     CLAW_ROOT = os.path.join(CLAW_RUST_DIR, '..')
-
-    @pytest.fixture(autouse=True)
-    def _check_git(self):
-        if not os.path.isdir(os.path.join(self.CLAW_ROOT, '.git')):
-            pytest.skip("claw_native is not a git repo")
 
     def _get_pinned(self):
         pinned_path = os.path.join(self.CLAW_ROOT, 'PINNED.json')
@@ -158,23 +153,6 @@ class TestVersionPin:
             pytest.skip("PINNED.json not found")
         with open(pinned_path) as f:
             return json.load(f)
-
-    def test_pinned_commit_matches(self):
-        """Current HEAD must match PINNED.json commit."""
-        pinned = self._get_pinned()
-        expected = pinned['pinned_commit']
-
-        result = subprocess.run(
-            ['git', 'rev-parse', 'HEAD'],
-            cwd=self.CLAW_ROOT,
-            capture_output=True, text=True,
-        )
-        current = result.stdout.strip()
-
-        assert current.startswith(expected) or expected.startswith(current), (
-            f"claw_native HEAD is {current} but PINNED.json expects {expected}. "
-            f"Run the upgrade procedure in PINNED.json before merging upstream changes."
-        )
 
     def test_license_still_mit(self):
         """Upstream license must remain MIT — if changed, we must re-evaluate."""
@@ -203,6 +181,53 @@ class TestVersionPin:
                 "No LICENSE file and Cargo.toml doesn't declare MIT. "
                 "Review upstream licensing before upgrading."
             )
+
+    def test_bridge_crate_declared_in_pin(self):
+        """PINNED.json must reference the hart-bridge crate."""
+        pinned = self._get_pinned()
+        assert 'hart-bridge' in pinned.get('bridge_crate', ''), \
+            "PINNED.json doesn't reference hart-bridge crate"
+
+    def test_pinned_commit_field_present(self):
+        """PINNED.json must have a pinned_commit for provenance tracking."""
+        pinned = self._get_pinned()
+        commit = pinned.get('pinned_commit', '')
+        assert len(commit) >= 7, f"pinned_commit too short: {commit!r}"
+
+
+class TestVersionPin:
+    """Git-dependent version checks (skipped when vendored without .git)."""
+
+    CLAW_ROOT = os.path.join(CLAW_RUST_DIR, '..')
+
+    @pytest.fixture(autouse=True)
+    def _check_git(self):
+        if not os.path.isdir(os.path.join(self.CLAW_ROOT, '.git')):
+            pytest.skip("claw_native vendored without .git — git checks skipped")
+
+    def _get_pinned(self):
+        pinned_path = os.path.join(self.CLAW_ROOT, 'PINNED.json')
+        if not os.path.exists(pinned_path):
+            pytest.skip("PINNED.json not found")
+        with open(pinned_path) as f:
+            return json.load(f)
+
+    def test_pinned_commit_matches(self):
+        """Current HEAD must match PINNED.json commit."""
+        pinned = self._get_pinned()
+        expected = pinned['pinned_commit']
+
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=self.CLAW_ROOT,
+            capture_output=True, text=True,
+        )
+        current = result.stdout.strip()
+
+        assert current.startswith(expected) or expected.startswith(current), (
+            f"claw_native HEAD is {current} but PINNED.json expects {expected}. "
+            f"Run the upgrade procedure in PINNED.json before merging upstream changes."
+        )
 
     def test_remote_is_canonical(self):
         """Origin must point to the canonical repo, not a fork."""

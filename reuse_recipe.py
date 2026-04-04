@@ -967,7 +967,11 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
         try:
             sm_config = SimpleMemConfig.from_env()
             if sm_config.enabled and sm_config.api_key:
-                sm_config.db_path = f"./simplemem_db/{user_prompt}"
+                try:
+                    from core.platform_paths import get_simplemem_dir
+                    sm_config.db_path = get_simplemem_dir(str(user_prompt))
+                except ImportError:
+                    sm_config.db_path = f"./simplemem_db/{user_prompt}"
                 simplemem_store = SimpleMemStore(sm_config)
                 user_simplemem[user_prompt] = simplemem_store
                 current_app.logger.info(f"SimpleMem initialized for {user_prompt}")
