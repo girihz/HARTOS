@@ -653,6 +653,44 @@ except ImportError:
 except Exception as e:
     app.logger.warning(f"Hive Signal Bridge init skipped: {e}")
 
+# Hive Benchmark Prover API — distributed benchmark proving
+try:
+    from integrations.agent_engine.hive_benchmark_prover import create_benchmark_prover_blueprint
+    _bench_bp = create_benchmark_prover_blueprint()
+    if _bench_bp:
+        app.register_blueprint(_bench_bp)
+        app.logger.info("Benchmark Prover API registered at /api/hive/benchmark/")
+except ImportError:
+    app.logger.info("Benchmark Prover not available, skipping")
+except Exception as e:
+    app.logger.warning(f"Benchmark Prover init skipped: {e}")
+
+# Robotics Hardware Bridge API — sensor/actuator registration and action execution
+try:
+    from integrations.robotics.hardware_bridge import _create_blueprint as _create_hw_bp
+    _hw_bp = _create_hw_bp()
+    if _hw_bp:
+        app.register_blueprint(_hw_bp)
+        app.logger.info("Robotics Hardware Bridge registered at /api/robot/")
+except ImportError:
+    app.logger.info("Robotics Hardware Bridge not available, skipping")
+except Exception as e:
+    app.logger.warning(f"Robotics Hardware Bridge init skipped: {e}")
+
+# Compute Optimizer API — system resource optimization
+try:
+    from core.compute_optimizer import create_optimizer_blueprint, get_optimizer
+    _opt_bp = create_optimizer_blueprint()
+    if _opt_bp:
+        app.register_blueprint(_opt_bp)
+    _optimizer = get_optimizer()
+    _optimizer.start()
+    app.logger.info("Compute Optimizer registered and started")
+except ImportError:
+    app.logger.info("Compute Optimizer not available, skipping")
+except Exception as e:
+    app.logger.warning(f"Compute Optimizer init skipped: {e}")
+
 # Resource Governor — start background monitoring
 try:
     from core.resource_governor import get_governor
