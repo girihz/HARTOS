@@ -296,9 +296,14 @@ def detect_hardware() -> HardwareProfile:
     hw.cpu_model = ''
     try:
         import concurrent.futures as _cf
-        with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-            hw.cpu_model = _ex.submit(lambda: platform.processor() or '').result(timeout=5)
+        _ex = _cf.ThreadPoolExecutor(max_workers=1)
+        hw.cpu_model = _ex.submit(lambda: platform.processor() or '').result(timeout=5)
+        _ex.shutdown(wait=False)  # Don't block if thread is stuck on WMI
     except Exception:
+        try:
+            _ex.shutdown(wait=False)
+        except Exception:
+            pass
         pass
 
     # RAM
