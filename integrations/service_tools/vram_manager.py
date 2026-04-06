@@ -207,12 +207,16 @@ class VRAMManager:
     # ── VRAM queries ─────────────────────────────────────────────
 
     def get_free_vram(self) -> float:
-        """Return free VRAM in GB (accounting for our allocations)."""
+        """Return free VRAM in GB — actual free from nvidia-smi.
+
+        nvidia-smi already reports real free VRAM (total - all processes).
+        Do NOT subtract our allocations — that double-counts and reports
+        0GB when there's actually GB free, causing false OOM decisions.
+        """
         info = self.detect_gpu()
         if not info["cuda_available"]:
             return 0.0
-        used_by_us = sum(self._allocations.values())
-        return max(0.0, info["free_gb"] - used_by_us)
+        return info["free_gb"]
 
     def get_total_vram(self) -> float:
         """Return total VRAM in GB."""
