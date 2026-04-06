@@ -703,17 +703,16 @@ class ModelLifecycleManager:
         return success
 
     def _offload_torch_to_cpu(self, tool_name: str) -> bool:
-        """Move in-process torch model tensors to CPU."""
+        """Move in-process model to CPU / unload to free VRAM."""
         if tool_name == 'whisper':
             try:
-                from .whisper_tool import _whisper_model
-                if _whisper_model is not None:
-                    _whisper_model.cpu()
-                    from .vram_manager import clear_cuda_cache
-                    clear_cuda_cache()
-                    return True
+                # faster-whisper (CTranslate2) — used by Nunba. No .cpu() method,
+                # must set to None and clear cache to free VRAM.
+                from .whisper_tool import unload_whisper
+                unload_whisper()
+                return True
             except Exception as e:
-                logger.debug(f"Whisper CPU offload failed: {e}")
+                logger.debug(f"Whisper offload failed: {e}")
         return False
 
     def _offload_via_restart(self, tool_name: str) -> bool:
