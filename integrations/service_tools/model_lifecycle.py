@@ -1162,8 +1162,11 @@ class ModelLifecycleManager:
         """Ensure enough free VRAM for inference buffers.
 
         Called BEFORE synthesis/inference — not model loading.
-        Offloads idle models (e.g., Whisper during TTS) to CPU.
-        Queued for restore when inference completes.
+        Offloads models to CPU even if they're ACTIVE, as long as the
+        requester has higher priority (e.g., TTS > idle STT).
+
+        Whisper STT runs continuously but is mostly filtering silence —
+        safe to offload for a few seconds during TTS synthesis.
 
         Returns True if headroom was created (or already existed).
         """
@@ -1174,9 +1177,36 @@ class ModelLifecycleManager:
                 return True
 
             logger.info(f"Inference headroom: {free_gb:.1f}GB free, need {needed_gb}GB "
-                        f"for {requester} — evicting idle model")
-            return self.request_swap(
-                needed_model=requester, needed_type='gpu')
+                        f"for {requester}")
+
+            # Standard swap first (evicts IDLE/EVICTABLE models)
+            if self.request_swap(needed_model=requester, needed_type='gpu'):
+                return True
+
+            # If standard swap found nothing, force-offload STT (Whisper).
+            # Whisper is ACTIVE but its "inference" is just VAD silence —
+            # safe to pause for TTS synthesis duration.
+            with self._lock:
+                stt_models = [
+                    s for s in self._models.values()
+                    if s.device == ModelDevice.GPU
+                    and 'whisper' in s.name.lower()
+                    and s.name != requester
+                ]
+            for stt in stt_models:
+                logger.info(f"Inference headroom: force-offloading {stt.name} "
+                            f"for {requester} (will restore after)")
+                self._swap_queue.append({
+                    'name': stt.name,
+                    'device': 'gpu',
+                    'evicted_for': requester,
+                    'timestamp': __import__('time').time(),
+                })
+                self._do_offload_to_cpu(stt.name)
+                return True
+
+            logger.warning(f"Inference headroom: no model to evict for {requester}")
+            return False
         except Exception as e:
             logger.debug(f"Inference headroom check failed: {e}")
             return False
