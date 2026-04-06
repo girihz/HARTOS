@@ -32,6 +32,23 @@ VALID_MODALITIES = {
 
 
 # ═══════════════════════════════════════════════════════════════
+# Runtime capability introspection
+# ═══════════════════════════════════════════════════════════════
+
+def _can_do(model_type: str, capability: str = None) -> bool:
+    """Universal capability check — delegates to orchestrator.
+
+    Works for any model type or dynamic service category.
+    Single source of truth: orchestrator merges catalog + services + runtime.
+    """
+    try:
+        from integrations.service_tools.model_orchestrator import get_orchestrator
+        return get_orchestrator().can_do(model_type, capability)
+    except Exception:
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════
 # Auto-start helpers
 # ═══════════════════════════════════════════════════════════════
 
@@ -102,6 +119,85 @@ def populate_videogen_catalog(catalog) -> int:
         catalog.register(entry, persist=False)
         added += 1
     return added
+
+
+def populate_audiogen_catalog(catalog) -> int:
+    """Register audio generation models (music, singing) into ModelCatalog.
+
+    Same pattern as populate_videogen_catalog — capabilities-based routing
+    so the orchestrator can select the right model for music/singing tasks.
+
+    Called by ModelCatalog._populate_audiogen_models().
+    Returns number of new entries added.
+    """
+    from integrations.service_tools.model_catalog import ModelEntry, ModelType
+
+    audiogen_models = [
+        (
+            'audio_gen-acestep', 'ACE-Step 1.5',
+            6.0, 6.0, 4.0, 0.85, 0.90, 'standard',
+            False, False,
+            {'music_gen': True, 'singing': True, 'lyrics_input': True,
+             'genre_control': True, 'tempo_control': True,
+             'max_duration_s': 120, 'async_task': True},
+        ),
+        (
+            'audio_gen-diffrhythm', 'DiffRhythm v1.2',
+            4.0, 4.0, 3.0, 0.80, 0.75, 'standard',
+            True, True,
+            {'music_gen': False, 'singing': True, 'singing_voice': True,
+             'lyrics_input': True, 'voice_conversion': True,
+             'max_duration_s': 60, 'async_task': False},
+        ),
+    ]
+
+    added = 0
+    for (mid, name, vram, ram, disk, quality, speed, min_tier,
+         sup_cpu, sup_offload, caps) in audiogen_models:
+        if catalog.get(mid) is not None:
+            continue
+        entry = ModelEntry(
+            id=mid, name=name, model_type=ModelType.AUDIO_GEN,
+            source='huggingface',
+            vram_gb=vram, ram_gb=ram, disk_gb=disk,
+            min_capability_tier=min_tier,
+            backend='sidecar',
+            supports_gpu=True, supports_cpu=sup_cpu,
+            supports_cpu_offload=sup_offload,
+            cpu_offload_method='restart_cpu' if sup_offload else 'none',
+            idle_timeout_s=600,
+            capabilities=caps,
+            quality_score=quality, speed_score=speed,
+            tags=['local', 'audio_gen'],
+        )
+        catalog.register(entry, persist=False)
+        added += 1
+    return added
+
+
+def _select_audio_tool(task: str = 'music') -> str:
+    """Select the best audio generation tool for a task.
+
+    Consults ModelCatalog via orchestrator — same pattern as _select_video_tool.
+    task: 'music' → ACE Step, 'sing'/'lyrics' → DiffRhythm (fallback ACE Step)
+    """
+    cap_key = 'singing_voice' if task in ('sing', 'lyrics') else 'music_gen'
+    try:
+        from integrations.service_tools.model_orchestrator import get_orchestrator
+        entry = get_orchestrator().select_best(
+            'audio_gen', require_capability={cap_key: True})
+        if entry:
+            _CATALOG_TO_TOOL = {
+                'audio_gen-acestep':    'acestep',
+                'audio_gen-diffrhythm': 'diffrhythm',
+            }
+            tool = _CATALOG_TO_TOOL.get(entry.id)
+            if tool:
+                return tool
+    except Exception:
+        pass
+    # Fallback defaults
+    return 'diffrhythm' if task in ('sing', 'lyrics') else 'acestep'
 
 
 def _select_video_tool() -> str:
@@ -384,6 +480,9 @@ def generate_media(
 
     Auto-selects the best available tool, auto-starts services if needed,
     and returns results in a consistent JSON format.
+
+    Runtime capability-aware: checks what this node can do before attempting.
+    Returns clear guidance when a modality is unavailable (not cryptic errors).
     """
     t0 = time.time()
     modality = output_modality.lower().strip()
@@ -396,6 +495,25 @@ def generate_media(
         }
         result['generation_time_seconds'] = round(time.time() - t0, 2)
         return json.dumps(result)
+
+    # Runtime capability gate — universal orchestrator check
+    _MODALITY_TO_CHECK = {
+        'audio_speech': ('tts', None),
+        'audio_speech_music': ('tts', None),
+        'audio_music': ('audio_gen', 'music_gen'),
+        'video': ('video_gen', 'txt2vid'),
+        'video_with_audio': ('video_gen', 'txt2vid'),
+        'image': ('image_gen', None),
+    }
+    check = _MODALITY_TO_CHECK.get(modality)
+    if check and not _can_do(*check):
+        return json.dumps({
+            'status': 'unavailable',
+            'error': f'{modality} not available on this node right now.',
+            'modality': modality,
+            'suggestion': f'Describe the {modality.replace("_", " ")} in text instead, '
+                          f'or delegate to a node with {check[0]} capability.',
+        })
 
     try:
         if modality == 'image':
@@ -573,6 +691,77 @@ def check_media_status(
 
 
 # ═══════════════════════════════════════════════════════════════
+def synthesize_multilingual_audio(
+    text: Annotated[str, (
+        "Text to synthesize. May contain multiple languages (auto-detected by script) "
+        "and media tags: <music genre='jazz' duration='10'>prompt</music>, "
+        "<sing duration='15'>lyrics</sing>, <lyrics>song text</lyrics>. "
+        "Each segment is routed to the best available engine."
+    )],
+    output_path: Annotated[Optional[str], "Path for output WAV. Auto-generated if omitted."] = None,
+    task_id: Annotated[Optional[str], "Agent ledger task_id for pause/resume tracking."] = None,
+) -> str:
+    """Synthesize mixed-language text + media tags into one audio file.
+
+    Compute-aware: uses ModelOrchestrator to select the best model per
+    segment. Agents can pause/resume via the agent_ledger task_id.
+    Returns JSON with status, output_path, and degraded_segments (if any
+    segment type was unavailable on this node).
+    """
+    # Runtime capability gate: check what this node can actually do
+    if not _can_do('tts'):
+        return json.dumps({
+            'status': 'unavailable',
+            'error': 'Audio synthesis not available on this node (text-only mode).',
+            'suggestion': 'Return text content directly — the user will read it.',
+        })
+
+    try:
+        from tts.tts_engine import get_tts_engine
+        engine = get_tts_engine()
+        if not engine:
+            return json.dumps({'status': 'error', 'error': 'TTS engine not available'})
+
+        from tts.language_segmenter import segment
+        segments = segment(text)
+        if not segments:
+            return json.dumps({'status': 'error', 'error': 'No segments found in text'})
+
+        # Filter out segment types this node can't handle, report them
+        degraded = []
+        runnable = []
+        for seg in segments:
+            seg_type = seg.get('type', 'speech')
+            if seg_type == 'speech':
+                runnable.append(seg)
+            elif seg_type in ('music',) and not _can_do('audio_gen', 'music_gen'):
+                degraded.append({'type': seg_type, 'text': seg.get('text', ''),
+                                 'reason': 'music gen service offline'})
+            elif seg_type in ('sing', 'lyrics') and not _can_do('audio_gen', 'singing'):
+                degraded.append({'type': seg_type, 'text': seg.get('text', ''),
+                                 'reason': 'singing voice service offline'})
+            else:
+                runnable.append(seg)
+
+        result = engine._synthesize_multilingual(
+            runnable, output_path=output_path, task_id=task_id) if runnable else None
+
+        resp = {
+            'status': 'completed' if result else 'partial',
+            'output_path': result,
+            'segments_total': len(segments),
+            'segments_synthesized': len(runnable),
+            'segment_types': [s.get('type', 'speech') for s in runnable],
+        }
+        if degraded:
+            resp['degraded_segments'] = degraded
+            resp['status'] = 'partial'
+        return json.dumps(resp)
+    except Exception as e:
+        return json.dumps({'status': 'error', 'error': str(e)})
+
+
+# ═══════════════════════════════════════════════════════════════
 # Registration
 # ═══════════════════════════════════════════════════════════════
 
@@ -595,6 +784,15 @@ def register_media_tools(helper, assistant):
             'Check status of an async media generation task. '
             'Pass the task_id from a pending generate_media result.',
             check_media_status,
+        ),
+        (
+            'synthesize_multilingual_audio',
+            'Synthesize mixed-language text into one audio file. '
+            'Auto-detects languages by script (Tamil, Hindi, English, etc.) '
+            'and routes each segment to the best TTS engine. '
+            'Supports <music>, <sing>, <lyrics> tags for music/singing. '
+            'Pass task_id for pause/resume via agent ledger.',
+            synthesize_multilingual_audio,
         ),
     ]
 

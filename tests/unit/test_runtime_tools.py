@@ -595,8 +595,9 @@ class TestMediaAgent:
         assert result['status'] == 'completed'
         mock_tts.assert_called_once()
 
+    @patch('integrations.service_tools.media_agent._can_do', return_value=True)
     @patch('integrations.service_tools.media_agent._generate_audio_music')
-    def test_generate_audio_music_routing(self, mock_music):
+    def test_generate_audio_music_routing(self, mock_music, _):
         from integrations.service_tools.media_agent import generate_media
         mock_music.return_value = {
             'status': 'pending', 'output_modality': 'audio_music',
@@ -609,8 +610,9 @@ class TestMediaAgent:
         assert result['task_id'] == 'acestep_abc123'
         mock_music.assert_called_once()
 
+    @patch('integrations.service_tools.media_agent._can_do', return_value=True)
     @patch('integrations.service_tools.media_agent._generate_video')
-    def test_generate_video_routing(self, mock_vid):
+    def test_generate_video_routing(self, mock_vid, _):
         from integrations.service_tools.media_agent import generate_media
         mock_vid.return_value = {
             'status': 'pending', 'output_modality': 'video',
@@ -622,9 +624,10 @@ class TestMediaAgent:
         assert result['status'] == 'pending'
         mock_vid.assert_called_once()
 
+    @patch('integrations.service_tools.media_agent._can_do', return_value=True)
     @patch('integrations.service_tools.media_agent._generate_audio_speech')
     @patch('integrations.service_tools.media_agent._generate_video')
-    def test_video_with_audio_routing(self, mock_vid, mock_speech):
+    def test_video_with_audio_routing(self, mock_vid, mock_speech, _):
         from integrations.service_tools.media_agent import generate_media
         mock_vid.return_value = {
             'status': 'completed', 'output_modality': 'video',
@@ -729,7 +732,7 @@ class TestMediaAgent:
         assert 'localhost:8001' in call_url
 
     def test_register_media_tools(self):
-        """Verify register_media_tools registers both tools."""
+        """Verify register_media_tools registers all 3 tools."""
         from integrations.service_tools.media_agent import register_media_tools
         mock_helper = MagicMock()
         mock_assistant = MagicMock()
@@ -740,11 +743,12 @@ class TestMediaAgent:
 
         register_media_tools(mock_helper, mock_assistant)
 
-        # Should register generate_media + check_media_status = 2 tools
-        assert mock_helper.register_for_llm.call_count == 2
-        assert mock_assistant.register_for_execution.call_count == 2
+        # generate_media + check_media_status + synthesize_multilingual_audio = 3
+        assert mock_helper.register_for_llm.call_count == 3
+        assert mock_assistant.register_for_execution.call_count == 3
 
         # Check the names
         names = [call[1]['name'] for call in mock_helper.register_for_llm.call_args_list]
         assert 'generate_media' in names
         assert 'check_media_status' in names
+        assert 'synthesize_multilingual_audio' in names
