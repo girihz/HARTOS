@@ -581,6 +581,12 @@ def register_shell_os_routes(app):
         if len(username) < 2 or not username.isalnum():
             return jsonify({'error': 'Invalid username (alphanumeric, 2+ chars)'}), 400
 
+        # G7: Sanitize group names — only allow alphanumeric, hyphens, underscores
+        import re as _re_users
+        for grp in groups:
+            if not _re_users.match(r'^[a-zA-Z0-9_-]+$', str(grp)):
+                return jsonify({'error': f'Invalid group name: {grp}'}), 400
+
         try:
             group_str = ','.join(groups)
             result = subprocess.run(

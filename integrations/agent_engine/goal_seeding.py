@@ -21,12 +21,16 @@ SEED_BOOTSTRAP_GOALS = [
         'goal_type': 'marketing',
         'title': 'Platform Awareness Campaign',
         'description': (
-            'Create initial platform awareness content: '
-            '1) Research target audience needs, '
-            '2) Generate 3 educational posts about the hive intelligence platform, '
-            '3) Create an awareness campaign targeting all regions, '
-            '4) Post to platform feed and external channels. '
-            'Focus on authentic value communication, not hype.'
+            'Make the world aware that democratic crowdsourced open intelligence exists. '
+            'HART OS is a native AI operating system that runs 100% locally with full privacy. '
+            'Nunba is the face — the app people use to interact with the hive intelligence. '
+            'Together they give every human access to the best intelligence for free. '
+            'Sum of many intelligences is greater than any single intelligence. '
+            '1) Create content showing real benchmark results — hive vs single models, '
+            '2) Show the privacy story — your data never leaves your device, '
+            '3) Show the economic story — 90% of value returns to contributors, '
+            '4) Post to all channels with authentic proof, not hype. '
+            'Let the results speak. People slowly realize this changes everything.'
         ),
         'config': {
             'goal_sub_type': 'awareness',

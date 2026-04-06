@@ -519,7 +519,13 @@ class Task:
     # ==================== State Transition Methods ====================
 
     def _record_state_transition(self, new_status: TaskStatus, reason: str):
-        """Internal method to record a state transition in history."""
+        """Internal method to record a state transition in history.
+
+        WARNING: This is a low-level method that does NOT validate the transition.
+        Prefer ``transition_to()`` for validated transitions with full history
+        recording. Only call ``_record_state_transition`` from within methods
+        that have already called ``_validate_transition()``.
+        """
         self.state_history.append({
             "status": new_status.value if hasattr(new_status, 'value') else str(new_status),
             "timestamp": datetime.now().isoformat(),
@@ -529,6 +535,35 @@ class Task:
         self.status = new_status
         self.updated_at = datetime.now().isoformat()
         logger.info(f"Task {self.task_id} transitioned to {new_status}: {reason}")
+
+    def transition_to(self, new_status: TaskStatus, reason: str = "") -> bool:
+        """Validated state transition — the preferred way to change task status.
+
+        1. Validates via ``_validate_transition()``
+        2. Records in ``state_history`` (from/to/timestamp)
+        3. Updates ``updated_at``
+
+        Args:
+            new_status: Target TaskStatus.
+            reason: Human-readable reason for the transition.
+
+        Returns:
+            True if the transition was applied, False if invalid.
+        """
+        if not isinstance(new_status, TaskStatus):
+            try:
+                new_status = TaskStatus(new_status)
+            except (ValueError, KeyError):
+                logger.error(f"Unknown status value: {new_status}")
+                return False
+
+        if not self._validate_transition(new_status):
+            return False
+
+        if not reason:
+            reason = f"Transitioned to {new_status.value}"
+        self._record_state_transition(new_status, reason)
+        return True
 
     def _validate_transition(self, new_status: TaskStatus) -> bool:
         """Validate if transition from current state to new state is allowed."""
@@ -1300,39 +1335,41 @@ class SmartLedger:
 
     def load(self):
         """Load ledger from backend storage."""
-        try:
-            data = self.backend.load(self.ledger_key)
-            if data:
-                self.tasks = {
-                    task_id: Task.from_dict(task_data)
-                    for task_id, task_data in data.get("tasks", {}).items()
-                }
-                self.task_order = data.get("task_order", list(self.tasks.keys()))
-                logger.info(f"Loaded {len(self.tasks)} tasks from ledger backend")
-            else:
-                logger.info("No existing ledger found, starting fresh")
-        except Exception as e:
-            logger.error(f"Failed to load ledger: {e}")
-            self.tasks = {}
-            self.task_order = []
+        with self._lock:
+            try:
+                data = self.backend.load(self.ledger_key)
+                if data:
+                    self.tasks = {
+                        task_id: Task.from_dict(task_data)
+                        for task_id, task_data in data.get("tasks", {}).items()
+                    }
+                    self.task_order = data.get("task_order", list(self.tasks.keys()))
+                    logger.info(f"Loaded {len(self.tasks)} tasks from ledger backend")
+                else:
+                    logger.info("No existing ledger found, starting fresh")
+            except Exception as e:
+                logger.error(f"Failed to load ledger: {e}")
+                self.tasks = {}
+                self.task_order = []
 
     def save(self):
         """Save ledger to backend storage."""
-        try:
-            data = {
-                "agent_id": self.agent_id,
-                "session_id": self.session_id,
-                "last_updated": datetime.now().isoformat(),
-                "task_order": self.task_order,
-                "tasks": {
-                    task_id: task.to_dict()
-                    for task_id, task in self.tasks.items()
+        with self._lock:
+            try:
+                data = {
+                    "agent_id": self.agent_id,
+                    "session_id": self.session_id,
+                    "last_updated": datetime.now().isoformat(),
+                    "task_order": self.task_order,
+                    "tasks": {
+                        task_id: task.to_dict()
+                        for task_id, task in self.tasks.items()
+                    }
                 }
-            }
-            self.backend.save(self.ledger_key, data)
-            logger.info(f"Saved {len(self.tasks)} tasks to ledger")
-        except Exception as e:
-            logger.error(f"Failed to save ledger: {e}")
+                self.backend.save(self.ledger_key, data)
+                logger.info(f"Saved {len(self.tasks)} tasks to ledger")
+            except Exception as e:
+                logger.error(f"Failed to save ledger: {e}")
 
     def enable_pubsub(self, redis_client) -> None:
         """Enable distributed notifications via Redis PUBSUB."""
@@ -1413,47 +1450,52 @@ class SmartLedger:
 
     def reprioritize_task(self, task_id: str, new_priority: int):
         """Change task priority (0-100)."""
-        if task_id not in self.tasks:
-            logger.error(f"Task {task_id} not found")
-            return False
+        with self._lock:
+            if task_id not in self.tasks:
+                logger.error(f"Task {task_id} not found")
+                return False
 
-        old_priority = self.tasks[task_id].priority
-        self.tasks[task_id].priority = max(0, min(100, new_priority))
-        self.tasks[task_id].updated_at = datetime.now().isoformat()
-        self.save()
-        logger.info(f"Reprioritized task {task_id}: {old_priority} -> {new_priority}")
-        return True
+            old_priority = self.tasks[task_id].priority
+            self.tasks[task_id].priority = max(0, min(100, new_priority))
+            self.tasks[task_id].updated_at = datetime.now().isoformat()
+            self.save()
+            logger.info(f"Reprioritized task {task_id}: {old_priority} -> {new_priority}")
+            return True
 
     def get_task(self, task_id: str) -> Optional[Task]:
         """Get specific task."""
-        return self.tasks.get(task_id)
+        with self._lock:
+            return self.tasks.get(task_id)
 
     def get_tasks_by_status(self, status: TaskStatus) -> List[Task]:
         """Get all tasks with specific status."""
-        return [task for task in self.tasks.values() if task.status == status]
+        with self._lock:
+            return [task for task in self.tasks.values() if task.status == status]
 
     def get_tasks_by_type(self, task_type: TaskType) -> List[Task]:
         """Get all tasks of specific type."""
-        return [task for task in self.tasks.values() if task.task_type == task_type]
+        with self._lock:
+            return [task for task in self.tasks.values() if task.task_type == task_type]
 
     def get_ready_tasks(self) -> List[Task]:
         """Get tasks ready to execute (all prerequisites met), sorted by priority."""
-        ready_tasks = []
+        with self._lock:
+            ready_tasks = []
 
-        for task in self.tasks.values():
-            if task.status != TaskStatus.PENDING:
-                continue
+            for task in self.tasks.values():
+                if task.status != TaskStatus.PENDING:
+                    continue
 
-            prerequisites_met = all(
-                self.tasks.get(prereq_id, Task("", "", TaskType.PRE_ASSIGNED)).status == TaskStatus.COMPLETED
-                for prereq_id in task.prerequisites
-            )
+                prerequisites_met = all(
+                    self.tasks.get(prereq_id, Task("", "", TaskType.PRE_ASSIGNED)).status == TaskStatus.COMPLETED
+                    for prereq_id in task.prerequisites
+                )
 
-            if prerequisites_met:
-                ready_tasks.append(task)
+                if prerequisites_met:
+                    ready_tasks.append(task)
 
-        ready_tasks.sort(key=lambda t: t.priority, reverse=True)
-        return ready_tasks
+            ready_tasks.sort(key=lambda t: t.priority, reverse=True)
+            return ready_tasks
 
     def get_next_task(self) -> Optional[Task]:
         """Get the next task to execute (highest priority ready task)."""
@@ -1549,32 +1591,34 @@ class SmartLedger:
 
     def clear_completed_tasks(self):
         """Remove completed tasks from ledger."""
-        completed_ids = [
-            task_id for task_id, task in self.tasks.items()
-            if task.status == TaskStatus.COMPLETED
-        ]
-        for task_id in completed_ids:
-            del self.tasks[task_id]
-        self.save()
-        logger.info(f"Cleared {len(completed_ids)} completed tasks")
+        with self._lock:
+            completed_ids = [
+                task_id for task_id, task in self.tasks.items()
+                if task.status == TaskStatus.COMPLETED
+            ]
+            for task_id in completed_ids:
+                del self.tasks[task_id]
+            self.save()
+            logger.info(f"Cleared {len(completed_ids)} completed tasks")
 
     def cancel_task(self, task_id: str, cascade: bool = False):
         """Cancel a task and optionally all dependent tasks."""
-        if task_id not in self.tasks:
-            logger.error(f"Task {task_id} not found")
-            return False
+        with self._lock:
+            if task_id not in self.tasks:
+                logger.error(f"Task {task_id} not found")
+                return False
 
-        self.update_task_status(task_id, TaskStatus.CANCELLED)
+            self.update_task_status(task_id, TaskStatus.CANCELLED)
 
-        if cascade:
-            dependent_tasks = [
-                t for t in self.tasks.values()
-                if task_id in t.prerequisites
-            ]
-            for task in dependent_tasks:
-                self.cancel_task(task.task_id, cascade=True)
+            if cascade:
+                dependent_tasks = [
+                    t for t in self.tasks.values()
+                    if task_id in t.prerequisites
+                ]
+                for task in dependent_tasks:
+                    self.cancel_task(task.task_id, cascade=True)
 
-        return True
+            return True
 
     # ==================== State Management Methods ====================
 
@@ -1888,7 +1932,12 @@ class SmartLedger:
     # ==================== Dependency Management ====================
 
     def _handle_task_completion(self, task: Task):
-        """Handle task completion: update dependencies and auto-resume."""
+        """Handle task completion: update dependencies, auto-resume, and unblock
+        the full prerequisite chain (not just immediate dependents).
+
+        When a task completes, we walk the dependency graph breadth-first and
+        unblock every task whose blockers are now fully resolved.
+        """
         logger.debug(f"Updating dependency graph for completed task {task.task_id}")
 
         if task.result is not None:
@@ -1896,7 +1945,7 @@ class SmartLedger:
                 "message_type": "result",
                 "data": task.result,
                 "from_task_id": task.task_id,
-                "status": "completed"
+                "status": TaskStatus.COMPLETED.value,
             }
             task.send_message_to_dependents(result_message)
 
@@ -1916,24 +1965,46 @@ class SmartLedger:
                 all_dependent_ids.add(t.task_id)
 
         auto_resumed = []
-        for dependent_id in all_dependent_ids:
-            dependent = self.get_task(dependent_id)
-            if dependent:
+        # BFS queue: walk the full prerequisite chain.
+        # When we unblock a task, its own dependents may also become unblockable.
+        queue = list(all_dependent_ids)
+        visited = set()
+
+        while queue:
+            dependent_id = queue.pop(0)
+            if dependent_id in visited:
+                continue
+            visited.add(dependent_id)
+
+            dependent = self.tasks.get(dependent_id)
+            if not dependent:
+                continue
+
+            # Deliver messages from the originally completed task
+            if dependent_id in all_dependent_ids:
                 for msg in task.messages_to_dependents:
                     dependent.receive_message(msg)
 
-                dependent.remove_blocking_task(task.task_id)
+            dependent.remove_blocking_task(task.task_id)
 
-                if dependent.status == TaskStatus.BLOCKED and not dependent.is_blocked():
-                    success = dependent.resume(reason=f"Auto-resume: dependency {task.task_id} completed")
-                    if success:
-                        auto_resumed.append(dependent_id)
-                        logger.info(f"Auto-resumed task {dependent_id}")
-                        self._generate_event("task_auto_resumed", {
-                            "task_id": dependent_id,
-                            "trigger": f"dependency_{task.task_id}_completed",
-                            "reason": "All dependencies met"
-                        })
+            if dependent.status == TaskStatus.BLOCKED and not dependent.is_blocked():
+                success = dependent.resume(reason=f"Auto-resume: dependency {task.task_id} completed")
+                if success:
+                    auto_resumed.append(dependent_id)
+                    logger.info(f"Auto-resumed task {dependent_id}")
+                    self._generate_event("task_auto_resumed", {
+                        "task_id": dependent_id,
+                        "trigger": f"dependency_{task.task_id}_completed",
+                        "reason": "All dependencies met"
+                    })
+                    # This newly-unblocked task may itself have dependents that
+                    # were blocked by it.  Enqueue them for evaluation.
+                    for next_dep_id in dependent.dependent_task_ids:
+                        if next_dep_id not in visited:
+                            queue.append(next_dep_id)
+                    for t in self.tasks.values():
+                        if dependent_id in t.prerequisites and t.task_id not in visited:
+                            queue.append(t.task_id)
 
         self._generate_event("task_completed", {
             "task_id": task.task_id,
@@ -1971,7 +2042,12 @@ class SmartLedger:
                     task = self.get_task(task_id)
                     if task and hasattr(task, 'context'):
                         result_hash = task.context.get("result_hash")
-                    self._pubsub.publish_task_update(task_id, "IN_PROGRESS", "COMPLETED", result_hash)
+                    self._pubsub.publish_task_update(
+                        task_id,
+                        TaskStatus.IN_PROGRESS.value,
+                        TaskStatus.COMPLETED.value,
+                        result_hash,
+                    )
                 elif event_type == "task_delegated":
                     self._pubsub.publish_delegation(
                         task_id=event_data.get("task_id", ""),
@@ -2139,9 +2215,17 @@ class SmartLedger:
             if previous_task_id:
                 task.prerequisites.append(previous_task_id)
                 task.add_blocking_task(previous_task_id)
-                task._record_state_transition(TaskStatus.BLOCKED, f"Blocked by prerequisite {previous_task_id}")
+                # Use validated transition: PENDING -> BLOCKED is not valid in
+                # the state machine (PENDING has no BLOCKED target). Instead
+                # mark via PAUSED which IS reachable from PENDING, then we just
+                # record the block metadata. Actually, PENDING can go to
+                # IN_PROGRESS -> BLOCKED. But since the task never started,
+                # we keep it PENDING with blocked_by metadata so the scheduler
+                # skips it. Do NOT transition to BLOCKED here.
+                task.set_blocked_reason(f"Blocked by prerequisite {previous_task_id}")
+                task.pending_reason = "awaiting_prerequisites"
 
-                prev_task = self.get_task(previous_task_id)
+                prev_task = self.tasks.get(previous_task_id)
                 if prev_task:
                     prev_task.add_dependent_task(task_id)
 
@@ -2334,27 +2418,28 @@ class SmartLedger:
 
         # === WIRE ALL FIELDS BASED ON CLASSIFICATION ===
 
-        # 1. Blocked state
+        # 1. Blocked state — keep PENDING with blocked metadata instead of
+        #    invalid PENDING -> BLOCKED transition (BLOCKED requires IN_PROGRESS first)
         if classification.get('blocked_by'):
             task.blocked_by = classification['blocked_by']
             task.blocked_reason = classification.get('blocked_reason')
-            task._record_state_transition(TaskStatus.BLOCKED, f"Blocked by: {classification.get('blocked_reason', 'dependencies')}")
+            task.pending_reason = "awaiting_prerequisites"
 
-        # 2. Delegation
+        # 2. Delegation — use validated transition (PENDING -> DELEGATED)
         delegation = classification.get('delegation', {})
         if delegation.get('should_delegate'):
             task.delegated_to = delegation.get('delegate_to')
             task.delegated_at = datetime.now().isoformat()
             task.delegation_type = delegation.get('delegation_type')
-            task._record_state_transition(TaskStatus.DELEGATED, f"Delegated to {delegation.get('delegate_to')}")
+            task.transition_to(TaskStatus.DELEGATED, f"Delegated to {delegation.get('delegate_to')}")
 
-        # 3. Scheduling/Deferral
+        # 3. Scheduling/Deferral — use validated transition (PENDING -> DEFERRED)
         scheduling = classification.get('scheduling', {})
         if scheduling.get('defer'):
             task.deferred_at = datetime.now().isoformat()
             task.deferred_until = scheduling.get('defer_until')
             task.deferred_reason = scheduling.get('defer_reason')
-            task._record_state_transition(TaskStatus.DEFERRED, scheduling.get('defer_reason', 'Deferred'))
+            task.transition_to(TaskStatus.DEFERRED, scheduling.get('defer_reason', 'Deferred'))
         if scheduling.get('scheduled_at'):
             task.scheduled_at = scheduling.get('scheduled_at')
 
@@ -2686,11 +2771,17 @@ RELATIONSHIP TYPES:
             if task.retry_count < task.max_retries:
                 # Retry: don't transition to FAILED (terminal). Instead, record
                 # the retry and reset to PENDING for re-execution.
+                # IN_PROGRESS -> FAILED is valid, but we want to retry, so we go
+                # through the validated path: current -> BLOCKED -> PENDING
                 task.retry_count += 1
                 task.last_retry_at = datetime.now().isoformat()
                 task.retry_errors.append(error_msg)
                 task.error_message = error_msg
-                task._record_state_transition(TaskStatus.PENDING, f"Retry {task.retry_count}/{task.max_retries}")
+                # Use validated transitions: IN_PROGRESS -> BLOCKED -> PENDING
+                if task.status == TaskStatus.IN_PROGRESS:
+                    task.transition_to(TaskStatus.BLOCKED, f"Retry {task.retry_count}/{task.max_retries}: {error_msg}")
+                if task.status == TaskStatus.BLOCKED:
+                    task.transition_to(TaskStatus.PENDING, f"Retry {task.retry_count}/{task.max_retries}")
                 task.pending_reason = "queued"
                 logger.info(f"Task {task_id} failed, retry {task.retry_count}/{task.max_retries}")
             else:
@@ -2735,7 +2826,9 @@ RELATIONSHIP TYPES:
         )
 
         if all_complete and parent_task.status == TaskStatus.BLOCKED:
-            parent_task._record_state_transition(TaskStatus.IN_PROGRESS, "All subtasks completed")
+            # Use validated transition (BLOCKED -> PENDING -> IN_PROGRESS)
+            parent_task.transition_to(TaskStatus.PENDING, "All subtasks completed — unblocking")
+            parent_task.transition_to(TaskStatus.IN_PROGRESS, "All subtasks completed — resuming")
             logger.info(f"Unblocked parent task {parent_id} - all {len(children)} subtasks complete")
             return True
 
@@ -2788,10 +2881,10 @@ RELATIONSHIP TYPES:
                 self.tasks[child_task_id] = child_task
                 logger.info(f"Added subtask {child_task_id}: {description}")
 
-            # Block parent task until children complete
+            # Block parent task until children complete (validated transition)
             parent_task = self.tasks[parent_task_id]
             if parent_task.status != TaskStatus.BLOCKED:
-                parent_task._record_state_transition(
+                parent_task.transition_to(
                     TaskStatus.BLOCKED,
                     f"Waiting for {len(subtasks)} subtasks to complete"
                 )
