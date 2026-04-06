@@ -4536,9 +4536,12 @@ def _tts_synthesize_and_publish(text, user_id, request_id):
             from tts.tts_engine import synthesize_text
             audio_path = synthesize_text(text)
             if audio_path and os.path.isfile(audio_path):
+                # Serve via Flask static — browser can't access filesystem paths
+                audio_filename = os.path.basename(audio_path)
+                audio_url = f'/tts/audio/{audio_filename}'
                 publish_async(f'com.hertzai.pupit.{user_id}', json.dumps({
                     'text': [text[:200]],
-                    'generated_audio_url': audio_path,
+                    'generated_audio_url': audio_url,
                     'request_id': str(request_id),
                     'action': 'TTS',
                 }))

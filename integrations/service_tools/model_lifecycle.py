@@ -1196,14 +1196,26 @@ class ModelLifecycleManager:
             for stt in stt_models:
                 logger.info(f"Inference headroom: force-offloading {stt.name} "
                             f"for {requester} (will restore after)")
-                self._swap_queue.append({
-                    'name': stt.name,
-                    'device': 'gpu',
-                    'evicted_for': requester,
-                    'timestamp': __import__('time').time(),
-                })
-                self._do_offload_to_cpu(stt.name)
-                return True
+                # Temporarily zero inference count so offload succeeds
+                with self._lock:
+                    saved_count = stt.active_inference_count
+                    stt.active_inference_count = 0
+                    stt.priority = ModelPriority.EVICTABLE
+                success = self._do_offload_to_cpu(stt.name)
+                if success:
+                    self._swap_queue.append({
+                        'name': stt.name,
+                        'device': 'gpu',
+                        'evicted_for': requester,
+                        'timestamp': time.time(),
+                    })
+                    return True
+                else:
+                    # Restore state if offload failed
+                    with self._lock:
+                        stt.active_inference_count = saved_count
+                        stt.priority = ModelPriority.ACTIVE
+                    logger.warning(f"Inference headroom: offload of {stt.name} failed")
 
             logger.warning(f"Inference headroom: no model to evict for {requester}")
             return False
