@@ -249,6 +249,10 @@ class ModelCatalog:
         """All registered models."""
         return list(self._entries.values())
 
+    def list_types(self) -> List[str]:
+        """All distinct model types that have at least one enabled entry."""
+        return list({e.model_type for e in self._entries.values() if e.enabled})
+
     def list_by_type(self, model_type: str) -> List[ModelEntry]:
         """All models of a given type (e.g. 'tts', 'llm')."""
         return [e for e in self._entries.values()
@@ -404,6 +408,7 @@ class ModelCatalog:
         added += self._populate_stt_models()
         added += self._populate_vlm_models()
         added += self._populate_videogen_models()
+        added += self._populate_audiogen_models()
         if added > 0:
             self._save()
             logger.info(f"Auto-populated {added} model entries from subsystems")
@@ -527,6 +532,50 @@ class ModelCatalog:
                 capabilities={'txt2vid': True, 'img2vid': False},
                 quality_score=quality, speed_score=speed,
                 tags=['local', 'video_gen'],
+            )
+            self.register(entry, persist=False)
+            added += 1
+        return added
+
+    def _populate_audiogen_models(self) -> int:
+        """Audio/music generation entries — delegated to media_agent.populate_audiogen_catalog().
+
+        media_agent is the single source of truth for audio gen tool names
+        (ACE Step, DiffRhythm) and capability routing. Falls back to inline entries.
+        Removes stale entries from previous catalog versions.
+        """
+        # Clean up stale entries with no capabilities (from old catalog JSON)
+        for old_id in list(self._entries.keys()):
+            if old_id.startswith('audio_gen-') and not self._entries[old_id].capabilities:
+                del self._entries[old_id]
+
+        try:
+            from integrations.service_tools.media_agent import populate_audiogen_catalog
+            return populate_audiogen_catalog(self)
+        except Exception as e:
+            logger.debug(f"Audio gen catalog population via media_agent skipped: {e}")
+
+        # Minimal fallback
+        added = 0
+        _fallback = [
+            ('audio_gen-acestep',    'ACE-Step 1.5',    6.0, 6.0, 0.85, 0.90),
+            ('audio_gen-diffrhythm', 'DiffRhythm v1.2', 4.0, 4.0, 0.80, 0.75),
+        ]
+        for mid, name, vram, ram, quality, speed in _fallback:
+            if mid in self._entries:
+                continue
+            entry = ModelEntry(
+                id=mid, name=name, model_type=ModelType.AUDIO_GEN,
+                source='huggingface',
+                vram_gb=vram, ram_gb=ram,
+                backend='sidecar', supports_gpu=True,
+                supports_cpu=(vram < 5),
+                supports_cpu_offload=(vram < 5),
+                idle_timeout_s=600,
+                capabilities={'music_gen': 'acestep' in mid,
+                              'singing': True, 'lyrics_input': True},
+                quality_score=quality, speed_score=speed,
+                tags=['local', 'audio_gen'],
             )
             self.register(entry, persist=False)
             added += 1

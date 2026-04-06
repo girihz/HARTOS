@@ -23,7 +23,8 @@ from .model_storage import ModelStorageManager, model_storage
 from .vram_manager import VRAMManager, vram_manager
 from .runtime_manager import RuntimeToolManager, runtime_tool_manager
 from .model_lifecycle import ModelLifecycleManager, get_model_lifecycle_manager
-from .media_agent import generate_media, check_media_status, register_media_tools
+from .media_agent import (generate_media, check_media_status,
+                         synthesize_multilingual_audio, register_media_tools)
 
 __all__ = [
     "ServiceToolRegistry",
@@ -45,5 +46,6 @@ __all__ = [
     "get_model_lifecycle_manager",
     "generate_media",
     "check_media_status",
+    "synthesize_multilingual_audio",
     "register_media_tools",
 ]

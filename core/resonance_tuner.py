@@ -335,8 +335,12 @@ class ResonanceTuner:
         signal_scores = SignalExtractor.signals_to_scores(signals)
         profile = self._tune_profile(profile, signals, signal_scores)
 
-        # Dispatch signals to HevolveAI for deep learning (fire-and-forget)
-        self._dispatch_to_hevolveai(profile, signal_scores, user_message, agent_response)
+        # Dispatch signals to HevolveAI for deep learning (truly fire-and-forget).
+        # MUST be async — bridge.submit_correction has a 30s HTTP timeout
+        # that was blocking the chat response path when localhost:8000 is down.
+        self._executor.submit(
+            self._dispatch_to_hevolveai, profile, signal_scores,
+            user_message, agent_response)
 
         if self._auto_save:
             save_resonance_profile(profile, base_dir)

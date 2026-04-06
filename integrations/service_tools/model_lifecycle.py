@@ -1157,6 +1157,30 @@ class ModelLifecycleManager:
         })
         return True
 
+    def ensure_inference_headroom(self, needed_gb: float = 1.0,
+                                   requester: str = 'tts') -> bool:
+        """Ensure enough free VRAM for inference buffers.
+
+        Called BEFORE synthesis/inference — not model loading.
+        Offloads idle models (e.g., Whisper during TTS) to CPU.
+        Queued for restore when inference completes.
+
+        Returns True if headroom was created (or already existed).
+        """
+        try:
+            from .vram_manager import vram_manager
+            free_gb = vram_manager.get_free_vram()
+            if free_gb >= needed_gb:
+                return True
+
+            logger.info(f"Inference headroom: {free_gb:.1f}GB free, need {needed_gb}GB "
+                        f"for {requester} — evicting idle model")
+            return self.request_swap(
+                needed_model=requester, needed_type='gpu')
+        except Exception as e:
+            logger.debug(f"Inference headroom check failed: {e}")
+            return False
+
     def _process_swap_queue(self):
         """Phase 12: Restore evicted models when the model that displaced them idles.
 

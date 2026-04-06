@@ -231,6 +231,176 @@ class ModelOrchestrator:
             self._catalog.mark_error(model_id, str(e))
             return False
 
+    # ── Capability introspection ────────────────────────────────────
+
+    def available_capabilities(self) -> Dict[str, Any]:
+        """What this node can do right now — universal, any model type.
+
+        Merges THREE sources into one capability map:
+          1. ModelCatalog — static entries (LLM, TTS, STT, VLM, video_gen, audio_gen, etc.)
+          2. ServiceToolRegistry — dynamic sidecars (ACE Step, DiffRhythm, txt2img, etc.)
+          3. RuntimeToolManager — running services with health status
+
+        Returns dict keyed by category (model_type OR service tag), each with:
+          - available: bool
+          - loaded: list of loaded model/service IDs
+          - can_load: list that fit current compute but aren't loaded
+          - capabilities: merged capability set across all entries
+          - services: list of running dynamic services in this category
+
+        New categories from dynamic services appear automatically —
+        no code changes needed when a new service type registers.
+        """
+        cs = self._get_compute_state()
+        result = {}
+
+        # 1. Catalog models (static + dynamically registered)
+        for mt in self._catalog.list_types():
+            entries = self._catalog.list_by_type(mt)
+            loaded = [e.id for e in entries if e.loaded]
+            can_load = [
+                e.id for e in entries
+                if not e.loaded and e.enabled
+                and e.matches_compute(
+                    cs['vram_free_gb'], cs['ram_free_gb'],
+                    cs['gpu_available']) != 'impossible'
+            ]
+            # Merge capabilities from all available models
+            merged_caps = {}
+            for e in entries:
+                if e.loaded or (e.enabled and e.matches_compute(
+                        cs['vram_free_gb'], cs['ram_free_gb'],
+                        cs['gpu_available']) != 'impossible'):
+                    for k, v in e.capabilities.items():
+                        if v:
+                            merged_caps[k] = True
+            result[mt] = {
+                'available': bool(loaded or can_load),
+                'loaded': loaded,
+                'can_load': can_load,
+                'capabilities': merged_caps,
+                'services': [],
+            }
+
+        # 2. Dynamic services (ServiceToolRegistry) — may introduce NEW categories
+        try:
+            from integrations.service_tools.registry import service_tool_registry
+            for name, tool_info in service_tool_registry._tools.items():
+                tags = getattr(tool_info, 'tags', []) or []
+                # Each tag can map to a category
+                categories = set()
+                for tag in tags:
+                    if tag in result:
+                        categories.add(tag)
+                # If no existing category matches, use the tool name as category
+                if not categories:
+                    cat = tags[0] if tags else name
+                    categories.add(cat)
+
+                for cat in categories:
+                    if cat not in result:
+                        result[cat] = {
+                            'available': True,
+                            'loaded': [],
+                            'can_load': [],
+                            'capabilities': {},
+                            'services': [],
+                        }
+                    result[cat]['available'] = True
+                    result[cat]['services'].append(name)
+        except Exception:
+            pass
+
+        # 3. Running services (RuntimeToolManager) — mark health status
+        try:
+            from integrations.service_tools.runtime_manager import runtime_tool_manager
+            all_status = runtime_tool_manager.get_all_status()
+            for tool_name, status in all_status.items():
+                if status.get('running'):
+                    # Find which category this tool belongs to
+                    for cat, info in result.items():
+                        if tool_name in info.get('services', []):
+                            info['available'] = True
+        except Exception:
+            pass
+
+        return result
+
+    def can_do(self, model_type: str, capability: str = None) -> bool:
+        """Quick check: can this node handle a task right now?
+
+        Works for ANY model type or service category — including ones
+        that only exist as dynamic services (not in the catalog).
+
+        Usage:
+            orchestrator.can_do('tts')                    # any TTS?
+            orchestrator.can_do('audio_gen', 'music_gen') # music specifically?
+            orchestrator.can_do('video_gen', 'txt2vid')   # text-to-video?
+            orchestrator.can_do('robot_locomotion')        # new category from service?
+        """
+        caps = self.available_capabilities()
+        type_info = caps.get(model_type, {})
+        if not type_info.get('available'):
+            return False
+        if not capability:
+            return True
+        # Check merged capabilities from models + services
+        if type_info.get('capabilities', {}).get(capability):
+            return True
+        # Deeper check: individual model entries
+        all_ids = type_info.get('loaded', []) + type_info.get('can_load', [])
+        for mid in all_ids:
+            entry = self._catalog.get(mid)
+            if entry and entry.capabilities.get(capability):
+                return True
+        return False
+
+    def capability_prompt(self) -> str:
+        """Auto-generate a compact capability summary for LLM prompt injection.
+
+        Dynamically built from live state — new services appear automatically,
+        offline services disappear. No hardcoding needed.
+
+        Returns empty string if nothing special is available (no prompt bloat).
+        Format designed for small LLMs: one line per capability, action-oriented.
+        """
+        caps = self.available_capabilities()
+        lines = []
+
+        for cat, info in caps.items():
+            if not info.get('available'):
+                continue
+            # Skip LLM (the agent IS the LLM) and embedding (internal)
+            if cat in ('llm', 'embedding'):
+                continue
+
+            cap_list = sorted(info.get('capabilities', {}).keys())
+            loaded = info.get('loaded', [])
+            services = info.get('services', [])
+
+            # Build human-readable one-liner
+            status_parts = []
+            if loaded:
+                status_parts.append(f"ready: {', '.join(loaded[:3])}")
+            elif services:
+                status_parts.append(f"via: {', '.join(services[:3])}")
+            elif info.get('can_load'):
+                status_parts.append(f"available: {', '.join(info['can_load'][:2])}")
+            cap_str = f" — {', '.join(cap_list[:5])}" if cap_list else ''
+
+            label = cat.replace('_', ' ')
+            status = f" ({'; '.join(status_parts)})" if status_parts else ''
+            lines.append(f"- {label}{cap_str}{status}")
+
+        if not lines:
+            return ''
+
+        return (
+            'Available capabilities on this node (use via tools — '
+            'call generate_media or synthesize_multilingual_audio):\n'
+            + '\n'.join(lines)
+        )
+
     # ── Loader dispatch ───────────────────────────────────────────
 
     def _dispatch_load(self, entry: ModelEntry, run_mode: str) -> bool:

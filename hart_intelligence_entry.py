@@ -1595,6 +1595,38 @@ def publish_async(topic, message, timeout=2.0):
     crossbar_executor.submit(_publish)
 
 
+def _get_dynamic_capability_prompt() -> str:
+    """Auto-generate capability context for the LLM based on live node state.
+
+    - Bundled (Nunba): includes audio synthesis instructions + dynamic capabilities
+    - Text-only (Hevolve web/channels): only includes non-audio capabilities
+    - Empty string if nothing special is available (zero prompt bloat)
+
+    New models/services appear automatically — no hardcoding per model.
+    """
+    parts = []
+
+    # Audio mode context (Nunba only)
+    if _is_bundled() if callable(_is_bundled) else _is_bundled:
+        parts.append(
+            'Your text output is auto-synthesized as audio. You can freely '
+            'mix languages (the system detects scripts and routes each to '
+            'the right TTS engine). For rich audio, embed tags: '
+            '<music genre="jazz" duration="10">mood</music> for music, '
+            '<sing duration="15">lyrics</sing> for singing voice.')
+
+    # Dynamic capabilities from orchestrator (any mode)
+    try:
+        from integrations.service_tools.model_orchestrator import get_orchestrator
+        cap_prompt = get_orchestrator().capability_prompt()
+        if cap_prompt:
+            parts.append(cap_prompt)
+    except Exception:
+        pass
+
+    return '\n'.join(parts)
+
+
 # create prompt
 def create_prompt(tools):
     user_details, actions = get_action_user_details(
@@ -1629,6 +1661,7 @@ def create_prompt(tools):
         Your expertise draws from various knowledge sources like books, websites, and white papers. Your responses will be conveyed to the user through a video, using an avatar and text-to-speech technology, and can be translated into various languages.
         Consider the user's location, time and context of previous dialogues with time to create a proper prompt for tools and follow up in-context questions. You have the ability to see using Visual_Context_Camera tool.
         If your response contains abbreviated words, please separate them with spaces, like T T S.
+        {_get_dynamic_capability_prompt()}
         <CONTEXT_END>
         These are all the actions that the user has performed up to now:
         <PREVIOUS_USER_ACTION_START>
@@ -4455,6 +4488,8 @@ def _tune_resonance_after_chat(user_id, prompt_text, response_text):
         from core.resonance_tuner import get_resonance_tuner
         if user_id and prompt_text and response_text:
             tuner = get_resonance_tuner()
+            # EMA math is <1ms — do it synchronously for the response payload.
+            # HevolveAI dispatch (HTTP/bridge) is async — never blocks response.
             profile = tuner.analyze_and_tune(
                 str(user_id), str(prompt_text), str(response_text))
             return {
@@ -4471,8 +4506,101 @@ def _tune_resonance_after_chat(user_id, prompt_text, response_text):
     return {}
 
 
+_tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='tts_async')
+
+
+def _tts_synthesize_and_publish(text, user_id, request_id):
+    """Fire-and-forget: synthesize TTS, push audio via WAMP.
+
+    Same pattern as chatbot_pipeline/chatbot.py:
+      make_it_talk(text) → publish(res, user_id, 'pupit')
+    Frontend subscribes to com.hertzai.pupit.{userId} and plays.
+
+    Calls the existing synthesize_text() which handles everything:
+    language segmentation, multi-lang routing, <music>/<sing> tags,
+    model orchestration, GPU swap — the full pipeline.
+
+    Only fires when TTS engine exists (Nunba bundled mode).
+    """
+    if not text or not text.strip():
+        return
+    try:
+        from tts.tts_engine import get_tts_engine
+        if not get_tts_engine():
+            return
+    except ImportError:
+        return
+
+    def _bg():
+        try:
+            from tts.tts_engine import synthesize_text
+            audio_path = synthesize_text(text)
+            if audio_path and os.path.isfile(audio_path):
+                publish_async(f'com.hertzai.pupit.{user_id}', json.dumps({
+                    'text': [text[:200]],
+                    'generated_audio_url': audio_path,
+                    'request_id': str(request_id),
+                    'action': 'TTS',
+                }))
+        except ImportError:
+            pass
+        except Exception as e:
+            app.logger.debug(f"TTS async: {e}")
+
+    _tts_executor.submit(_bg)
+
+
 @app.route('/chat', methods=['POST'])
 def chat():
+    # ── G6: Authentication gate ──
+    # Three-layer auth: API key > JWT > body user_id (backward compat)
+    # HEVOLVE_API_KEY env var: if set, all requests MUST provide it.
+    # If not set (dev mode), allow unauthenticated but log a warning.
+    _api_key = os.environ.get('HEVOLVE_API_KEY', '')
+    auth_header = request.headers.get('Authorization', '')
+    _bearer_token = auth_header[7:] if auth_header.startswith('Bearer ') else ''
+
+    if _api_key:
+        # API key is configured — validate it first (Layer 0)
+        # Accept either API key directly or a valid JWT
+        _api_key_match = (
+            _bearer_token and
+            _bearer_token == _api_key
+        )
+        if _api_key_match:
+            g.auth_source = 'api_key'
+        elif _bearer_token:
+            # Try JWT decode (Layer 1 / Layer 2)
+            try:
+                from integrations.social.auth import decode_jwt
+                jwt_payload = decode_jwt(_bearer_token)
+                if jwt_payload and 'user_id' in jwt_payload:
+                    g.auth_source = 'jwt'
+                else:
+                    return jsonify({
+                        'error': 'Invalid or expired token.',
+                        'response': None,
+                    }), 401
+            except Exception:
+                return jsonify({
+                    'error': 'Invalid or expired token.',
+                    'response': None,
+                }), 401
+        else:
+            return jsonify({
+                'error': 'Authentication required. Provide Authorization: Bearer <token> header.',
+                'response': None,
+            }), 401
+    else:
+        # No API key configured (dev/flat mode) — log warning once
+        if not getattr(chat, '_auth_warned', False):
+            app.logger.warning(
+                'HEVOLVE_API_KEY not set — /chat endpoint accepts unauthenticated '
+                'requests. Set HEVOLVE_API_KEY env var for production.'
+            )
+            chat._auth_warned = True
+        g.auth_source = 'none'
+
     # Rate limit: 30 req/min per user/IP
     try:
         from integrations.social.rate_limiter import _limiter
@@ -4507,21 +4635,31 @@ def chat():
     # Layer 1 (LOCAL): Bearer token signed by this node's HS256 secret
     # Layer 2 (HIVE): Bearer token with Ed25519 node_sig (cross-node)
     # Fallback: body user_id (backward compat for desktop/Nunba mode)
-    auth_header = request.headers.get('Authorization', '')
-    if auth_header.startswith('Bearer '):
+    if g.auth_source not in ('jwt', 'api_key'):
+        if _bearer_token:
+            try:
+                from integrations.social.auth import decode_jwt
+                jwt_payload = decode_jwt(_bearer_token)
+                if jwt_payload and 'user_id' in jwt_payload:
+                    data['user_id'] = jwt_payload['user_id']
+                    g.auth_source = 'jwt'
+                    g.token_scope = jwt_payload.get('scope', 'local')
+                else:
+                    g.auth_source = 'body'
+            except Exception:
+                g.auth_source = 'body'
+        else:
+            g.auth_source = 'body' if g.auth_source == 'none' else g.auth_source
+    elif g.auth_source == 'jwt':
+        # JWT already decoded above in the API-key-present path
         try:
             from integrations.social.auth import decode_jwt
-            jwt_payload = decode_jwt(auth_header[7:])
+            jwt_payload = decode_jwt(_bearer_token)
             if jwt_payload and 'user_id' in jwt_payload:
                 data['user_id'] = jwt_payload['user_id']
-                g.auth_source = 'jwt'
                 g.token_scope = jwt_payload.get('scope', 'local')
-            else:
-                g.auth_source = 'body'
         except Exception:
-            g.auth_source = 'body'
-    else:
-        g.auth_source = 'body'
+            pass
 
     # Reject unauthenticated requests on exposed deployments
     # (central tier or HEVOLVE_REQUIRE_AUTH=true)
@@ -4536,6 +4674,20 @@ def chat():
 
     user_id = data.get('user_id', None)
     preferred_lang = data.get('preferred_lang', 'en')
+
+    # Persist language preference so next startup warm-up loads the right TTS.
+    # Lazy one-time write — avoids disk I/O on every chat request.
+    if preferred_lang and preferred_lang != 'en' and not getattr(chat, '_lang_persisted', False):
+        try:
+            _hart_lang_path = os.path.join(
+                os.path.expanduser('~'), 'Documents', 'Nunba', 'data', 'hart_language.json')
+            if not os.path.exists(_hart_lang_path):
+                os.makedirs(os.path.dirname(_hart_lang_path), exist_ok=True)
+                with open(_hart_lang_path, 'w') as _f:
+                    json.dump({'language': preferred_lang}, _f)
+                chat._lang_persisted = True
+        except Exception:
+            pass
     request_id = data.get('request_id', None)
     req_tool = data.get('tools', None)
     file_id = data.get('file_id', None)
@@ -5245,6 +5397,11 @@ def chat():
                      'uid': request_id, 'task_id': f"CHAT_{str(request_id)}", 'request_id': request_id,
                      **_resonance}
         publish_async('com.hertzai.longrunning.log', post_dict)
+
+        # Async TTS: synthesize audio in background, push via WAMP when ready.
+        # Same pattern as chatbot_pipeline/chatbot.py → make_it_talk → publish('pupit').
+        # Frontend already subscribes to com.hertzai.pupit.{userId}.
+        _tts_synthesize_and_publish(ans, user_id, request_id)
     else:
         post_dict = {'user_id': user_id, 'status': 'ERROR', 'task_name': "CHAT", 'uid': request_id,
                      'task_id': f"CHAT_{str(request_id)}", 'request_id': request_id, 'failure_reason': 'Got null response from GPT'}

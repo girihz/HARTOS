@@ -42,23 +42,54 @@ class RegionalHostRegistry:
         compute_budget: Optional[Dict[str, Any]] = None,
         agent_ids: Optional[List[str]] = None,
     ) -> bool:
-        """Register this host as available for distributed work."""
+        """Register this host as available for distributed work.
+
+        Capabilities list contains flat strings ('coding', 'testing') AND
+        auto-discovered model capabilities from ModelOrchestrator (e.g.
+        'tts', 'audio_gen:music_gen', 'video_gen:txt2vid'). This allows
+        distributed dispatch to route tasks to nodes with the right models.
+        """
+        # Auto-discover model/service capabilities from orchestrator
+        model_caps = self._discover_model_capabilities()
+        all_caps = list(set(capabilities + model_caps))
+
         try:
             data = {
                 "host_id": self.host_id,
                 "host_url": self.host_url,
-                "capabilities": capabilities,
+                "capabilities": all_caps,
                 "compute_budget": compute_budget or {},
                 "agent_ids": agent_ids or [],
                 "registered_at": datetime.now().isoformat(),
                 "last_seen": datetime.now().isoformat(),
             }
             self._redis.hset(self.HOSTS_HASH, self.host_id, json.dumps(data))
-            logger.info(f"Host registered: {self.host_id} with {len(capabilities)} capabilities")
+            logger.info(f"Host registered: {self.host_id} with {len(all_caps)} capabilities")
             return True
         except Exception as e:
             logger.error(f"Failed to register host {self.host_id}: {e}")
             return False
+
+    @staticmethod
+    def _discover_model_capabilities() -> List[str]:
+        """Auto-discover model capabilities from ModelOrchestrator.
+
+        Returns flat strings like ['tts', 'audio_gen:music_gen', 'stt:realtime']
+        that can be matched by get_hosts_with_capability().
+        """
+        try:
+            from integrations.service_tools.model_orchestrator import get_orchestrator
+            caps = get_orchestrator().available_capabilities()
+            flat = []
+            for model_type, info in caps.items():
+                if info.get('available'):
+                    flat.append(model_type)
+                    # Also add type:capability pairs for fine-grained matching
+                    for cap_name in info.get('capabilities', {}):
+                        flat.append(f"{model_type}:{cap_name}")
+            return flat
+        except Exception:
+            return []
 
     def deregister_host(self) -> bool:
         """Remove this host from the registry."""
