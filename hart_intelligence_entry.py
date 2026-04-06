@@ -4546,9 +4546,9 @@ def _tts_synthesize_and_publish(text, user_id, request_id):
                     'action': 'TTS',
                 }))
         except ImportError:
-            pass
+            pass  # TTS not available (cloud mode)
         except Exception as e:
-            app.logger.debug(f"TTS async: {e}")
+            app.logger.error(f"TTS async failed: {e}", exc_info=True)
 
     _tts_executor.submit(_bg)
 
