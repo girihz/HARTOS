@@ -28,22 +28,70 @@ logger = logging.getLogger('hevolve_social')
 DELTA_VERSION = 1
 DELTA_MAX_AGE_SECONDS = 3600  # 1 hour freshness window
 
+# ── G8: Per-node HMAC secret (generated at first boot) ──
+_HMAC_SECRET_PATH = os.path.join(
+    os.environ.get('HEVOLVE_AGENT_DATA', 'agent_data'), '.hmac_secret')
+
+
+def _load_or_create_hmac_secret() -> str:
+    """Load per-node HMAC secret from disk, or generate on first boot.
+
+    The secret is 32 random bytes (hex-encoded, 64 chars) stored at
+    agent_data/.hmac_secret.  This replaces the old HART_NODE_KEY env var
+    and Ed25519-public-key fallback with a proper per-node secret that is
+    never transmitted in cleartext.
+    """
+    try:
+        if os.path.isfile(_HMAC_SECRET_PATH):
+            with open(_HMAC_SECRET_PATH, 'r') as f:
+                secret = f.read().strip()
+            if len(secret) >= 32:
+                return secret
+    except (OSError, PermissionError) as e:
+        logger.warning(f'Cannot read HMAC secret ({e}), regenerating')
+
+    # Generate new secret
+    secret = os.urandom(32).hex()
+    try:
+        os.makedirs(os.path.dirname(_HMAC_SECRET_PATH), exist_ok=True)
+        with open(_HMAC_SECRET_PATH, 'w') as f:
+            f.write(secret)
+        # Restrict permissions (owner read/write only)
+        try:
+            import stat
+            os.chmod(_HMAC_SECRET_PATH, stat.S_IRUSR | stat.S_IWUSR)
+        except (OSError, NotImplementedError):
+            pass  # Windows doesn't support POSIX chmod the same way
+        logger.info(f'Generated per-node HMAC secret at {_HMAC_SECRET_PATH}')
+    except (OSError, PermissionError) as e:
+        logger.warning(f'Cannot persist HMAC secret ({e}), using ephemeral')
+
+    return secret
+
+
+# Cache the secret at module load
+_NODE_HMAC_SECRET: str = ''
+
+
+def _get_hmac_secret() -> str:
+    """Return the per-node HMAC secret (lazy-loaded, cached)."""
+    global _NODE_HMAC_SECRET
+    if not _NODE_HMAC_SECRET:
+        _NODE_HMAC_SECRET = _load_or_create_hmac_secret()
+    return _NODE_HMAC_SECRET
+
 
 def _sign_delta(delta_dict):
-    """Sign a federation delta with node key (HMAC-SHA256).
+    """Sign a federation delta with per-node HMAC-SHA256 secret.
 
-    Fallback: if HART_NODE_KEY is not set, derives an HMAC key from the
-    node's Ed25519 public key so deltas are NEVER unsigned.
+    Uses the persistent per-node secret from agent_data/.hmac_secret
+    (G8 fix — replaces the old HART_NODE_KEY env var / Ed25519 public
+    key fallback which was a hardcoded/default key vulnerability).
     """
-    node_key = os.environ.get('HART_NODE_KEY')
+    node_key = _get_hmac_secret()
     if not node_key:
-        # Derive HMAC key from node's Ed25519 public key — never send unsigned
-        try:
-            from security.node_integrity import get_public_key_hex
-            node_key = get_public_key_hex()
-        except ImportError:
-            logger.error('HART_NODE_KEY not set and Ed25519 key unavailable — delta UNSIGNED')
-            return delta_dict
+        logger.error('HMAC secret unavailable — delta UNSIGNED')
+        return delta_dict
     # Work on a copy without any existing hmac_signature
     to_sign = {k: v for k, v in delta_dict.items() if k != 'hmac_signature'}
     payload = json.dumps(to_sign, sort_keys=True).encode()
@@ -55,8 +103,12 @@ def _sign_delta(delta_dict):
 def _verify_delta_signature(delta_dict):
     """Verify a received federation delta's HMAC-SHA256 signature.
 
-    The sender may have used HART_NODE_KEY or fallen back to their Ed25519
-    public key as the HMAC key. We try both.
+    G8: For verification we need the sender's HMAC secret, which is
+    exchanged during federation handshake (signed by node's Ed25519 key).
+    We check:
+      1. Our own per-node secret (for self-originated deltas)
+      2. Sender's Ed25519-signed HMAC public (from handshake cache)
+      3. Legacy: sender's Ed25519 public key as fallback
     """
     sig = delta_dict.get('hmac_signature', '')
     if not sig:
@@ -64,14 +116,23 @@ def _verify_delta_signature(delta_dict):
     to_verify = {k: v for k, v in delta_dict.items() if k != 'hmac_signature'}
     payload = json.dumps(to_verify, sort_keys=True).encode()
 
-    # Try HART_NODE_KEY first (shared secret between peers)
-    node_key = os.environ.get('HART_NODE_KEY')
-    if node_key:
-        expected = hmac.new(node_key.encode(), payload, hashlib.sha256).hexdigest()
+    # 1. Try our own per-node HMAC secret (self-test / same-node)
+    our_secret = _get_hmac_secret()
+    if our_secret:
+        expected = hmac.new(our_secret.encode(), payload, hashlib.sha256).hexdigest()
         if hmac.compare_digest(sig, expected):
             return True
 
-    # Fallback: sender used their Ed25519 public key as HMAC key
+    # 2. Try peer's exchanged HMAC secret from handshake cache
+    sender_node_id = delta_dict.get('node_id', '')
+    if sender_node_id:
+        peer_secret = _get_peer_hmac_secret(sender_node_id)
+        if peer_secret:
+            expected = hmac.new(peer_secret.encode(), payload, hashlib.sha256).hexdigest()
+            if hmac.compare_digest(sig, expected):
+                return True
+
+    # 3. Legacy fallback: sender used their Ed25519 public key as HMAC key
     sender_pubkey = delta_dict.get('public_key', '')
     if sender_pubkey:
         expected = hmac.new(sender_pubkey.encode(), payload, hashlib.sha256).hexdigest()
@@ -79,6 +140,32 @@ def _verify_delta_signature(delta_dict):
             return True
 
     return False
+
+
+# ── Peer HMAC secret exchange cache ──
+_peer_hmac_secrets: Dict[str, str] = {}
+_peer_hmac_lock = threading.Lock()
+
+
+def register_peer_hmac_secret(node_id: str, secret: str):
+    """Store a peer's HMAC secret received during federation handshake."""
+    with _peer_hmac_lock:
+        _peer_hmac_secrets[node_id] = secret
+
+
+def _get_peer_hmac_secret(node_id: str) -> str:
+    """Retrieve a peer's HMAC secret from the handshake cache."""
+    with _peer_hmac_lock:
+        return _peer_hmac_secrets.get(node_id, '')
+
+
+def get_hmac_secret_for_handshake() -> str:
+    """Return our HMAC secret for federation handshake exchange.
+
+    The caller (federation handshake) should sign this with the node's
+    Ed25519 key before transmitting to peers.
+    """
+    return _get_hmac_secret()
 
 
 class FederatedAggregator:

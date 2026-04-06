@@ -702,8 +702,10 @@ def _device_control_shell(action: str, params: dict) -> Dict:
         pass
 
     try:
+        # G7: use shlex.split + shell=False to prevent shell injection
+        cmd_list = shlex.split(command)
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=30,
+            cmd_list, shell=False, capture_output=True, text=True, timeout=30,
         )
         output = result.stdout[:2000] if result.stdout else ''
         error = result.stderr[:500] if result.stderr else ''

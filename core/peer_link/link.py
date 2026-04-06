@@ -48,6 +48,21 @@ class TrustLevel(Enum):
     PEER = 'peer'             # Other user's device — E2E mandatory
     RELAY = 'relay'           # Through intermediate — E2E mandatory
 
+    def trust_rank(self) -> int:
+        """Numeric rank for trust comparison (higher = more trusted).
+
+        G9: Used by the trust ratchet to prevent downgrade attacks.
+        """
+        return _TRUST_RANKS.get(self, 0)
+
+
+# Trust ordering: RELAY < PEER < SAME_USER
+_TRUST_RANKS = {
+    TrustLevel.RELAY: 0,
+    TrustLevel.PEER: 1,
+    TrustLevel.SAME_USER: 2,
+}
+
 
 class LinkState(Enum):
     DISCONNECTED = 'disconnected'
@@ -93,6 +108,12 @@ class PeerLink:
         self.peer_ed25519_public = ed25519_public_hex
         self.capabilities = capabilities or {}
 
+        # G9: Trust ratchet — once trust is established at a level,
+        # it can only be UPGRADED (never downgraded) during this session.
+        # Prevents trust downgrade attacks where a MITM claims PEER after
+        # SAME_USER was already verified.
+        self._min_trust_level: TrustLevel = trust
+
         self._state = LinkState.DISCONNECTED
         self._ws = None
         self._session_key: Optional[bytes] = None  # AES-256 key (PEER/RELAY only)
@@ -124,6 +145,30 @@ class PeerLink:
     def is_encrypted(self) -> bool:
         """E2E encryption active (PEER/RELAY trust only)."""
         return self._session_key is not None
+
+    @property
+    def min_trust_level(self) -> TrustLevel:
+        """The minimum trust level established during this session (ratchet floor)."""
+        return self._min_trust_level
+
+    def set_trust(self, new_trust: TrustLevel) -> bool:
+        """Set trust level with ratchet enforcement (G9).
+
+        Trust can only be UPGRADED, never downgraded during a session.
+        Returns True if trust was set, False if downgrade was rejected.
+        """
+        if new_trust.trust_rank() < self._min_trust_level.trust_rank():
+            logger.warning(
+                f"Trust downgrade REJECTED for {self.peer_id[:8]}: "
+                f"{new_trust.value} < {self._min_trust_level.value} (ratchet)")
+            return False
+        self.trust = new_trust
+        # Ratchet upward
+        if new_trust.trust_rank() > self._min_trust_level.trust_rank():
+            self._min_trust_level = new_trust
+            logger.info(
+                f"Trust UPGRADED for {self.peer_id[:8]}: → {new_trust.value}")
+        return True
 
     @property
     def idle_seconds(self) -> float:
@@ -457,17 +502,24 @@ class PeerLink:
         # Determine trust LOCALLY — never accept trust_requested from wire.
         # SAME_USER requires proof: peer must present a user_id_signature
         # signed by the same user key we hold. Without proof → PEER.
+        # G9: Trust ratchet enforced via set_trust() — cannot downgrade.
         requested_trust = hello_data.get('trust_requested', 'peer')
         if requested_trust == 'same_user':
             # Verify SAME_USER claim cryptographically
             user_proof = hello_data.get('user_id_proof', '')
             if user_proof and self._verify_same_user_proof(user_proof, peer_ed25519):
-                self.trust = TrustLevel.SAME_USER
+                if not self.set_trust(TrustLevel.SAME_USER):
+                    logger.warning("Trust ratchet rejected SAME_USER (should not happen — upgrade)")
+                    return False
             else:
-                logger.warning("SAME_USER trust requested but no valid proof — downgrading to PEER")
-                self.trust = TrustLevel.PEER
+                logger.warning("SAME_USER trust requested but no valid proof — setting PEER")
+                if not self.set_trust(TrustLevel.PEER):
+                    logger.warning("Trust ratchet rejected PEER downgrade from higher level")
+                    return False
         else:
-            self.trust = TrustLevel.PEER
+            if not self.set_trust(TrustLevel.PEER):
+                logger.warning("Trust ratchet rejected PEER downgrade from higher level")
+                return False
 
         # Verify pre-trust contract for PEER connections
         # SAME_USER (own devices) are exempt — trust is user identity based

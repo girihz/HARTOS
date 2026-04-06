@@ -119,11 +119,21 @@ def _auto_sync_to_ledger(user_prompt: str, action_id: int, state: 'ActionState')
                 )
                 logger.info(f"Claimed ownership of {task_id} for {user_prompt}")
 
-            # Handle PAUSED/BLOCKED → IN_PROGRESS via task.resume()
+            # Handle PAUSED/BLOCKED → IN_PROGRESS via validated transitions.
+            # PAUSED/USER_STOPPED -> RESUMING -> IN_PROGRESS (task.resume() does this)
+            # BLOCKED -> PENDING -> IN_PROGRESS (resume not valid from BLOCKED in
+            # the state machine — go through PENDING first)
             if (ledger_status == LedgerTaskStatus.IN_PROGRESS
-                    and task.status in (LedgerTaskStatus.PAUSED, LedgerTaskStatus.BLOCKED)):
+                    and task.status in (LedgerTaskStatus.PAUSED, LedgerTaskStatus.USER_STOPPED)):
                 task.resume(reason=f"Resumed via ActionState.{state.value}")
-                task.blocked_reason = None  # Clear blocked reason on resume
+                task.blocked_reason = None
+                ledger.save()
+            elif (ledger_status == LedgerTaskStatus.IN_PROGRESS
+                    and task.status == LedgerTaskStatus.BLOCKED):
+                # BLOCKED -> PENDING -> IN_PROGRESS (validated 2-step path)
+                task.transition_to(LedgerTaskStatus.PENDING, f"Unblocked via ActionState.{state.value}")
+                task.transition_to(LedgerTaskStatus.IN_PROGRESS, f"Resumed via ActionState.{state.value}")
+                task.blocked_reason = None
                 ledger.save()
             elif task.status != ledger_status:
                 # Skip no-op transitions (e.g. IN_PROGRESS → IN_PROGRESS when

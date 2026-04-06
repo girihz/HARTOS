@@ -19,6 +19,10 @@ import logging
 from flask import Flask, request, jsonify, send_file
 from threading import Lock
 
+# G10: Resolve LTX server port from port_registry / env var instead of hardcoded 5002
+_LTX_PORT = int(os.environ.get('HART_LTX_PORT', '5002'))
+_LTX_BASE_URL = os.environ.get('HART_LTX_URL', f'http://localhost:{_LTX_PORT}')
+
 try:
     from integrations.service_tools.vram_manager import clear_cuda_cache
 except ImportError:
@@ -208,8 +212,8 @@ def generate_video():
         return jsonify({
             "status": "success",
             "video_path": output_path,
-            "video_url": f"http://localhost:5002/video/{output_filename}",
-            "output_url": f"http://localhost:5002/video/{output_filename}",
+            "video_url": f"{_LTX_BASE_URL}/video/{output_filename}",
+            "output_url": f"{_LTX_BASE_URL}/video/{output_filename}",
             "generation_time_seconds": round(generation_time, 2),
             "parameters": {
                 "width": width,
@@ -249,7 +253,7 @@ def list_videos():
         if f.endswith('.mp4'):
             videos.append({
                 "filename": f,
-                "url": f"http://localhost:5002/video/{f}",
+                "url": f"{_LTX_BASE_URL}/video/{f}",
                 "size_mb": round(os.path.getsize(os.path.join(OUTPUT_DIR, f)) / 1e6, 2)
             })
     return jsonify({"videos": videos})
@@ -369,7 +373,7 @@ def generate_long_video():
         return jsonify({
             "status": "success",
             "video_path": output_path,
-            "video_url": f"http://localhost:5002/video/{output_filename}",
+            "video_url": f"{_LTX_BASE_URL}/video/{output_filename}",
             "duration_seconds": duration_seconds,
             "total_frames": len(all_frames),
             "chunks_generated": chunk_num,
@@ -434,9 +438,9 @@ if __name__ == '__main__':
     else:
         print("WARNING: CUDA not available! GPU generation requires CUDA.")
 
-    print("\nStarting server on http://localhost:5002")
+    print(f"\nStarting server on {_LTX_BASE_URL}")
     print("Model will be downloaded from HuggingFace on first request...")
     print("First request may take a few minutes to download the model.\n")
 
     # Run Flask server
-    app.run(host='0.0.0.0', port=5002, threaded=True)
+    app.run(host='0.0.0.0', port=_LTX_PORT, threaded=True)

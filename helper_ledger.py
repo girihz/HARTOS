@@ -440,28 +440,18 @@ def get_default_llm_client():
     """
     Get default LLM client for task classification.
 
-    Uses local llama.cpp server with Qwen3-VL-4B model.
+    DEPRECATED: The ledger is a data structure and should not have LLM
+    dependencies. Callers should pass their own ``llm_client`` to methods
+    that require language-model inference.
+
+    Raises:
+        NotImplementedError: Always. Callers must supply their own LLM client.
     """
-    class SimpleLLMClient:
-        def complete(self, prompt: str) -> str:
-            from core.http_pool import pooled_post
-            from core.port_registry import get_local_llm_url
-            try:
-                response = pooled_post(
-                    f"{get_local_llm_url()}/chat/completions",
-                    json={
-                        "model": "Qwen3-VL-4B-Instruct",
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 500,
-                        "temperature": 0.1  # Low temp for consistent JSON
-                    },
-                    timeout=30
-                )
-                return response.json()['choices'][0]['message']['content']
-            except Exception as e:
-                logger.error(f"LLM call failed: {e}")
-                raise
-    return SimpleLLMClient()
+    raise NotImplementedError(
+        "get_default_llm_client() is removed. The ledger is framework-agnostic "
+        "and does not bundle a default LLM client. Pass llm_client= to methods "
+        "that require language model inference."
+    )
 
 
 # Example usage

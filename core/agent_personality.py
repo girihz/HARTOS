@@ -607,6 +607,16 @@ Remember: You are not just executing tasks — you are a caring partner in the u
     if regional:
         base_prompt += regional
 
+    # Append living principles (the heartbeat)
+    try:
+        from agent_identity import LIVING_PRINCIPLES
+        if LIVING_PRINCIPLES:
+            base_prompt += "\n\nLIVING PRINCIPLES (your heartbeat):\n"
+            for principle in LIVING_PRINCIPLES:
+                base_prompt += f"- {principle}\n"
+    except ImportError:
+        pass
+
     # Append resonance tuning if profile available
     if resonance_profile is not None:
         try:

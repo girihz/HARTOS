@@ -342,9 +342,14 @@ class DynamicBenchmarkAdapter(BenchmarkAdapter):
         if not self.is_available():
             return {'metrics': {}, 'error': 'not installed'}
         try:
-            cmd = self._run_command or f'{sys.executable} -m pytest --benchmark-json=results.json'
+            if self._run_command:
+                # G7: use shlex.split to tokenize safely (no shell execution)
+                import shlex
+                cmd_list = shlex.split(self._run_command)
+            else:
+                cmd_list = [sys.executable, '-m', 'pytest', '--benchmark-json=results.json']
             result = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True,
+                cmd_list, shell=False, capture_output=True, text=True,
                 timeout=600, cwd=self._install_dir, **_SUBPROCESS_KW)
             # Try to parse metrics file
             mf = os.path.join(self._install_dir, self._metrics_file or 'results.json')
