@@ -323,28 +323,28 @@ class AgentDaemon:
                 load_level = 'normal'
 
             if load_level == 'high':
-                    # System under load: lengthen tick interval
-                    new_interval = min(self._base_interval * 3, self._BACKOFF_MAX)
-                    if self._interval != new_interval:
-                        self._interval = new_interval
-                        logger.info(
-                            f"Proactive hive: system under load, "
-                            f"lengthened tick interval to {new_interval}s")
-                elif load_level == 'idle':
-                    # System idle: shorten tick interval, accept more tasks
-                    new_interval = max(self._base_interval // 2, 10)
-                    if self._interval != new_interval:
-                        self._interval = new_interval
-                        logger.info(
-                            f"Proactive hive: system idle, "
-                            f"shortened tick interval to {new_interval}s")
-                else:
-                    # Normal: restore base interval
-                    if self._interval != self._base_interval:
-                        self._interval = self._base_interval
-                        logger.debug(
-                            f"Proactive hive: load normal, "
-                            f"restored tick interval to {self._base_interval}s")
+                # System under load: lengthen tick interval
+                new_interval = min(self._base_interval * 3, self._BACKOFF_MAX)
+                if self._interval != new_interval:
+                    self._interval = new_interval
+                    logger.info(
+                        f"Proactive hive: system under load, "
+                        f"lengthened tick interval to {new_interval}s")
+            elif load_level == 'idle':
+                # System idle: shorten tick interval, accept more tasks
+                new_interval = max(self._base_interval // 2, 10)
+                if self._interval != new_interval:
+                    self._interval = new_interval
+                    logger.info(
+                        f"Proactive hive: system idle, "
+                        f"shortened tick interval to {new_interval}s")
+            else:
+                # Normal: restore base interval
+                if self._interval != self._base_interval:
+                    self._interval = self._base_interval
+                    logger.debug(
+                        f"Proactive hive: load normal, "
+                        f"restored tick interval to {self._base_interval}s")
         except ImportError:
             pass  # compute_optimizer not available yet
         except Exception as e:
