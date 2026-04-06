@@ -533,14 +533,36 @@ class ModelOrchestrator:
     # ── Lifecycle integration ─────────────────────────────────────
 
     def _register_lifecycle(self, entry: ModelEntry) -> None:
-        """Register model with ModelLifecycleManager for idle eviction."""
+        """Register model with ModelLifecycleManager — central tracker for ALL GPU models.
+
+        Every model that loads on GPU MUST register here so the lifecycle
+        manager can evict/offload/restore models when VRAM is needed.
+        """
         try:
-            from integrations.service_tools.model_lifecycle import get_model_lifecycle_manager
+            from integrations.service_tools.model_lifecycle import (
+                get_model_lifecycle_manager, ModelState, ModelDevice, ModelPriority)
             mlm = get_model_lifecycle_manager()
-            if mlm and hasattr(mlm, 'notify_access'):
-                mlm.notify_access(entry.id)
+            device = (ModelDevice.GPU if entry.device == 'gpu'
+                      else ModelDevice.CPU if entry.device in ('cpu', 'cpu_offload')
+                      else ModelDevice.CPU)
+            # Map catalog names to offload table names (e.g., 'stt-whisper-large' → 'whisper')
+            offload_name = entry.id.split('-')[1] if '-' in entry.id else entry.id
+            # Use the offload table key if it exists, otherwise the catalog ID
+            from integrations.service_tools.model_lifecycle import CPU_OFFLOAD_TABLE
+            if offload_name not in CPU_OFFLOAD_TABLE:
+                offload_name = entry.id
+            mlm._models[offload_name] = ModelState(
+                name=offload_name,
+                device=device,
+                priority=ModelPriority.WARM,
+            )
+            if hasattr(mlm, 'notify_access'):
+                mlm.notify_access(offload_name)
+            logger.info(f"Lifecycle: registered {offload_name} (device={device})")
         except ImportError:
             pass
+        except Exception as e:
+            logger.debug(f"Lifecycle registration failed for {entry.id}: {e}")
 
     # ── Service tool registration ────────────────────────────────────
     # When a model loads, register its corresponding service tool so
