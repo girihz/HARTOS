@@ -1183,39 +1183,30 @@ class ModelLifecycleManager:
             if self.request_swap(needed_model=requester, needed_type='gpu'):
                 return True
 
-            # If standard swap found nothing, force-offload STT (Whisper).
-            # Whisper is ACTIVE but its "inference" is just VAD silence —
-            # safe to pause for TTS synthesis duration.
+            # Force-offload any GPU model that isn't the requester.
+            # Whisper registers itself on load (whisper_tool.py).
             with self._lock:
-                stt_models = [
+                gpu_models = [
                     s for s in self._models.values()
                     if s.device == ModelDevice.GPU
-                    and 'whisper' in s.name.lower()
                     and s.name != requester
                 ]
-            for stt in stt_models:
-                logger.info(f"Inference headroom: force-offloading {stt.name} "
-                            f"for {requester} (will restore after)")
-                # Temporarily zero inference count so offload succeeds
-                with self._lock:
-                    saved_count = stt.active_inference_count
-                    stt.active_inference_count = 0
-                    stt.priority = ModelPriority.EVICTABLE
-                success = self._do_offload_to_cpu(stt.name)
+            for model in gpu_models:
+                logger.info(f"Inference headroom: offloading {model.name} to CPU "
+                            f"for {requester}")
+                success = self._do_offload_to_cpu(model.name)
                 if success:
                     self._swap_queue.append({
-                        'name': stt.name,
+                        'name': model.name,
                         'device': 'gpu',
                         'evicted_for': requester,
                         'timestamp': time.time(),
                     })
+                    with self._lock:
+                        model.device = ModelDevice.CPU
                     return True
                 else:
-                    # Restore state if offload failed
-                    with self._lock:
-                        stt.active_inference_count = saved_count
-                        stt.priority = ModelPriority.ACTIVE
-                    logger.warning(f"Inference headroom: offload of {stt.name} failed")
+                    logger.warning(f"Inference headroom: offload of {model.name} failed")
 
             logger.warning(f"Inference headroom: no model to evict for {requester}")
             return False

@@ -166,6 +166,15 @@ def _get_faster_whisper_model(model_size: str = "base"):
     )
     _faster_whisper_model_size = model_size
     logger.info(f"faster-whisper model '{model_size}' loaded on {device}")
+
+    # Register with central lifecycle tracker via orchestrator
+    try:
+        from .model_orchestrator import get_orchestrator
+        get_orchestrator().notify_loaded('stt', f'whisper-{model_size}',
+                                         device=device, vram_gb=3.0 if device == 'cuda' else 0)
+    except Exception:
+        pass
+
     return _faster_whisper_model
 
 
