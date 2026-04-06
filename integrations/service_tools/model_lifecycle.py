@@ -1178,6 +1178,15 @@ class ModelLifecycleManager:
             logger.info(f"Inference headroom: {free_gb:.1f}GB free, need {needed_gb}GB "
                         f"for {requester}")
 
+            # NEVER evict the LLM — it runs as a separate process (llama-server)
+            # that the lifecycle manager can't actually unload. "Evicting" it just
+            # removes the registry entry while llama-server keeps all its VRAM.
+            # Instead, skip headroom check — the model will use whatever is free.
+            if free_gb < needed_gb:
+                logger.info(f"Inference headroom: proceeding anyway — model will "
+                            f"use available {free_gb:.1f}GB (llama-server owns the rest)")
+                return True
+
             # Standard swap first (evicts IDLE/EVICTABLE models)
             if self.request_swap(needed_model=requester, needed_type='gpu'):
                 return True
