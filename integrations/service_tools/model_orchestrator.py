@@ -551,10 +551,13 @@ class ModelOrchestrator:
             from integrations.service_tools.model_lifecycle import CPU_OFFLOAD_TABLE
             if offload_name not in CPU_OFFLOAD_TABLE:
                 offload_name = entry.id
+            # LLM is ACTIVE (never evict) — it's a separate process (llama-server)
+            # that the lifecycle can't actually free. All others are WARM.
+            _priority = ModelPriority.ACTIVE if entry.model_type == 'llm' else ModelPriority.WARM
             mlm._models[offload_name] = ModelState(
                 name=offload_name,
                 device=device,
-                priority=ModelPriority.WARM,
+                priority=_priority,
             )
             if hasattr(mlm, 'notify_access'):
                 mlm.notify_access(offload_name)
