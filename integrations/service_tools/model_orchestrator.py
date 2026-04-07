@@ -180,19 +180,23 @@ class ModelOrchestrator:
 
         logger.info(f"Loading {model_id} ({entry.model_type}) in {fit} mode...")
 
+        # Allocate VRAM BEFORE load so other models see the reservation.
+        # Rolled back on failure.
+        self._register_vram(entry, fit)
         try:
             success = self._dispatch_load(entry, fit)
             if success:
                 self._catalog.mark_loaded(model_id, device=fit)
-                self._register_vram(entry, fit)
                 self._register_lifecycle(entry)
                 self._register_service_tool(entry)
                 logger.info(f"Loaded {model_id} on {fit}")
                 return entry
             else:
+                self._release_vram(entry)
                 self._catalog.mark_error(model_id, 'Loader returned failure')
                 return None
         except Exception as e:
+            self._release_vram(entry)
             logger.error(f"Failed to load {model_id}: {e}")
             self._catalog.mark_error(model_id, str(e))
             return None
@@ -652,6 +656,7 @@ class ModelOrchestrator:
         self._catalog.mark_loaded(entry.id, device=device)
         if not entry.downloaded:
             self._catalog.mark_downloaded(entry.id)
+        self._register_vram(entry, device)
         self._register_lifecycle(entry)
         logger.info(f"Catalog synced: {entry.id} loaded on {device} (external)")
 

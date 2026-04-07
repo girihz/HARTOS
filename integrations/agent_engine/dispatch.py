@@ -27,6 +27,47 @@ from core.port_registry import get_port
 
 logger = logging.getLogger('hevolve_social')
 
+
+# ── HTTP circuit breaker ────────────────────────────────────────────────
+# Fast-fail instead of waiting 120s against a dead llama-server.
+# After _CB_THRESHOLD consecutive connection failures, skip HTTP dispatch
+# for _CB_COOLDOWN_S seconds before retrying.
+_CB_THRESHOLD = 3        # failures before opening circuit
+_CB_COOLDOWN_S = 60      # seconds to wait before retrying
+_cb_failures = 0
+_cb_open_until = 0.0
+_cb_lock = threading.Lock()
+
+
+def _cb_record_success():
+    global _cb_failures, _cb_open_until
+    with _cb_lock:
+        _cb_failures = 0
+        _cb_open_until = 0.0
+
+
+def _cb_record_failure():
+    global _cb_failures, _cb_open_until
+    with _cb_lock:
+        _cb_failures += 1
+        if _cb_failures >= _CB_THRESHOLD:
+            import time as _t
+            _cb_open_until = _t.time() + _CB_COOLDOWN_S
+            logger.warning(f"Circuit breaker OPEN — {_cb_failures} consecutive "
+                           f"HTTP failures, skipping dispatch for {_CB_COOLDOWN_S}s")
+
+
+def _cb_is_open() -> bool:
+    with _cb_lock:
+        if _cb_failures < _CB_THRESHOLD:
+            return False
+        import time as _t
+        if _t.time() >= _cb_open_until:
+            # Half-open: allow one probe
+            return False
+        return True
+
+
 # ── LLM concurrency control ──────────────────────────────────────────────
 # Local llama-server degrades exponentially with concurrent requests
 # (KV cache thrashing). Allow only N concurrent local LLM calls.
@@ -427,7 +468,10 @@ def dispatch_goal(prompt: str, user_id: str, goal_id: str,
             )
         finally:
             _local_llm_semaphore.release()
-            _notify_watchdog_llm_end()
+            try:
+                _notify_watchdog_llm_end()
+            except Exception:
+                pass
 
         response = result.get('text') or result.get('response', '')
         if response:
@@ -438,11 +482,17 @@ def dispatch_goal(prompt: str, user_id: str, goal_id: str,
         logger.warning(f"Tier-1 dispatch failed for {goal_type} goal {goal_id}: {e}")
 
     # Tier 2: HTTP proxy to HARTOS backend port
+    # Circuit breaker: skip HTTP if server recently unresponsive
+    if _cb_is_open():
+        logger.info(f"Circuit breaker open — skipping Tier-2 HTTP for goal {goal_id}")
+        return None
+
     base_url = os.environ.get('HEVOLVE_BASE_URL', f'http://localhost:{get_port("backend")}')
-    resp = pooled_post(f'{base_url}/chat', json=body, timeout=120)
 
     try:
+        resp = pooled_post(f'{base_url}/chat', json=body, timeout=120)
         if resp.status_code == 200:
+            _cb_record_success()
             result = resp.get_json() if hasattr(resp, 'get_json') else resp.json()
             response = result.get('response', '')
 
@@ -497,6 +547,7 @@ def dispatch_goal(prompt: str, user_id: str, goal_id: str,
                 f"Goal dispatch got HTTP {resp.status_code} for {goal_type} "
                 f"goal {goal_id}: {resp.text[:200]}")
             if resp.status_code in (429, 500, 502, 503):
+                _cb_record_failure()  # Server errors count toward circuit breaker
                 try:
                     from .instruction_queue import enqueue_instruction
                     enqueue_instruction(
@@ -509,6 +560,7 @@ def dispatch_goal(prompt: str, user_id: str, goal_id: str,
                 except Exception:
                     pass
     except requests.RequestException as e:
+        _cb_record_failure()
         logger.warning(f"Goal dispatch failed for {goal_type} goal {goal_id}: {e}")
 
         # Queue the instruction for later execution when compute becomes available

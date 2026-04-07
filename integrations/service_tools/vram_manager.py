@@ -29,7 +29,7 @@ VRAM_BUDGETS: Dict[str, Tuple[float, float]] = {
     "whisper_large":        (4.0,  3.0),    # faster-whisper large-v3-turbo
     # TTS engines
     "tts_chatterbox_turbo": (5.6,  3.8),    # English, [laugh]/[chuckle] tags
-    "tts_f5":               (2.0,  1.3),    # English+Chinese, voice cloning
+    "tts_f5":               (2.5,  1.3),    # English+Chinese, voice cloning
     "tts_indic_parler":     (2.0,  1.8),    # 21 Indic languages + English
     "tts_cosyvoice3":       (4.0,  3.5),    # zh/ja/ko/de/es/fr/it/ru, zero-shot
     "tts_chatterbox_ml":    (14.0, 12.0),   # 23 languages, needs 16GB+
