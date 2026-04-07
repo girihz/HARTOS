@@ -4560,12 +4560,20 @@ def _tts_synthesize_and_publish(text, user_id, request_id):
                 audio_filename = os.path.basename(audio_path)
                 audio_url = f'/tts/audio/{audio_filename}'
                 app.logger.info(f"TTS async: publishing audio {audio_url} to pupit.{user_id}")
-                publish_async(f'com.hertzai.pupit.{user_id}', json.dumps({
+                _tts_payload = {
                     'text': [text[:200]],
                     'generated_audio_url': audio_url,
                     'request_id': str(request_id),
                     'action': 'TTS',
-                }))
+                }
+                publish_async(f'com.hertzai.pupit.{user_id}', json.dumps(_tts_payload))
+                # Also push via SSE directly (publish_async → MessageBus doesn't reach SSE clients)
+                try:
+                    import __main__ as _main_mod
+                    if hasattr(_main_mod, 'broadcast_sse_event'):
+                        _main_mod.broadcast_sse_event('message', _tts_payload, user_id=user_id)
+                except Exception:
+                    pass
                 app.logger.info(f"TTS async: published successfully")
             else:
                 app.logger.warning(f"TTS async: no audio file — path={audio_path}, exists={os.path.isfile(audio_path) if audio_path else False}")
