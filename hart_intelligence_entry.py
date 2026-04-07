@@ -4535,16 +4535,20 @@ def _tts_synthesize_and_publish(text, user_id, request_id):
         try:
             from tts.tts_engine import synthesize_text
             audio_path = synthesize_text(text)
+            app.logger.info(f"TTS async: synthesize_text returned: {audio_path}")
             if audio_path and os.path.isfile(audio_path):
-                # Serve via Flask static — browser can't access filesystem paths
                 audio_filename = os.path.basename(audio_path)
                 audio_url = f'/tts/audio/{audio_filename}'
+                app.logger.info(f"TTS async: publishing audio {audio_url} to pupit.{user_id}")
                 publish_async(f'com.hertzai.pupit.{user_id}', json.dumps({
                     'text': [text[:200]],
                     'generated_audio_url': audio_url,
                     'request_id': str(request_id),
                     'action': 'TTS',
                 }))
+                app.logger.info(f"TTS async: published successfully")
+            else:
+                app.logger.warning(f"TTS async: no audio file — path={audio_path}, exists={os.path.isfile(audio_path) if audio_path else False}")
         except ImportError:
             pass  # TTS not available (cloud mode)
         except Exception as e:
