@@ -4592,7 +4592,15 @@ def _tts_synthesize_and_publish(text, user_id, request_id):
         except Exception as e:
             app.logger.error(f"TTS async failed: {e}", exc_info=True)
 
-    _tts_executor.submit(_bg)
+    global _tts_executor
+    try:
+        _tts_executor.submit(_bg)
+    except RuntimeError:
+        # Executor was shut down (interpreter restart, previous crash).
+        # Recreate and retry — TTS must not silently stop working.
+        app.logger.warning("TTS executor dead — recreating")
+        _tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='tts_async')
+        _tts_executor.submit(_bg)
 
 
 @app.route('/chat', methods=['POST'])
