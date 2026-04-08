@@ -4533,15 +4533,21 @@ def _tts_synthesize_and_publish(text, user_id, request_id):
     Only fires when TTS engine exists (Nunba bundled mode).
     """
     if not text or not text.strip():
+        app.logger.debug("TTS: skipped (empty text)")
         return
     try:
         from tts.tts_engine import get_tts_engine
-        if not get_tts_engine():
+        engine = get_tts_engine()
+        if not engine:
+            app.logger.warning("TTS: skipped (engine is None)")
             return
-    except ImportError:
+        app.logger.info(f"TTS: engine OK ({engine.backend_name}), submitting for '{text[:50]}...'")
+    except ImportError as ie:
+        app.logger.warning(f"TTS: skipped (ImportError: {ie})")
         return
 
     def _bg():
+        app.logger.info(f"TTS _bg: thread started for request_id={request_id}")
         try:
             from tts.tts_engine import synthesize_text
             # Clean text for speech — remove artifacts that TTS can't pronounce
