@@ -349,12 +349,25 @@ class LiquidUIService:
     # ─── Agent UI Protocol (A2UI) — preserved ─────────────────
 
     def agent_ui_update(self, agent_id: str, component: dict) -> bool:
+        """Push a UI component from an agent to all connected frontends.
+
+        Delivery paths (all best-effort, agent_ui_update never fails):
+          1. In-memory store → polled by SSE stream → Nunba LiquidUI (web)
+          2. EventBus → WAMP bridge → Android/iOS React Native via Crossbar
+          3. EventBus → any other subscriber (desktop, CLI dashboard)
+        """
         if not self.a2ui_enabled:
             return False
         comp_type = component.get('type', '')
         if comp_type not in COMPONENT_TYPES:
             logger.warning("Invalid A2UI component type: %s", comp_type)
             return False
+
+        import time as _time
+        component['_ts'] = _time.time()
+        component['_agent_id'] = agent_id
+
+        # 1. Store for SSE polling (Nunba web LiquidUI)
         with self._lock:
             if agent_id not in self._agent_components:
                 self._agent_components[agent_id] = []
@@ -362,6 +375,21 @@ class LiquidUIService:
             if len(self._agent_components[agent_id]) > 5:
                 self._agent_components[agent_id] = \
                     self._agent_components[agent_id][-5:]
+
+        # 2. Push to EventBus → WAMP → Android/iOS/Desktop
+        # The WAMP bridge (core/platform/events.py) auto-publishes to
+        # com.hartos.event.agent.ui.update which Android subscribes to
+        # via AutobahnConnectionManager. Android renders as floating
+        # overlay on top of AbstractChatActivity.
+        try:
+            from core.platform.events import emit_event
+            emit_event('agent.ui.update', {
+                'agent_id': agent_id,
+                'component': component,
+            })
+        except Exception:
+            pass  # EventBus emission is best-effort
+
         logger.info("A2UI: agent %s pushed %s component", agent_id, comp_type)
         return True
 
