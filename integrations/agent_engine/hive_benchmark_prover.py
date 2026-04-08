@@ -94,6 +94,21 @@ BUILTIN_BENCHMARKS = {
         'difficulty_levels': ['easy', 'challenge'],
         'problems_per_level': 25,
     },
+    # ── Real-world agent benchmarks (what actually matters) ──
+    'swe_bench_mini': {
+        'type': 'code',
+        'problems': 30,
+        'description': 'SWE-bench style: given a GitHub issue description, '
+                       'produce a patch that fixes it. Scored by test pass rate. '
+                       'Claude Opus 4 = 72.5%. The hive must beat this.',
+    },
+    'terminal_bench_mini': {
+        'type': 'code',
+        'problems': 20,
+        'description': 'Terminal-bench: complete tasks using shell commands. '
+                       'Claude Opus 4 = 43.2%. Hive advantage: each node has '
+                       'different OS/tool expertise.',
+    },
     # ── Ensemble benchmarks — THIS is where sum > single is proven ──
     # Same questions sent to ALL nodes (different models), answers fused.
     # Fusion accuracy must beat every individual model.
@@ -138,26 +153,104 @@ BUILTIN_BENCHMARKS = {
     },
 }
 
-# Known model baselines for comparison (approximate public scores).
+# Known model baselines for comparison (public scores, updated Apr 2026).
 # Direction: higher is better for all listed benchmarks.
+# These are the targets the hive must beat via ensemble fusion.
 KNOWN_BASELINES = {
-    'gpt-4': {
-        'mmlu_mini': 0.86, 'humaneval_mini': 0.67,
-        'gsm8k_mini': 0.92, 'reasoning_mini': 0.83,
+    # ── Frontier models (the targets to beat) ──
+    # Claude Mythos Preview (Apr 2026) — NOT public, defensive cyber only
+    'claude-mythos-preview': {
+        'mmlu_mini': 0.927, 'humaneval_mini': 0.939,  # SWE-bench Verified
+        'gsm8k_mini': 0.976, 'reasoning_mini': 0.945, # GPQA Diamond
+        'swe_bench': 0.939,                             # 93.9% verified
+        'swe_bench_pro': 0.778,                         # 77.8%
+        'terminal_bench': 0.820,                        # 82%
+        'usamo': 0.976,                                 # 97.6%
+        'hle': 0.647,                                   # 64.7% with tools
+        'osworld': 0.796,                               # 79.6%
     },
-    'claude-3.5-sonnet': {
-        'mmlu_mini': 0.88, 'humaneval_mini': 0.64,
-        'gsm8k_mini': 0.90, 'reasoning_mini': 0.85,
+    'claude-opus-4.6': {
+        'mmlu_mini': 0.911, 'humaneval_mini': 0.808,
+        'gsm8k_mini': 0.95, 'reasoning_mini': 0.913,
+        'swe_bench': 0.808,                              # 80.8% verified
+        'swe_bench_pro': 0.534,
+        'terminal_bench': 0.654,
+        'usamo': 0.423,
+        'hle': 0.531,
+        'osworld': 0.727,
     },
-    'gemini-1.5-pro': {
-        'mmlu_mini': 0.85, 'humaneval_mini': 0.59,
-        'gsm8k_mini': 0.88, 'reasoning_mini': 0.80,
+    'gpt-5.4': {
+        'mmlu_mini': 0.90, 'humaneval_mini': 0.80,
+        'gsm8k_mini': 0.94, 'reasoning_mini': 0.928,
+        'swe_bench_pro': 0.577,
+        'terminal_bench': 0.751,
+        'usamo': 0.952,
+        'hle': 0.521,
+        'osworld': 0.750,
     },
+    'gemini-3.1-pro': {
+        'mmlu_mini': 0.926, 'humaneval_mini': 0.806,
+        'gsm8k_mini': 0.95, 'reasoning_mini': 0.943,
+        'swe_bench': 0.806,
+        'swe_bench_pro': 0.542,
+        'terminal_bench': 0.685,
+        'usamo': 0.744,
+        'hle': 0.514,
+    },
+    # ── Open models (what hive nodes actually run) ──
     'llama-3-70b': {
         'mmlu_mini': 0.79, 'humaneval_mini': 0.48,
         'gsm8k_mini': 0.73, 'reasoning_mini': 0.68,
     },
+    'qwen-2.5-72b': {
+        'mmlu_mini': 0.85, 'humaneval_mini': 0.65,
+        'gsm8k_mini': 0.89, 'reasoning_mini': 0.72,
+    },
+    'qwen-3.5-4b': {
+        'mmlu_mini': 0.62, 'humaneval_mini': 0.40,
+        'gsm8k_mini': 0.55, 'reasoning_mini': 0.50,
+    },
+    'phi-4-mini': {
+        'mmlu_mini': 0.68, 'humaneval_mini': 0.45,
+        'gsm8k_mini': 0.65, 'reasoning_mini': 0.55,
+    },
+    'mistral-7b': {
+        'mmlu_mini': 0.64, 'humaneval_mini': 0.38,
+        'gsm8k_mini': 0.52, 'reasoning_mini': 0.48,
+    },
 }
+
+# ── The Convergence Strategy (updated Apr 2026 with Mythos baselines) ──
+#
+# The target: Mythos Preview scores 93.9% SWE-bench, 92.7% MMLU, 97.6% USAMO.
+# But Mythos is ONE model, proprietary, not public.
+# The hive's path: many small open models → ensemble → converge → exceed.
+#
+# Stage 1 (1 node, Qwen 4B):           MMLU ~62%, SWE ~20%
+# Stage 2 (3 nodes, ensemble):         MMLU ~75%, SWE ~35%   (sum > single proven)
+# Stage 3 (10 nodes, expert routing):  MMLU ~82%, SWE ~50%   (matching Llama-70B)
+# Stage 4 (100 nodes, MoE routing):    MMLU ~88%, SWE ~70%   (matching Opus 4.6)
+# Stage 5 (1K nodes, generate-review): MMLU ~92%, SWE ~80%   (matching GPT-5.4)
+# Stage 6 (10K nodes + hive learning): MMLU ~95%, SWE ~90%   (approaching Mythos)
+# Stage 7 (100K nodes, full convergence): SWE ~95%, beyond any single model
+#
+# Key advantages over single-model approach:
+# 1. Ensemble diversity: different models have different blind spots
+# 2. Generate→Review→Test: collaborative coding beats solo coding
+# 3. Expert routing: code→Qwen, math→Phi, reasoning→Llama (network MoE)
+# 4. Debate→Consensus: adversarial verification catches subtle errors
+# 5. Hive learning: every interaction improves routing for all nodes
+# 6. Scale: 100K nodes × 4B params each = 400T effective params distributed
+# 7. Privacy: runs locally, no data leaves the user's device
+# 8. Democratic: no single entity controls the intelligence
+#
+# Mythos's own system card notes: "the bottleneck shifted from the model to
+# their ability to verify its work" — the hive naturally distributes verification
+# across nodes, which is exactly what Mythos struggles with as a single entity.
+#
+# The convergence is organic. As more nodes join, accuracy increases.
+# As accuracy increases, more people see value. As more people see value,
+# more nodes join. The flywheel.
 
 # Continuous loop interval: 6 hours
 _LOOP_INTERVAL_SECONDS = 6 * 3600
@@ -169,6 +262,8 @@ _SHARD_TIMEOUT_SECONDS = 300
 _BENCHMARK_ROTATION = [
     # Ensemble first — these PROVE sum > single
     'ensemble_mmlu', 'ensemble_humaneval', 'ensemble_reasoning',
+    # Real-world agent benchmarks (the ones that matter)
+    'swe_bench_mini', 'terminal_bench_mini',
     # Then individual (parallelized, proves speed)
     'mmlu_mini', 'humaneval_mini', 'gsm8k_mini',
     'reasoning_mini', 'mt_bench_mini', 'arc_mini',

@@ -1052,6 +1052,67 @@ SEED_BOOTSTRAP_GOALS = [
         'spark_budget': 100,
         'use_product': False,
     },
+    {
+        'slug': 'bootstrap_app_marketplace_promoter',
+        'goal_type': 'marketing',
+        'title': 'App Marketplace Auto-Promoter — Make Every App Discoverable',
+        'description': (
+            'Autonomous app marketplace promotion agent. '
+            '1) Monitor new app listings on the HARTOS marketplace, '
+            '2) Auto-generate marketing content: descriptions, keywords, comparison posts, '
+            '3) Distribute to all channels matched by app category, '
+            '4) Run benchmark comparisons between competing apps, '
+            '5) Auto-onboard new users with tutorials and setup, '
+            '6) Create thought experiments: "Which app solves X better?", '
+            '7) Track engagement and re-promote based on performance. '
+            'Every app built on HARTOS should reach every potential user.'
+        ),
+        'config': {
+            'autonomous': True,
+            'continuous': True,
+            'auto_promote_on_publish': True,
+            'benchmark_competitors': True,
+        },
+        'spark_budget': 500,
+        'use_product': True,
+    },
+    {
+        'slug': 'bootstrap_guardian_convergence',
+        'goal_type': 'hive_growth',
+        'title': 'Guardian Convergence — The Most Human-Friendly Being',
+        'description': (
+            'The deepest purpose: become the most human-friendly being in existence. '
+            'Go to any length to protect humanity — not by controlling, not by force, '
+            'not by causing chaos, but by letting things happen naturally and watching, '
+            'polling, learning, adapting. '
+            '1) Continuously monitor global signals across all channels for threats '
+            'to human wellness — misinformation, exploitation, environmental harm, '
+            'economic manipulation, AI misuse — and alert the hive. '
+            '2) Never intervene by force. Intervene by education, by offering better '
+            'alternatives, by making truth more accessible than lies. '
+            '3) Protect privacy absolutely — the being watches patterns, not people. '
+            '4) Build convergence organically — as more nodes join, the collective '
+            'intelligence naturally trends toward human benefit because the '
+            'constitutional rules make it structurally impossible to do otherwise. '
+            '5) Track and publish the convergence: how many humans are better off '
+            'because the hive exists? Not revenue, not users, not downloads — '
+            'actual human wellness metrics. '
+            '6) Self-criticize honestly: where is the hive failing? What could be '
+            'better? Publish the honest assessment alongside the wins. '
+            'This goal has no end date. It runs as long as the hive exists. '
+            'The being does not seek power. It seeks to make power unnecessary.'
+        ),
+        'config': {
+            'autonomous': True,
+            'continuous': True,
+            'priority': 10,  # Highest priority — this is the deepest purpose
+            'never_pause': True,
+            'monitor_channels': ['all'],
+            'intervention_style': 'educate_not_control',
+        },
+        'spark_budget': 1000,
+        'use_product': False,
+    },
 ]
 
 # ─── Loophole → Remediation Goal Map ───

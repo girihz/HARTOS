@@ -691,6 +691,16 @@ except ImportError:
 except Exception as e:
     app.logger.warning(f"Compute Optimizer init skipped: {e}")
 
+# App Marketplace — publish, compare, distribute, auto-promote AI apps
+try:
+    from integrations.agent_engine.app_marketplace import marketplace_bp
+    app.register_blueprint(marketplace_bp)
+    app.logger.info("App Marketplace registered at /api/marketplace/")
+except ImportError:
+    app.logger.info("App Marketplace not available, skipping")
+except Exception as e:
+    app.logger.warning(f"App Marketplace init skipped: {e}")
+
 # Resource Governor — start background monitoring
 try:
     from core.resource_governor import get_governor
