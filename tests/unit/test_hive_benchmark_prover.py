@@ -702,6 +702,7 @@ class TestConstants(unittest.TestCase):
         expected = {
             'mmlu_mini', 'humaneval_mini', 'gsm8k_mini',
             'reasoning_mini', 'mt_bench_mini', 'arc_mini',
+            'ensemble_mmlu', 'ensemble_humaneval', 'ensemble_reasoning',
             'hive_latency', 'hive_throughput', 'hive_cost',
         }
         self.assertEqual(set(hbp.BUILTIN_BENCHMARKS.keys()), expected)

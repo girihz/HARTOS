@@ -54,6 +54,17 @@ COMPONENT_TYPES = {
     'media': {'props': ['type', 'src', 'alt', 'controls']},
     'metric': {'props': ['label', 'value', 'unit', 'trend', 'explanation']},
     'layout': {'props': ['type', 'children', 'gap']},
+    # ── Ecommerce / Agent Action Live Fragments ──
+    'product_card': {'props': ['name', 'price', 'image', 'rating', 'description',
+                               'buy_action', 'compare_action']},
+    'cart': {'props': ['items', 'total', 'currency', 'checkout_action']},
+    'checkout': {'props': ['items', 'total', 'payment_methods', 'shipping_options',
+                           'confirm_action']},
+    'payment_status': {'props': ['status', 'amount', 'method', 'transaction_id']},
+    'order_tracking': {'props': ['order_id', 'status', 'steps', 'eta']},
+    'comparison': {'props': ['apps', 'features', 'winner']},
+    'agent_action': {'props': ['agent_id', 'action_type', 'description',
+                               'status', 'result', 'timestamp']},
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -3384,18 +3395,118 @@ function speakText(text, source) {{
   }}).catch(function(){{}});
 }}
 
-// ═══ SSE Notification Stream ═══
+// ═══ SSE Live Agent Action Stream ═══
+// Renders ALL agent components as floating overlay fragments in real-time.
+// Notification = toast. Everything else = floating glass panel overlay.
 if(!PERF.potato) {{
   try {{
     const evtSrc = new EventSource(SHELL+'/api/notifications/stream');
     evtSrc.onmessage = function(e) {{
       try {{
-        const notifs = JSON.parse(e.data);
-        notifs.forEach(function(n){{ showToast(n.title||n.agent||'Notification', n.message||'', n.severity||'info'); }});
+        const events = JSON.parse(e.data);
+        events.forEach(function(ev) {{
+          const type = ev.type || 'notification';
+          if(type === 'notification') {{
+            showToast(ev.title||ev.agent||'Notification', ev.message||'', ev.severity||'info');
+          }} else {{
+            // Render as floating overlay fragment
+            renderAgentOverlay(ev);
+          }}
+        }});
       }} catch(err) {{}}
     }};
     evtSrc.onerror = function() {{ /* SSE reconnects automatically */ }};
   }} catch(err) {{}}
+}}
+
+// ═══ Agent Action Floating Overlay Renderer ═══
+var _overlayStack = [];
+function renderAgentOverlay(ev) {{
+  var id = 'overlay-'+(ev.agent||'')+(ev._ts||Date.now());
+  // Remove oldest if > 3 overlays
+  while(_overlayStack.length >= 3) {{
+    var oldest = _overlayStack.shift();
+    var el = document.getElementById(oldest);
+    if(el) el.remove();
+  }}
+  var overlay = document.createElement('div');
+  overlay.id = id;
+  overlay.className = 'agent-overlay glass ds-fade-in';
+  overlay.style.cssText = 'position:fixed;bottom:'+(80+_overlayStack.length*220)+'px;right:16px;z-index:'+(2000+_overlayStack.length)+';width:360px;max-height:200px;overflow-y:auto;border-radius:16px;padding:16px;backdrop-filter:blur(20px);background:rgba(20,20,30,0.85);border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.4);animation:dsSlideUp 0.3s ease;';
+  var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span class="ds-label-sm ds-text-accent">'+(ev.agent||'Agent')+'</span><span class="mi material-icons-round" style="cursor:pointer;font-size:16px;color:var(--hart-muted)" onclick="this.parentElement.parentElement.remove()">close</span></div>';
+  var type = ev.type||'card';
+
+  if(type === 'product_card') {{
+    html += '<div style="display:flex;gap:12px">';
+    if(ev.image) html += '<img src="'+ev.image+'" style="width:64px;height:64px;border-radius:8px;object-fit:cover">';
+    html += '<div><div class="ds-body-md" style="font-weight:600">'+(ev.name||'Product')+'</div>';
+    html += '<div class="ds-body-sm ds-text-muted">'+(ev.description||'').substring(0,100)+'</div>';
+    html += '<div style="margin-top:4px"><span class="ds-label-sm ds-text-accent">'+(ev.price||'Free')+'</span>';
+    if(ev.rating) html += ' <span class="ds-label-sm ds-text-muted">★ '+ev.rating+'</span>';
+    html += '</div></div></div>';
+    if(ev.buy_action) html += '<div style="margin-top:8px;text-align:right">'+dsBtn('Buy',{{variant:'primary',cls:'ds-btn-sm',onclick:"fetch(SHELL+'"+ev.buy_action+"',{{method:'POST'}})"}})+'</div>';
+
+  }} else if(type === 'cart') {{
+    html += '<div class="ds-body-md" style="font-weight:600">🛒 Cart ('+(ev.items||[]).length+' items)</div>';
+    (ev.items||[]).forEach(function(item){{
+      html += '<div class="ds-list-item" style="padding:4px 0"><span class="ds-body-sm">'+item.name+'</span><span class="ds-label-sm ds-text-accent" style="margin-left:auto">'+item.price+'</span></div>';
+    }});
+    html += '<div style="border-top:1px solid rgba(255,255,255,0.1);margin-top:8px;padding-top:8px;text-align:right"><span class="ds-body-md ds-text-accent">Total: '+(ev.total||0)+' '+(ev.currency||'Spark')+'</span></div>';
+
+  }} else if(type === 'checkout') {{
+    html += '<div class="ds-body-md" style="font-weight:600">Checkout</div>';
+    html += '<div class="ds-body-sm ds-text-muted">'+(ev.items||[]).length+' items — '+(ev.total||0)+' '+(ev.currency||'Spark')+'</div>';
+    if(ev.confirm_action) html += '<div style="margin-top:8px;text-align:right">'+dsBtn('Confirm Payment',{{variant:'primary',cls:'ds-btn-sm',onclick:"fetch(SHELL+'"+ev.confirm_action+"',{{method:'POST'}})"}})+'</div>';
+
+  }} else if(type === 'payment_status') {{
+    var statusIcon = ev.status==='success'?'check_circle':ev.status==='pending'?'hourglass_empty':'error';
+    var statusColor = ev.status==='success'?'var(--hart-success)':ev.status==='pending'?'var(--hart-accent)':'var(--hart-error)';
+    html += '<div style="text-align:center;padding:8px"><span class="mi material-icons-round" style="font-size:40px;color:'+statusColor+'">'+statusIcon+'</span><div class="ds-body-md" style="margin-top:8px">'+(ev.status||'unknown').toUpperCase()+'</div><div class="ds-body-sm ds-text-muted">'+(ev.amount||'')+' via '+(ev.method||'')+'</div></div>';
+
+  }} else if(type === 'order_tracking') {{
+    html += '<div class="ds-body-md" style="font-weight:600">Order '+(ev.order_id||'')+'</div>';
+    (ev.steps||[]).forEach(function(step,i){{
+      var done = i < (ev.current_step||0);
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:2px 0"><span class="mi material-icons-round" style="font-size:16px;color:'+(done?'var(--hart-success)':'var(--hart-muted)')+'">'+(done?'check_circle':'radio_button_unchecked')+'</span><span class="ds-body-sm">'+(step.label||step)+'</span></div>';
+    }});
+    if(ev.eta) html += '<div class="ds-label-sm ds-text-muted" style="margin-top:4px">ETA: '+ev.eta+'</div>';
+
+  }} else if(type === 'comparison') {{
+    html += '<div class="ds-body-md" style="font-weight:600">Feature Comparison</div>';
+    (ev.apps||[]).forEach(function(a){{
+      html += '<div class="ds-list-item" style="padding:4px 0"><span class="ds-body-sm" style="font-weight:600">'+a.name+'</span><span class="ds-label-sm ds-text-muted" style="margin-left:auto">★ '+(a.rating||'-')+'</span></div>';
+    }});
+    if(ev.winner) html += '<div class="ds-label-sm ds-text-accent" style="margin-top:4px">Winner: '+ev.winner+'</div>';
+
+  }} else if(type === 'progress') {{
+    var pct = Math.min(100, Math.max(0, (ev.value||0)/(ev.max||100)*100));
+    html += '<div class="ds-body-sm">'+(ev.label||'Progress')+'</div>';
+    html += '<div style="background:#1a1a1a;border-radius:4px;height:8px;margin-top:4px"><div style="width:'+pct+'%;height:100%;border-radius:4px;background:'+(ev.color||'var(--hart-accent)')+';transition:width 0.3s"></div></div>';
+    html += '<div class="ds-label-sm ds-text-muted" style="margin-top:2px">'+Math.round(pct)+'%</div>';
+
+  }} else if(type === 'agent_action') {{
+    var actionIcon = ev.status==='completed'?'check_circle':ev.status==='error'?'error':'play_circle';
+    html += '<div style="display:flex;align-items:center;gap:8px"><span class="mi material-icons-round" style="font-size:20px">'+actionIcon+'</span><div><div class="ds-body-sm">'+(ev.description||ev.action_type||'Action')+'</div><div class="ds-label-sm ds-text-muted">'+(ev.status||'running')+'</div></div></div>';
+    if(ev.result) html += '<div class="ds-body-sm ds-text-muted" style="margin-top:4px;font-style:italic">'+String(ev.result).substring(0,150)+'</div>';
+
+  }} else {{
+    // Generic: card/markdown/metric/etc
+    html += '<div class="ds-body-md" style="font-weight:600">'+(ev.title||type)+'</div>';
+    html += '<div class="ds-body-sm ds-text-muted">'+(ev.content||ev.message||JSON.stringify(ev).substring(0,200))+'</div>';
+  }}
+
+  overlay.innerHTML = html;
+  document.body.appendChild(overlay);
+  _overlayStack.push(id);
+
+  // Auto-dismiss after 15s (except checkout/approval)
+  if(type !== 'checkout' && type !== 'approval') {{
+    setTimeout(function(){{
+      var el = document.getElementById(id);
+      if(el) {{ el.style.opacity='0'; el.style.transform='translateX(100px)'; setTimeout(function(){{el.remove()}},300); }}
+      _overlayStack = _overlayStack.filter(function(x){{return x!==id}});
+    }}, 15000);
+  }}
 }}
 
 // ═══ Recent Files in Start Menu ═══
@@ -4278,7 +4389,7 @@ if(!PERF.potato) {{
                     pass
             return jsonify({'files': files[-10:]})
 
-        # ── Notification SSE Stream ──
+        # ── Agent Action SSE Stream (ALL component types, not just notifications) ──
         @app.route('/api/notifications/stream', methods=['GET'])
         def notification_stream():
             import time as _time
@@ -4286,23 +4397,20 @@ if(!PERF.potato) {{
             def generate():
                 last_check = _time.time()
                 while True:
-                    _time.sleep(5)
-                    notifs = []
+                    _time.sleep(2)  # 2s for snappier live updates
+                    events = []
                     for agent_id, comps in list(
                             self._agent_components.items()):
                         for c in comps:
                             ts = c.get('_ts', 0)
-                            if (c.get('type') == 'notification'
-                                    and ts > last_check):
-                                notifs.append({
-                                    'agent': agent_id,
-                                    'title': c.get('title', ''),
-                                    'message': c.get('message', ''),
-                                    'severity': c.get('severity', 'info'),
-                                })
+                            if ts > last_check:
+                                # Push ALL component types — not just notifications
+                                event = dict(c)
+                                event['agent'] = agent_id
+                                events.append(event)
                     last_check = _time.time()
-                    if notifs:
-                        yield f"data: {json.dumps(notifs)}\n\n"
+                    if events:
+                        yield f"data: {json.dumps(events)}\n\n"
             return Response(
                 generate(), mimetype='text/event-stream',
                 headers={
