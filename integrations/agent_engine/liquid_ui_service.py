@@ -65,6 +65,7 @@ COMPONENT_TYPES = {
     'comparison': {'props': ['apps', 'features', 'winner']},
     'agent_action': {'props': ['agent_id', 'action_type', 'description',
                                'status', 'result', 'timestamp']},
+    'navigate': {'props': ['target', 'params', 'transition']},
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -3447,6 +3448,17 @@ if(!PERF.potato) {{
   }} catch(err) {{}}
 }}
 
+// ═══ Approval Helper ═══
+function _postApproval(agentId, action, decision) {{
+  try {{
+    fetch(SHELL+'/api/agent/approval', {{
+      method:'POST',
+      headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{agent_id:agentId, action:action, decision:decision}})
+    }}).catch(function(){{}});
+  }} catch(e) {{}}
+}}
+
 // ═══ Agent Action Floating Overlay Renderer ═══
 var _overlayStack = [];
 function renderAgentOverlay(ev) {{
@@ -3517,8 +3529,155 @@ function renderAgentOverlay(ev) {{
     html += '<div style="display:flex;align-items:center;gap:8px"><span class="mi material-icons-round" style="font-size:20px">'+actionIcon+'</span><div><div class="ds-body-sm">'+(ev.description||ev.action_type||'Action')+'</div><div class="ds-label-sm ds-text-muted">'+(ev.status||'running')+'</div></div></div>';
     if(ev.result) html += '<div class="ds-body-sm ds-text-muted" style="margin-top:4px;font-style:italic">'+String(ev.result).substring(0,150)+'</div>';
 
+  }} else if(type === 'chart') {{
+    html += '<div class="ds-body-sm" style="font-weight:600">'+(ev.title||'Chart')+'</div>';
+    var chartData = ev.data||[];
+    var chartLabels = ev.labels||[];
+    var chartType = ev.chart_type||'bar';
+    var maxVal = Math.max.apply(null, chartData.length?chartData:[1]);
+    if(chartType === 'bar') {{
+      html += '<div style="display:flex;align-items:flex-end;gap:4px;height:100px;margin-top:8px;padding-top:4px;border-bottom:1px solid rgba(255,255,255,0.1)">';
+      chartData.forEach(function(v,i){{
+        var h = Math.max(4, (v/maxVal)*90);
+        html += '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">';
+        html += '<span class="ds-label-sm" style="font-size:9px;color:var(--hart-accent)">'+v+'</span>';
+        html += '<div style="width:100%;height:'+h+'px;background:var(--hart-accent);border-radius:3px 3px 0 0;min-width:12px"></div>';
+        html += '</div>';
+      }});
+      html += '</div>';
+      if(chartLabels.length) {{
+        html += '<div style="display:flex;gap:4px;margin-top:2px">';
+        chartLabels.forEach(function(l){{ html += '<span class="ds-label-sm ds-text-muted" style="flex:1;text-align:center;font-size:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+l+'</span>'; }});
+        html += '</div>';
+      }}
+    }} else {{
+      // Line chart: SVG polyline
+      var w = 320, h = 80;
+      var pts = chartData.map(function(v,i){{ return ((i/(Math.max(1,chartData.length-1)))*w)+','+(h - (v/maxVal)*h); }}).join(' ');
+      html += '<svg width="'+w+'" height="'+(h+10)+'" style="margin-top:8px"><polyline points="'+pts+'" fill="none" stroke="var(--hart-accent)" stroke-width="2" stroke-linejoin="round"/>';
+      chartData.forEach(function(v,i){{
+        var cx = (i/(Math.max(1,chartData.length-1)))*w;
+        var cy = h - (v/maxVal)*h;
+        html += '<circle cx="'+cx+'" cy="'+cy+'" r="3" fill="var(--hart-accent)"/>';
+      }});
+      html += '</svg>';
+      if(chartLabels.length) {{
+        html += '<div style="display:flex;justify-content:space-between;margin-top:2px">';
+        chartLabels.forEach(function(l){{ html += '<span class="ds-label-sm ds-text-muted" style="font-size:8px">'+l+'</span>'; }});
+        html += '</div>';
+      }}
+    }}
+
+  }} else if(type === 'code') {{
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">';
+    if(ev.filename) html += '<span class="ds-label-sm ds-text-muted" style="font-family:monospace">'+(ev.filename)+'</span>';
+    if(ev.language) html += '<span class="ds-label-sm" style="color:var(--hart-accent);font-size:9px;text-transform:uppercase">'+(ev.language)+'</span>';
+    html += '</div>';
+    html += '<pre style="margin:0;padding:10px;background:rgba(0,0,0,0.5);border-radius:8px;overflow-x:auto;font-family:\'Fira Code\',\'Cascadia Code\',monospace;font-size:12px;line-height:1.4;color:#e0e0e0;white-space:pre-wrap;word-break:break-all"><code>'+(ev.content||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+'</code></pre>';
+
+  }} else if(type === 'markdown') {{
+    var md = ev.content||'';
+    // Basic markdown→HTML: bold, italic, links, inline code, headers, lists
+    md = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    md = md.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+    md = md.replace(/\*(.+?)\*/g,'<em>$1</em>');
+    md = md.replace(/`([^`]+)`/g,'<code style="background:rgba(255,255,255,0.08);padding:1px 4px;border-radius:3px;font-family:monospace;font-size:0.9em">$1</code>');
+    md = md.replace(/\[([^\]]+)\]\(([^)]+)\)/g,'<a href="$2" target="_blank" style="color:var(--hart-accent);text-decoration:underline">$1</a>');
+    md = md.replace(/^### (.+)$/gm,'<div class="ds-body-md" style="font-weight:700;margin-top:6px">$1</div>');
+    md = md.replace(/^## (.+)$/gm,'<div class="ds-body-md" style="font-weight:700;font-size:1.1em;margin-top:6px">$1</div>');
+    md = md.replace(/^# (.+)$/gm,'<div class="ds-body-lg" style="font-weight:700;margin-top:6px">$1</div>');
+    md = md.replace(/^[-*] (.+)$/gm,'<div style="padding-left:12px">&#8226; $1</div>');
+    md = md.replace(/^\d+\. (.+)$/gm,function(m,p1){{ return '<div style="padding-left:12px">'+m.split('.')[0]+'. '+p1+'</div>'; }});
+    md = md.replace(/\n/g,'<br>');
+    html += '<div class="ds-body-sm" style="line-height:1.5">'+md+'</div>';
+
+  }} else if(type === 'media') {{
+    var mediaType = ev.media_type||ev.type||'image';
+    var src = ev.src||ev.url||'';
+    var alt = ev.alt||'Media';
+    if(ev.title) html += '<div class="ds-body-sm" style="font-weight:600;margin-bottom:4px">'+(ev.title)+'</div>';
+    if(mediaType === 'video' || src.match(/\.(mp4|webm|ogg)($|\?)/i)) {{
+      html += '<video src="'+src+'" '+(ev.controls!==false?'controls':'')+' style="width:100%;border-radius:8px;max-height:160px" preload="metadata">'+alt+'</video>';
+    }} else if(mediaType === 'audio' || src.match(/\.(mp3|wav|ogg|aac)($|\?)/i)) {{
+      html += '<audio src="'+src+'" '+(ev.controls!==false?'controls':'')+' style="width:100%">'+alt+'</audio>';
+    }} else {{
+      html += '<img src="'+src+'" alt="'+alt+'" style="width:100%;border-radius:8px;max-height:160px;object-fit:cover" onerror="this.style.display=\'none\'">';
+    }}
+    if(ev.caption) html += '<div class="ds-label-sm ds-text-muted" style="margin-top:4px">'+(ev.caption)+'</div>';
+
+  }} else if(type === 'metric') {{
+    var trend = ev.trend||'flat';
+    var arrow = trend==='up'?'\\u2191':trend==='down'?'\\u2193':'\\u2192';
+    var tColor = trend==='up'?'var(--hart-success)':trend==='down'?'var(--hart-error)':'var(--hart-muted)';
+    html += '<div style="text-align:center;padding:8px 0">';
+    html += '<div style="font-size:32px;font-weight:700;color:var(--hart-text)">'+(ev.value||0)+'<span class="ds-label-sm" style="font-size:14px;margin-left:4px;color:var(--hart-muted)">'+(ev.unit||'')+'</span></div>';
+    html += '<div class="ds-body-sm" style="margin-top:2px">'+(ev.label||'Metric')+' <span style="color:'+tColor+';font-weight:600">'+arrow+'</span></div>';
+    if(ev.explanation) html += '<div class="ds-label-sm ds-text-muted" style="margin-top:4px">'+(ev.explanation)+'</div>';
+    html += '</div>';
+
+  }} else if(type === 'form') {{
+    html += '<div class="ds-body-md" style="font-weight:600;margin-bottom:8px">'+(ev.title||'Form')+'</div>';
+    var formId = 'form-'+(ev._ts||Date.now());
+    html += '<form id="'+formId+'" style="display:flex;flex-direction:column;gap:6px" onsubmit="event.preventDefault();var fd={{}};new FormData(this).forEach(function(v,k){{fd[k]=v}});fetch(SHELL+\''+(ev.action||'/api/a2ui')+'\',{{method:\'POST\',headers:{{\'Content-Type\':\'application/json\'}},body:JSON.stringify(fd)}}).catch(function(){{}});return false;">';
+    (ev.fields||[]).forEach(function(f){{
+      var ftype = f.type||'text';
+      var fname = f.name||f.label||'field';
+      html += '<div>';
+      if(f.label) html += '<label class="ds-label-sm" style="display:block;margin-bottom:2px;color:var(--hart-muted)">'+f.label+'</label>';
+      if(ftype === 'textarea') {{
+        html += '<textarea name="'+fname+'" placeholder="'+(f.placeholder||'')+'" style="width:100%;padding:6px 8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:var(--hart-text);font-size:13px;resize:vertical;min-height:40px">'+(f.value||'')+'</textarea>';
+      }} else if(ftype === 'select') {{
+        html += '<select name="'+fname+'" style="width:100%;padding:6px 8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:var(--hart-text);font-size:13px">';
+        (f.options||[]).forEach(function(o){{ html += '<option value="'+(o.value||o)+'">'+(o.label||o)+'</option>'; }});
+        html += '</select>';
+      }} else {{
+        html += '<input type="'+ftype+'" name="'+fname+'" placeholder="'+(f.placeholder||'')+'" value="'+(f.value||'')+'" style="width:100%;padding:6px 8px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:var(--hart-text);font-size:13px">';
+      }}
+      html += '</div>';
+    }});
+    html += '<div style="text-align:right;margin-top:4px">'+dsBtn(ev.submit_label||'Submit',{{variant:'primary',cls:'ds-btn-sm'}})+'</div></form>';
+
+  }} else if(type === 'list') {{
+    html += '<div class="ds-body-md" style="font-weight:600;margin-bottom:4px">'+(ev.title||'List')+'</div>';
+    var ordered = ev.ordered||false;
+    var tag = ordered?'ol':'ul';
+    html += '<'+tag+' style="margin:0;padding-left:18px;color:var(--hart-text)">';
+    (ev.items||[]).forEach(function(item,i){{
+      var text = typeof item === 'string' ? item : (item.label||item.text||item.name||JSON.stringify(item));
+      var action = typeof item === 'object' ? item.action : null;
+      if(action || ev.interactive) {{
+        html += '<li style="padding:2px 0;cursor:pointer;color:var(--hart-accent)" onclick="try{{fetch(SHELL+\''+( action||'/api/a2ui')+'\',{{method:\'POST\',headers:{{\'Content-Type\':\'application/json\'}},body:JSON.stringify({{selected:'+i+',item:\''+text.replace(/'/g,'\\\\\\\'')+'\'}})}})}}catch(e){{}}">'+(text)+'</li>';
+      }} else {{
+        html += '<li style="padding:2px 0">'+(text)+'</li>';
+      }}
+    }});
+    html += '</'+tag+'>';
+
+  }} else if(type === 'approval') {{
+    html += '<div class="ds-body-md" style="font-weight:600;margin-bottom:4px">Approval Required</div>';
+    html += '<div class="ds-body-sm ds-text-muted" style="margin-bottom:8px">'+(ev.description||ev.action||'An agent requests your approval.')+'</div>';
+    if(ev.agent_id) html += '<div class="ds-label-sm ds-text-muted" style="margin-bottom:6px">Agent: '+(ev.agent_id)+'</div>';
+    html += '<div style="display:flex;gap:6px;justify-content:flex-end">';
+    html += '<button class="ds-btn ds-btn-primary ds-btn-sm" onclick="dsRipple(event);_postApproval(\''+((ev.agent_id||'').replace(/'/g,''))+'\',\''+((ev.action||'').replace(/'/g,''))+'\',\'approve\');this.closest(\'.agent-overlay\').remove()"><span>Approve</span></button>';
+    html += '<button class="ds-btn ds-btn-outline ds-btn-sm" onclick="dsRipple(event);_postApproval(\''+((ev.agent_id||'').replace(/'/g,''))+'\',\''+((ev.action||'').replace(/'/g,''))+'\',\'deny\');this.closest(\'.agent-overlay\').remove()"><span>Deny</span></button>';
+    html += '<button class="ds-btn ds-btn-ghost ds-btn-sm" onclick="dsRipple(event);this.closest(\'.agent-overlay\').remove()"><span>Later</span></button>';
+    html += '</div>';
+
+  }} else if(type === 'navigate') {{
+    var target = ev.target||'';
+    var transition = ev.transition||'default';
+    if(MANIFEST[target] || SYSTEM_PANELS[target]) {{
+      openPanel(target, ev.params||{{}});
+    }} else if(target.indexOf('http') === 0) {{
+      window.open(target, '_blank');
+    }} else if(target.indexOf('/') === 0) {{
+      fetch(SHELL+target, {{method:'GET',signal:AbortSignal.timeout(5000)}}).catch(function(){{}});
+    }}
+    // Minimal overlay confirmation
+    html += '<div style="text-align:center;padding:8px"><span class="mi material-icons-round" style="font-size:24px;color:var(--hart-accent)">open_in_new</span><div class="ds-body-sm" style="margin-top:4px">Navigating to '+(ev.title||target||'...')+'</div></div>';
+
   }} else {{
-    // Generic: card/markdown/metric/etc
+    // Generic fallback
     html += '<div class="ds-body-md" style="font-weight:600">'+(ev.title||type)+'</div>';
     html += '<div class="ds-body-sm ds-text-muted">'+(ev.content||ev.message||JSON.stringify(ev).substring(0,200))+'</div>';
   }}
@@ -3682,6 +3841,46 @@ function renderAgentOverlay(ev) {{
                 data.get('action', 'unknown'),
                 data.get('description', ''))
             return jsonify(result)
+
+        @app.route('/api/agent/approval', methods=['POST'])
+        def handle_agent_approval():
+            """Handle approval decisions from Nunba JS or Android clients."""
+            data = request.get_json(force=True)
+            agent_id = data.get('agent_id', '')
+            action = data.get('action', '')
+            decision = data.get('decision', '')  # approve / deny / later
+            if decision not in ('approve', 'deny', 'later'):
+                return jsonify({'error': 'Invalid decision, must be approve/deny/later'}), 400
+            # Resolve matching pending approval in _agent_components
+            resolved = False
+            if agent_id in self._agent_components:
+                for comp in self._agent_components[agent_id]:
+                    if (comp.get('type') == 'approval'
+                            and comp.get('action') == action
+                            and comp.get('_decision') is None):
+                        comp['_decision'] = decision
+                        comp['_decided_at'] = time.time()
+                        resolved = True
+                        break
+            # Push decision via EventBus so other frontends can react
+            try:
+                from core.platform.events import emit_event
+                emit_event('agent.approval.decision', {
+                    'agent_id': agent_id,
+                    'action': action,
+                    'decision': decision,
+                })
+            except Exception:
+                pass
+            logger.info("Approval decision: agent=%s action=%s decision=%s resolved=%s",
+                        agent_id, action, decision, resolved)
+            return jsonify({
+                'status': 'ok',
+                'agent_id': agent_id,
+                'action': action,
+                'decision': decision,
+                'resolved': resolved,
+            })
 
         # ── Voice ──
         @app.route('/api/voice', methods=['POST'])
