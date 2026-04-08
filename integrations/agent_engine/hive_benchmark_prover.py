@@ -1379,6 +1379,31 @@ class HiveBenchmarkProver:
                             'index': i,
                         })
 
+        elif btype == 'ensemble':
+            # Ensemble: generate same problems as the base benchmark.
+            # All nodes solve the SAME questions — fusion compares answers.
+            base_name = spec.get('base_benchmark', '')
+            base_spec = BUILTIN_BENCHMARKS.get(base_name, {})
+            if base_spec:
+                base_problems = self._fetch_problems(
+                    base_name, {'spec': base_spec})
+                # Re-tag as ensemble problems with the ensemble benchmark name
+                for p in base_problems:
+                    p['ensemble_benchmark'] = benchmark_name
+                    p['fusion_strategy'] = spec.get(
+                        'fusion_strategy', 'weighted_majority_vote')
+                problems = base_problems
+            else:
+                # Fallback: generate generic problems based on count
+                count = spec.get('problems', 50)
+                for i in range(count):
+                    problems.append({
+                        'id': f'{benchmark_name}_{i}',
+                        'type': 'mcq',
+                        'ensemble_benchmark': benchmark_name,
+                        'prompt': f'Ensemble problem {i}',
+                    })
+
         elif btype == 'custom':
             measure = spec.get('measure', '')
             problems.append({

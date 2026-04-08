@@ -3461,7 +3461,22 @@ function _postApproval(agentId, action, decision) {{
 
 // ═══ Agent Action Floating Overlay Renderer ═══
 var _overlayStack = [];
+// HTML escape — prevents XSS from agent-pushed content
+function _esc(s){{if(!s)return'';var d=document.createElement('div');d.textContent=String(s);return d.innerHTML;}}
+
 function renderAgentOverlay(ev) {{
+  // Sanitize all string fields to prevent XSS injection
+  var _orig = ev;
+  ev = {{}};
+  for(var k in _orig) {{ ev[k] = (typeof _orig[k] === 'string') ? _esc(_orig[k]) : _orig[k]; }}
+  // Preserve arrays/objects that need special handling
+  if(_orig.items) ev.items = _orig.items;
+  if(_orig.apps) ev.apps = _orig.apps;
+  if(_orig.steps) ev.steps = _orig.steps;
+  if(_orig.fields) ev.fields = _orig.fields;
+  if(_orig.data) ev.data = _orig.data;
+  if(_orig.labels) ev.labels = _orig.labels;
+  if(_orig.children) ev.children = _orig.children;
   var id = 'overlay-'+(ev.agent||'')+(ev._ts||Date.now());
   // Remove oldest if > 3 overlays
   while(_overlayStack.length >= 3) {{
@@ -3489,7 +3504,7 @@ function renderAgentOverlay(ev) {{
   }} else if(type === 'cart') {{
     html += '<div class="ds-body-md" style="font-weight:600">🛒 Cart ('+(ev.items||[]).length+' items)</div>';
     (ev.items||[]).forEach(function(item){{
-      html += '<div class="ds-list-item" style="padding:4px 0"><span class="ds-body-sm">'+item.name+'</span><span class="ds-label-sm ds-text-accent" style="margin-left:auto">'+item.price+'</span></div>';
+      html += '<div class="ds-list-item" style="padding:4px 0"><span class="ds-body-sm">'+_esc(item.name)+'</span><span class="ds-label-sm ds-text-accent" style="margin-left:auto">'+_esc(item.price)+'</span></div>';
     }});
     html += '<div style="border-top:1px solid rgba(255,255,255,0.1);margin-top:8px;padding-top:8px;text-align:right"><span class="ds-body-md ds-text-accent">Total: '+(ev.total||0)+' '+(ev.currency||'Spark')+'</span></div>';
 
@@ -3666,13 +3681,13 @@ function renderAgentOverlay(ev) {{
   }} else if(type === 'navigate') {{
     var target = ev.target||'';
     var transition = ev.transition||'default';
+    // Only allow known panel IDs and safe internal /api/ routes — no external URLs
     if(MANIFEST[target] || SYSTEM_PANELS[target]) {{
       openPanel(target, ev.params||{{}});
-    }} else if(target.indexOf('http') === 0) {{
-      window.open(target, '_blank');
-    }} else if(target.indexOf('/') === 0) {{
+    }} else if(target.indexOf('/api/') === 0 && target.indexOf('..') === -1) {{
       fetch(SHELL+target, {{method:'GET',signal:AbortSignal.timeout(5000)}}).catch(function(){{}});
     }}
+    // External URLs and arbitrary paths are BLOCKED — prevents SSRF/open redirect
     // Minimal overlay confirmation
     html += '<div style="text-align:center;padding:8px"><span class="mi material-icons-round" style="font-size:24px;color:var(--hart-accent)">open_in_new</span><div class="ds-body-sm" style="margin-top:4px">Navigating to '+(ev.title||target||'...')+'</div></div>';
 

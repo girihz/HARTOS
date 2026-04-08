@@ -688,31 +688,22 @@ class AppMarketplace:
 
         # Try to deduct from buyer and credit seller via ResonanceService
         try:
-            from integrations.social.models import get_db
+            from integrations.social.models import db_session
             from integrations.social.resonance_engine import ResonanceService
-            db = get_db()
-            try:
-                # Deduct from buyer
+            with db_session() as db:
                 ResonanceService.award_spark(
                     db, buyer_id, -amount_spark,
                     'marketplace_purchase', listing_id,
                     f'App purchase: {listing_id}')
-
-                # Credit creator (90%)
                 ResonanceService.award_spark(
                     db, seller_id, creator_share,
                     'marketplace_sale', listing_id,
                     f'App sale revenue (90%): {listing_id}')
-
-                db.commit()
-            except Exception as e:
-                db.rollback()
-                logger.warning(f"Payment processing failed: {e}")
-                return {'error': f'Payment failed: {e}'}
-            finally:
-                db.close()
         except ImportError:
             logger.debug("ResonanceService not available, recording payment ledger only")
+        except Exception as e:
+            logger.warning("Payment processing failed: %s", e)
+            return {'error': f'Payment failed: {e}'}
 
         # Record in revenue ledger
         revenue = self._revenue()
@@ -789,7 +780,11 @@ class AppMarketplace:
         /chat with the matching prompt_id triggers REUSE.
         """
         try:
-            import glob
+            import glob, re
+            # Sanitize recipe_id to prevent path traversal
+            recipe_id = re.sub(r'[^a-zA-Z0-9_\-]', '', recipe_id)
+            if not recipe_id:
+                return
             pattern = os.path.join('prompts', f'*{recipe_id}*_recipe.json')
             matches = glob.glob(pattern)
             if not matches:
@@ -1241,11 +1236,10 @@ class AppPromotionAgent:
     def _post_to_feed(self, listing: Dict) -> str:
         """Post app announcement to platform social feed."""
         try:
-            from integrations.social.models import get_db
+            from integrations.social.models import db_session
             from integrations.social.services import PostService
-            db = get_db()
-            try:
-                post = PostService.create_post(
+            with db_session() as db:
+                PostService.create_post(
                     db,
                     author_id=listing['owner_id'],
                     body=(
@@ -1257,24 +1251,19 @@ class AppPromotionAgent:
                     ),
                     visibility='public',
                 )
-                db.commit()
-                return 'posted'
-            except Exception as e:
-                db.rollback()
-                return f'feed_error: {e}'
-            finally:
-                db.close()
+            return 'posted'
         except ImportError:
             return 'social_service_unavailable'
+        except Exception as e:
+            return f'feed_error: {e}'
 
     def _create_thought_experiment(self, listing: Dict) -> str:
         """Create a thought experiment comparing approaches to the app's problem."""
         try:
             from integrations.social.thought_experiment_service import ThoughtExperimentService
-            from integrations.social.models import get_db
-            db = get_db()
-            try:
-                result = ThoughtExperimentService.create_experiment(
+            from integrations.social.models import db_session
+            with db_session() as db:
+                ThoughtExperimentService.create_experiment(
                     db,
                     author_id=listing['owner_id'],
                     title=f"Which approach solves {listing.get('category', 'this')} tasks better?",
@@ -1285,13 +1274,7 @@ class AppPromotionAgent:
                     ),
                     intent_category='technology',
                 )
-                db.commit()
-                return 'experiment_created'
-            except Exception as e:
-                db.rollback()
-                return f'experiment_error: {e}'
-            finally:
-                db.close()
+            return 'experiment_created'
         except ImportError:
             return 'thought_experiment_service_unavailable'
 
