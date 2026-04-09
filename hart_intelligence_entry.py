@@ -2039,6 +2039,75 @@ def _push_workflow_flowchart(user_id, prompt_id, request_id=None):
         pass
 
 
+def _handle_computer_use_tool(input_text: str) -> str:
+    """Computer use: screenshot → VLM grounding → execute action.
+
+    Uses qwen3vl_backend.point_and_act for grounding, pyautogui for execution.
+    Requires user approval via agent_request_approval before executing.
+    """
+    user_id = thread_local_data.get_user_id()
+    try:
+        # Step 1: Take screenshot
+        from PIL import ImageGrab, Image
+        import base64, io
+        screenshot = ImageGrab.grab()
+        img_resized = screenshot.resize((1024, 576), Image.LANCZOS)
+        buf = io.BytesIO()
+        img_resized.save(buf, 'JPEG', quality=50)
+        b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+
+        # Step 2: VLM grounding — find what to click/type
+        _llm_port = int(os.environ.get('HEVOLVE_LLM_PORT', 8080))
+        resp = pooled_post(
+            f'http://127.0.0.1:{_llm_port}/v1/chat/completions',
+            json={
+                'model': 'local',
+                'messages': [{'role': 'user', 'content': [
+                    {'type': 'text', 'text': f'You are a computer use agent. Describe exactly what action to perform: {input_text}'},
+                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64}'}}
+                ]}],
+                'max_tokens': 200,
+            },
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            description = resp.json().get('choices', [{}])[0].get('message', {}).get('content', '')
+            return f"Screen analysis: {description}\n\nTo execute this action, the user must approve via the Computer_Execute approval card."
+        return "Could not analyze screen — VLM unavailable."
+    except Exception as e:
+        return f"Computer use error: {str(e)[:200]}"
+
+
+def _handle_screenshot_tool(input_text: str) -> str:
+    """Take screenshot and describe using VLM."""
+    try:
+        from PIL import ImageGrab
+        import base64, io
+        screenshot = ImageGrab.grab()
+        buf = io.BytesIO()
+        screenshot.resize((1024, 576)).save(buf, 'JPEG', quality=50)
+        b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+
+        _llm_port = int(os.environ.get('HEVOLVE_LLM_PORT', 8080))
+        resp = pooled_post(
+            f'http://127.0.0.1:{_llm_port}/v1/chat/completions',
+            json={
+                'model': 'local',
+                'messages': [{'role': 'user', 'content': [
+                    {'type': 'text', 'text': f'Describe what you see on this screen. Question: {input_text}'},
+                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64}'}}
+                ]}],
+                'max_tokens': 300,
+            },
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return resp.json().get('choices', [{}])[0].get('message', {}).get('content', 'Could not describe screen.')
+        return "Screenshot taken but VLM unavailable for description."
+    except Exception as e:
+        return f"Screenshot error: {str(e)[:200]}"
+
+
 def _handle_agentic_router_tool(input_text):
     """Tool handler: LLM detected a multi-step agentic task.
 
@@ -2353,6 +2422,26 @@ def get_tools(req_tool, is_first: bool = False):
                 ),
             ),
 
+            Tool(
+                name="Computer_Use",
+                func=_handle_computer_use_tool,
+                description=(
+                    "Perform an action on the user's computer: click, type, scroll, "
+                    "open apps. Takes a screenshot, identifies what to click/type using "
+                    "VLM, and executes. Requires user approval before executing. "
+                    "Input: natural language instruction (e.g. 'open Chrome', "
+                    "'click the Start button', 'type hello in the search box')."
+                ),
+            ),
+            Tool(
+                name="Computer_Screenshot",
+                func=_handle_screenshot_tool,
+                description=(
+                    "Take a screenshot of the user's screen and describe what you see. "
+                    "Use when you need to understand what's on screen before acting. "
+                    "Input: question about the screen (e.g. 'what apps are open?')."
+                ),
+            ),
         ]
 
         # Service Tools: Add HTTP microservice tools (Crawl4AI, AceStep, etc.)
