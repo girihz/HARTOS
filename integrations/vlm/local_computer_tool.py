@@ -14,6 +14,11 @@ import time
 import base64
 import logging
 
+# VLM screenshot dimensions — single source of truth.
+# All resize + coordinate scaling uses these.
+VLM_IMG_W = 1024
+VLM_IMG_H = 576
+
 logger = logging.getLogger('hevolve.vlm.computer_tool')
 
 # Module-level imports for mockability (pyautogui is optional)
@@ -52,10 +57,9 @@ def take_screenshot(tier: str) -> str:
         if pyautogui is None:
             raise ImportError("pyautogui is required for in-process screenshots")
         img = pyautogui.screenshot()
-        # Resize to 1024x576 JPEG — full-res PNG (293KB+) overflows small VLM context.
-        # JPEG at quality=60 yields ~80KB base64 which fits Qwen3.5-2B comfortably.
+        # Resize for VLM — full-res PNG (293KB+) overflows context.
         from PIL import Image
-        img = img.resize((1024, 576), Image.LANCZOS)
+        img = img.resize((VLM_IMG_W, VLM_IMG_H), Image.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format='JPEG', quality=60)
         return base64.b64encode(buf.getvalue()).decode('ascii')

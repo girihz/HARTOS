@@ -143,16 +143,16 @@ def run_local_agentic_loop(
                     messages[-1]['_screenshot'] = screenshot_b64
 
                 # Map point_and_act result → action_json format for execute_action.
-                # point_and_act returns coords in IMAGE space (1024x576 resized).
-                # pyautogui needs SCREEN space. Scale back to actual resolution.
+                # point_and_act returns coords in VLM image space (VLM_IMG_W x VLM_IMG_H).
+                # pyautogui needs SCREEN space. Scale using actual screen resolution.
+                from integrations.vlm.local_computer_tool import VLM_IMG_W, VLM_IMG_H
                 img_x = result.get('screen_x', 0)
                 img_y = result.get('screen_y', 0)
                 try:
                     from PIL import ImageGrab
                     _sw, _sh = ImageGrab.grab().size
-                    # Image was resized to 1024x576 in take_screenshot
-                    screen_x = int(img_x * _sw / 1024)
-                    screen_y = int(img_y * _sh / 576)
+                    screen_x = int(img_x * _sw / VLM_IMG_W)
+                    screen_y = int(img_y * _sh / VLM_IMG_H)
                 except Exception:
                     screen_x, screen_y = img_x, img_y
 
