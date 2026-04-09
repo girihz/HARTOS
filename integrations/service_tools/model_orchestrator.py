@@ -659,6 +659,17 @@ class ModelOrchestrator:
         self._register_vram(entry, device)
         self._register_lifecycle(entry)
         logger.info(f"Catalog synced: {entry.id} loaded on {device} (external)")
+        # Push capability notification to frontend via SSE
+        try:
+            import __main__ as _m
+            if hasattr(_m, 'broadcast_sse_event'):
+                _m.broadcast_sse_event('capability_update', {
+                    'capability': model_type,
+                    'status': 'ready',
+                    'name': model_name,
+                })
+        except Exception:
+            pass
 
     def notify_unloaded(self, model_type: str, model_name: str) -> None:
         """Called by subsystems that unloaded a model outside the orchestrator."""
