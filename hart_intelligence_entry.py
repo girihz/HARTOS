@@ -2105,6 +2105,42 @@ def _handle_screenshot_tool(input_text: str) -> str:
         return f"Screenshot error: {str(e)[:200]}"
 
 
+def _handle_computer_action_tool(input_text: str) -> str:
+    """Execute GUI action on user's computer via VLM agentic loop.
+
+    Reuses the same pipeline as execute_windows_or_android_command (autogen):
+    vlm_adapter → local_loop → point_and_act → pyautogui.
+    """
+    user_id = thread_local_data.get_user_id()
+    prompt_id = thread_local_data.get_prompt_id()
+    try:
+        os.environ.setdefault('HEVOLVE_VLM_UNIFIED', 'true')
+        from integrations.vlm.vlm_adapter import execute_vlm_instruction
+        message = {
+            'instruction_to_vlm_agent': input_text,
+            'user_id': str(user_id or 'guest'),
+            'prompt_id': str(prompt_id or 0),
+            'os_to_control': 'windows' if sys.platform == 'win32' else (
+                'macos' if sys.platform == 'darwin' else 'linux'),
+            'max_ETA_in_seconds': 60,
+        }
+        result = execute_vlm_instruction(message)
+        if result and isinstance(result, dict):
+            responses = result.get('extracted_responses', [])
+            if responses:
+                last = responses[-1]
+                content = last.get('content', '')
+                if isinstance(content, dict):
+                    return f"Action: {content.get('action', '?')} — {content.get('reasoning', '')}"
+                return str(content)[:500]
+            return f"Completed in {result.get('execution_time_seconds', 0):.0f}s"
+        return "Computer action completed (no detailed response)."
+    except ImportError:
+        return "Computer use unavailable — VLM adapter not installed."
+    except Exception as e:
+        return f"Computer use error: {str(e)[:200]}"
+
+
 def _handle_agentic_router_tool(input_text):
     """Tool handler: LLM detected a multi-step agentic task.
 
@@ -2419,6 +2455,16 @@ def get_tools(req_tool, is_first: bool = False):
                 ),
             ),
 
+            Tool(
+                name="Computer_Action",
+                func=_handle_computer_action_tool,
+                description=(
+                    "Execute a GUI action on the user's computer: click buttons, "
+                    "type text, open apps, scroll. Uses VLM to identify what to click. "
+                    "Input: natural language instruction (e.g. 'open Chrome', "
+                    "'click the Save button', 'type hello in the search box')."
+                ),
+            ),
             Tool(
                 name="Computer_Screenshot",
                 func=_handle_screenshot_tool,
