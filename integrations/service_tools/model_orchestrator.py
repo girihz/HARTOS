@@ -660,14 +660,26 @@ class ModelOrchestrator:
         self._register_lifecycle(entry)
         logger.info(f"Catalog synced: {entry.id} loaded on {device} (external)")
         # Push capability notification to frontend via SSE
+        # Push capability notification to frontend via SSE + Liquid UI
+        _cap_event = {
+            'capability': model_type,
+            'status': 'ready',
+            'name': model_name,
+        }
         try:
             import __main__ as _m
             if hasattr(_m, 'broadcast_sse_event'):
-                _m.broadcast_sse_event('capability_update', {
-                    'capability': model_type,
-                    'status': 'ready',
-                    'name': model_name,
-                })
+                _m.broadcast_sse_event('capability_update', _cap_event)
+        except Exception:
+            pass
+        try:
+            from integrations.agent_engine.liquid_ui_service import LiquidUIService
+            LiquidUIService.get_instance().agent_ui_update('system', {
+                'type': 'notification',
+                'title': 'Capability Ready',
+                'message': f'{model_name} is ready',
+                'severity': 'success',
+            })
         except Exception:
             pass
 
