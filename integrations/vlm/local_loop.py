@@ -120,17 +120,41 @@ def run_local_agentic_loop(
             screenshot_b64 = take_screenshot(tier)
 
             if use_unified and qwen3vl is not None:
-                # ── Unified path: single Qwen3-VL call ──
-                result = qwen3vl.parse_and_reason(
-                    screenshot_b64, enhanced, history=messages
+                # ── Unified path: Qwen3-VL point_and_act ──
+                # Uses describe_first strategy (simpler prompt, works with 2B models).
+                # parse_and_reason's UNIFIED_PROMPT asks for full UI element listing
+                # with bboxes — too complex for 2B, causes 90s+ timeouts.
+                prev_ss = messages[-1].get('_screenshot') if len(messages) > 2 else None
+                # Build history strings from extracted_responses
+                hist = []
+                for r in extracted_responses[-3:]:
+                    c = r.get('content', '')
+                    if isinstance(c, dict):
+                        hist.append(f"{c.get('action', '?')}: {c.get('reasoning', '')[:80]}")
+                    else:
+                        hist.append(str(c)[:100])
+                result = qwen3vl.point_and_act(
+                    screenshot_b64, enhanced,
+                    history=hist or None,
+                    prev_screenshot_b64=prev_ss,
                 )
-                parsed = {
-                    'screen_info': result.get('screen_info', ''),
-                    'parsed_content_list': result.get('parsed_content_list', []),
+                # Store screenshot for state-change detection in next iteration
+                if len(messages) > 0:
+                    messages[-1]['_screenshot'] = screenshot_b64
+
+                # Map point_and_act result → action_json format for execute_action
+                parsed = {'screen_info': '', 'parsed_content_list': []}
+                action_json = {
+                    'Next Action': result.get('action', 'None'),
+                    'coordinate': [result.get('screen_x', 0), result.get('screen_y', 0)],
+                    'value': result.get('text', ''),
+                    'Reasoning': result.get('reasoning', ''),
+                    'Status': 'DONE' if result.get('done') else 'IN_PROGRESS',
                 }
-                action_json = result.get('action_json', {})
                 logger.info(
-                    f"Qwen3-VL unified: {action_json.get('Next Action', 'None')} "
+                    f"Qwen3-VL point_and_act: {action_json['Next Action']} "
+                    f"at ({result.get('screen_x')},{result.get('screen_y')}) "
+                    f"strategy={result.get('strategy')} "
                     f"(latency={result.get('latency', 0):.1f}s)"
                 )
             else:
