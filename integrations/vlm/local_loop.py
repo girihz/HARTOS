@@ -142,11 +142,24 @@ def run_local_agentic_loop(
                 if len(messages) > 0:
                     messages[-1]['_screenshot'] = screenshot_b64
 
-                # Map point_and_act result → action_json format for execute_action
+                # Map point_and_act result → action_json format for execute_action.
+                # point_and_act returns coords in IMAGE space (1024x576 resized).
+                # pyautogui needs SCREEN space. Scale back to actual resolution.
+                img_x = result.get('screen_x', 0)
+                img_y = result.get('screen_y', 0)
+                try:
+                    from PIL import ImageGrab
+                    _sw, _sh = ImageGrab.grab().size
+                    # Image was resized to 1024x576 in take_screenshot
+                    screen_x = int(img_x * _sw / 1024)
+                    screen_y = int(img_y * _sh / 576)
+                except Exception:
+                    screen_x, screen_y = img_x, img_y
+
                 parsed = {'screen_info': '', 'parsed_content_list': []}
                 action_json = {
                     'Next Action': result.get('action', 'None'),
-                    'coordinate': [result.get('screen_x', 0), result.get('screen_y', 0)],
+                    'coordinate': [screen_x, screen_y],
                     'value': result.get('text', ''),
                     'Reasoning': result.get('reasoning', ''),
                     'Status': 'DONE' if result.get('done') else 'IN_PROGRESS',
