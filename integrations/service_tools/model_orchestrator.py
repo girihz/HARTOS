@@ -673,13 +673,15 @@ class ModelOrchestrator:
         except Exception:
             pass
         try:
-            from integrations.agent_engine.liquid_ui_service import LiquidUIService
-            LiquidUIService.get_instance().agent_ui_update('system', {
-                'type': 'notification',
-                'title': 'Capability Ready',
-                'message': f'{model_name} is ready',
-                'severity': 'success',
-            })
+            from core.platform.service_registry import ServiceRegistry
+            _lui = ServiceRegistry.get('LiquidUIService')
+            if _lui:
+                _lui.agent_ui_update('system', {
+                    'type': 'notification',
+                    'title': 'Capability Ready',
+                    'message': f'{model_name} is ready',
+                    'severity': 'success',
+                })
         except Exception:
             pass
 
