@@ -120,56 +120,86 @@ def run_local_agentic_loop(
             screenshot_b64 = take_screenshot(tier)
 
             if use_unified and qwen3vl is not None:
-                # ── Unified path: Qwen3-VL point_and_act ──
-                # Uses describe_first strategy (simpler prompt, works with 2B models).
-                # parse_and_reason's UNIFIED_PROMPT asks for full UI element listing
-                # with bboxes — too complex for 2B, causes 90s+ timeouts.
-                prev_ss = messages[-1].get('_screenshot') if len(messages) > 2 else None
-                # Build history strings from extracted_responses
-                hist = []
-                for r in extracted_responses[-3:]:
-                    c = r.get('content', '')
-                    if isinstance(c, dict):
-                        hist.append(f"{c.get('action', '?')}: {c.get('reasoning', '')[:80]}")
-                    else:
-                        hist.append(str(c)[:100])
-                result = qwen3vl.point_and_act(
-                    screenshot_b64, enhanced,
-                    history=hist or None,
-                    prev_screenshot_b64=prev_ss,
-                )
-                # Store screenshot for state-change detection in next iteration
-                if len(messages) > 0:
-                    messages[-1]['_screenshot'] = screenshot_b64
+                # ── Two-phase: LLM plans step (text+vision) → point_and_act grounds clicks ──
+                # Phase 1: Ask LLM "what's the next step?" with screenshot context.
+                #   Fast (~5s) because it outputs a small JSON, not full UI listing.
+                # Phase 2: If step needs a click, point_and_act grounds the coordinate.
+                #   Only runs for click actions, skipped for type/key/hotkey/done.
 
-                # Map point_and_act result → action_json format for execute_action.
-                # point_and_act returns coords in VLM image space (VLM_IMG_W x VLM_IMG_H).
-                # pyautogui needs SCREEN space. Scale using actual screen resolution.
+                # Phase 1: Step planning (vision + text → small JSON)
+                step_prompt = (
+                    f"Task: {enhanced}\n\n"
+                    f"Iteration: {iteration + 1}. "
+                )
+                if extracted_responses:
+                    last = extracted_responses[-1].get('content', '')
+                    if isinstance(last, dict):
+                        step_prompt += f"Previous action: {last.get('action', '?')} — {last.get('reasoning', '')[:80]}. "
+                    step_prompt += "Verify if previous action succeeded from the screenshot. "
+                step_prompt += (
+                    "What is the NEXT single action? Respond in JSON:\n"
+                    '{"Reasoning": "...", "Next Action": "left_click|type|key|hotkey|scroll_up|scroll_down|wait|None", '
+                    '"value": "text to type or key to press", "Status": "IN_PROGRESS|DONE"}'
+                )
+
+                step_resp = qwen3vl._call_api([{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": step_prompt},
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:image/jpeg;base64,{screenshot_b64}"}},
+                    ]
+                }])
+                action_json = _parse_vlm_response(step_resp)
+                logger.info(f"Phase 1 (plan): {action_json.get('Next Action')} "
+                            f"value={action_json.get('value', '')[:50]}")
+
+                # Phase 2: Route by action type
+                next_action = action_json.get('Next Action', 'None')
                 from integrations.vlm.local_computer_tool import VLM_IMG_W, VLM_IMG_H
-                img_x = result.get('screen_x', 0)
-                img_y = result.get('screen_y', 0)
-                try:
-                    from PIL import ImageGrab
-                    _sw, _sh = ImageGrab.grab().size
-                    screen_x = int(img_x * _sw / VLM_IMG_W)
-                    screen_y = int(img_y * _sh / VLM_IMG_H)
-                except Exception:
-                    screen_x, screen_y = img_x, img_y
+
+                _CLICK_ACTIONS = {'left_click', 'right_click', 'double_click',
+                                  'middle_click', 'hover', 'mouse_move', 'left_click_drag'}
+                _NO_COORD_ACTIONS = {'type', 'key', 'hotkey', 'wait',
+                                     'scroll_up', 'scroll_down', 'screenshot',
+                                     'list_folders_and_files', 'read_file_and_understand',
+                                     'write_file', 'open_file_gui'}
+
+                if next_action in _CLICK_ACTIONS:
+                    # Needs precise coordinates — use point_and_act grounding
+                    click_target = action_json.get('Reasoning', enhanced)
+                    hist = []
+                    for r in extracted_responses[-3:]:
+                        c = r.get('content', '')
+                        if isinstance(c, dict):
+                            hist.append(f"{c.get('action', '?')}: {c.get('reasoning', '')[:80]}")
+                        else:
+                            hist.append(str(c)[:100])
+                    ground = qwen3vl.point_and_act(
+                        screenshot_b64, click_target,
+                        history=hist or None,
+                    )
+                    img_x = ground.get('screen_x', 0)
+                    img_y = ground.get('screen_y', 0)
+                    try:
+                        from PIL import ImageGrab
+                        _sw, _sh = ImageGrab.grab().size
+                        screen_x = int(img_x * _sw / VLM_IMG_W)
+                        screen_y = int(img_y * _sh / VLM_IMG_H)
+                    except Exception:
+                        screen_x, screen_y = img_x, img_y
+                    action_json['coordinate'] = [screen_x, screen_y]
+                    logger.info(f"Phase 2 (ground): {next_action} at ({screen_x},{screen_y}) "
+                                f"strategy={ground.get('strategy')}")
+                elif next_action in _NO_COORD_ACTIONS:
+                    # No grounding needed — type, key, hotkey, etc. pass through directly
+                    action_json['coordinate'] = None
+                    logger.info(f"Phase 2 (direct): {next_action} "
+                                f"value='{action_json.get('value', '')[:50]}'")
+                else:
+                    action_json['coordinate'] = None
 
                 parsed = {'screen_info': '', 'parsed_content_list': []}
-                action_json = {
-                    'Next Action': result.get('action', 'None'),
-                    'coordinate': [screen_x, screen_y],
-                    'value': result.get('text', ''),
-                    'Reasoning': result.get('reasoning', ''),
-                    'Status': 'DONE' if result.get('done') else 'IN_PROGRESS',
-                }
-                logger.info(
-                    f"Qwen3-VL point_and_act: {action_json['Next Action']} "
-                    f"at ({result.get('screen_x')},{result.get('screen_y')}) "
-                    f"strategy={result.get('strategy')} "
-                    f"(latency={result.get('latency', 0):.1f}s)"
-                )
             else:
                 # ── Legacy path: OmniParser + separate LLM call ──
                 # 2. Parse UI elements
