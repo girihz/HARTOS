@@ -209,7 +209,10 @@ def _execute_inprocess(action: dict) -> dict:
 
         elif act == 'hotkey':
             if text:
-                keys = [k.strip() for k in text.split('+')]
+                if isinstance(text, list):
+                    keys = [str(k).strip() for k in text]
+                else:
+                    keys = [k.strip() for k in str(text).split('+')]
                 pyautogui.hotkey(*keys)
             return {'output': f'Hotkey: {text}'}
 
