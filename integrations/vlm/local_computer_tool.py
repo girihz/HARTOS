@@ -52,8 +52,12 @@ def take_screenshot(tier: str) -> str:
         if pyautogui is None:
             raise ImportError("pyautogui is required for in-process screenshots")
         img = pyautogui.screenshot()
+        # Resize to 1024x576 JPEG — full-res PNG (293KB+) overflows small VLM context.
+        # JPEG at quality=60 yields ~80KB base64 which fits Qwen3.5-2B comfortably.
+        from PIL import Image
+        img = img.resize((1024, 576), Image.LANCZOS)
         buf = io.BytesIO()
-        img.save(buf, format='PNG')
+        img.save(buf, format='JPEG', quality=60)
         return base64.b64encode(buf.getvalue()).decode('ascii')
     else:
         resp = pooled_get('http://localhost:5001/screenshot', timeout=15)
