@@ -1655,6 +1655,23 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
             return '\n'.join(results)
         return "No matching visual/screen descriptions found in the given time range."
 
+    # --- Visual/audio trigger watcher (continuous monitoring) ---
+    @assistant.register_for_execution()
+    @helper.register_for_llm(
+        api_style="function",
+        description=(
+            "Register a visual or audio trigger: continuously watch what the user is "
+            "doing via camera or listen to what they say, and perform an action when a "
+            "condition is met. Input: 'CONDITION: <what to watch for> | ACTION: <what to "
+            "do> | TTL: <minutes>'. Example: 'CONDITION: user raises hand | ACTION: say "
+            "hello | TTL: 30'."
+        ))
+    def register_visual_watcher(
+        input_text: Annotated[str, "CONDITION: ... | ACTION: ... | TTL: minutes"]
+    ) -> str:
+        from hart_intelligence_entry import _handle_visual_watcher_tool
+        return _handle_visual_watcher_tool(input_text)
+
     # --- SimpleMem long-term memory tools ---
     if simplemem_store is not None:
         @assistant.register_for_execution()
