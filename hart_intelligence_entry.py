@@ -2039,43 +2039,62 @@ def _push_workflow_flowchart(user_id, prompt_id, request_id=None):
         pass
 
 
-def _handle_computer_use_tool(input_text: str) -> str:
-    """Computer use: screenshot → VLM grounding → execute action.
-
-    Uses qwen3vl_backend.point_and_act for grounding, pyautogui for execution.
-    Requires user approval via agent_request_approval before executing.
-    """
+def _request_capability_consent(input_text: str) -> str:
+    """Request camera access from user via approval card."""
     user_id = thread_local_data.get_user_id()
     try:
-        # Step 1: Take screenshot
-        from PIL import ImageGrab, Image
-        import base64, io
-        screenshot = ImageGrab.grab()
-        img_resized = screenshot.resize((1024, 576), Image.LANCZOS)
-        buf = io.BytesIO()
-        img_resized.save(buf, 'JPEG', quality=50)
-        b64 = base64.b64encode(buf.getvalue()).decode('ascii')
-
-        # Step 2: VLM grounding — find what to click/type
-        _llm_port = int(os.environ.get('HEVOLVE_LLM_PORT', 8080))
-        resp = pooled_post(
-            f'http://127.0.0.1:{_llm_port}/v1/chat/completions',
-            json={
-                'model': 'local',
-                'messages': [{'role': 'user', 'content': [
-                    {'type': 'text', 'text': f'You are a computer use agent. Describe exactly what action to perform: {input_text}'},
-                    {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64}'}}
-                ]}],
-                'max_tokens': 200,
-            },
-            timeout=15,
+        from integrations.agent_engine.liquid_ui_service import LiquidUIService
+        svc = LiquidUIService.get_instance()
+        svc.agent_request_approval(
+            agent_id='vision',
+            action='enable_camera',
+            description=f'Camera access needed: {input_text}',
         )
-        if resp.status_code == 200:
-            description = resp.json().get('choices', [{}])[0].get('message', {}).get('content', '')
-            return f"Screen analysis: {description}\n\nTo execute this action, the user must approve via the Computer_Execute approval card."
-        return "Could not analyze screen — VLM unavailable."
-    except Exception as e:
-        return f"Computer use error: {str(e)[:200]}"
+        return "Camera access request sent to user. Waiting for approval."
+    except Exception:
+        # Fallback: push via SSE directly
+        try:
+            import __main__ as _m
+            if hasattr(_m, 'broadcast_sse_event'):
+                _m.broadcast_sse_event('agent.ui.update', {
+                    'type': 'approval',
+                    'agent_id': 'vision',
+                    'action': 'enable_camera',
+                    'description': f'Camera access needed: {input_text}',
+                }, user_id=str(user_id))
+                return "Camera access request sent to user. Waiting for approval."
+        except Exception:
+            pass
+    return "Could not request camera access — notification system unavailable."
+
+
+def _request_screen_consent(input_text: str) -> str:
+    """Request screen access from user via approval card."""
+    user_id = thread_local_data.get_user_id()
+    try:
+        from integrations.agent_engine.liquid_ui_service import LiquidUIService
+        svc = LiquidUIService.get_instance()
+        svc.agent_request_approval(
+            agent_id='computer_use',
+            action='enable_screen',
+            description=f'Screen access needed: {input_text}',
+        )
+        return "Screen access request sent to user. Waiting for approval."
+    except Exception:
+        try:
+            import __main__ as _m
+            if hasattr(_m, 'broadcast_sse_event'):
+                _m.broadcast_sse_event('agent.ui.update', {
+                    'type': 'approval',
+                    'agent_id': 'computer_use',
+                    'action': 'enable_screen',
+                    'description': f'Screen access needed: {input_text}',
+                }, user_id=str(user_id))
+                return "Screen access request sent to user. Waiting for approval."
+        except Exception:
+            pass
+    return "Could not request screen access — notification system unavailable."
+
 
 
 def _handle_screenshot_tool(input_text: str) -> str:
@@ -2423,23 +2442,30 @@ def get_tools(req_tool, is_first: bool = False):
             ),
 
             Tool(
-                name="Computer_Use",
-                func=_handle_computer_use_tool,
-                description=(
-                    "Perform an action on the user's computer: click, type, scroll, "
-                    "open apps. Takes a screenshot, identifies what to click/type using "
-                    "VLM, and executes. Requires user approval before executing. "
-                    "Input: natural language instruction (e.g. 'open Chrome', "
-                    "'click the Start button', 'type hello in the search box')."
-                ),
-            ),
-            Tool(
                 name="Computer_Screenshot",
                 func=_handle_screenshot_tool,
                 description=(
                     "Take a screenshot of the user's screen and describe what you see. "
                     "Use when you need to understand what's on screen before acting. "
                     "Input: question about the screen (e.g. 'what apps are open?')."
+                ),
+            ),
+            Tool(
+                name="Request_Camera_Access",
+                func=_request_capability_consent,
+                description=(
+                    "Request user permission to access their camera for visual "
+                    "understanding. Use when you need to see the user but camera is "
+                    "not active. Input: reason for needing camera access."
+                ),
+            ),
+            Tool(
+                name="Request_Screen_Access",
+                func=_request_screen_consent,
+                description=(
+                    "Request user permission to see their screen for computer use. "
+                    "Use when you need to see the screen but screen sharing is not "
+                    "active. Input: reason for needing screen access."
                 ),
             ),
         ]
