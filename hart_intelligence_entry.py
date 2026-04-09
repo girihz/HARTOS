@@ -2082,7 +2082,8 @@ def _handle_screenshot_tool(input_text: str) -> str:
         import base64, io
         screenshot = ImageGrab.grab()
         buf = io.BytesIO()
-        screenshot.resize((1024, 576)).save(buf, 'JPEG', quality=50)
+        from integrations.vlm.local_computer_tool import VLM_IMG_W, VLM_IMG_H
+        screenshot.resize((VLM_IMG_W, VLM_IMG_H)).save(buf, 'JPEG', quality=50)
         b64 = base64.b64encode(buf.getvalue()).decode('ascii')
 
         _llm_port = int(os.environ.get('HEVOLVE_LLM_PORT', 8080))
@@ -5703,7 +5704,8 @@ def visual_agent():
             from PIL import ImageGrab, Image
             backend = get_qwen3vl_backend()
             screenshot = ImageGrab.grab()
-            img_resized = screenshot.resize((1024, 576), Image.LANCZOS)
+            from integrations.vlm.local_computer_tool import VLM_IMG_W, VLM_IMG_H
+            img_resized = screenshot.resize((VLM_IMG_W, VLM_IMG_H), Image.LANCZOS)
             buf = io.BytesIO()
             img_resized.save(buf, 'JPEG', quality=50)
             b64 = base64.b64encode(buf.getvalue()).decode('ascii')
