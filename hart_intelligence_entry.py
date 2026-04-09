@@ -2039,61 +2039,39 @@ def _push_workflow_flowchart(user_id, prompt_id, request_id=None):
         pass
 
 
-def _request_capability_consent(input_text: str) -> str:
-    """Request camera access from user via approval card."""
+def _request_consent(agent_id: str, action: str, label: str, input_text: str) -> str:
+    """Request capability consent from user via approval card (Liquid UI → SSE fallback)."""
     user_id = thread_local_data.get_user_id()
+    description = f'{label} access needed: {input_text}'
+    # Primary: Liquid UI (reaches Android/web/desktop)
     try:
-        from integrations.agent_engine.liquid_ui_service import LiquidUIService
-        svc = LiquidUIService.get_instance()
-        svc.agent_request_approval(
-            agent_id='vision',
-            action='enable_camera',
-            description=f'Camera access needed: {input_text}',
-        )
-        return "Camera access request sent to user. Waiting for approval."
+        from core.platform.service_registry import ServiceRegistry
+        svc = ServiceRegistry.get('LiquidUIService')
+        if svc:
+            svc.agent_request_approval(agent_id=agent_id, action=action, description=description)
+            return f"{label} access request sent to user. Waiting for approval."
     except Exception:
-        # Fallback: push via SSE directly
-        try:
-            import __main__ as _m
-            if hasattr(_m, 'broadcast_sse_event'):
-                _m.broadcast_sse_event('agent.ui.update', {
-                    'type': 'approval',
-                    'agent_id': 'vision',
-                    'action': 'enable_camera',
-                    'description': f'Camera access needed: {input_text}',
-                }, user_id=str(user_id))
-                return "Camera access request sent to user. Waiting for approval."
-        except Exception:
-            pass
-    return "Could not request camera access — notification system unavailable."
+        pass
+    # Fallback: SSE (Nunba desktop WebView2)
+    try:
+        import __main__ as _m
+        if hasattr(_m, 'broadcast_sse_event'):
+            _m.broadcast_sse_event('agent.ui.update', {
+                'type': 'approval', 'agent_id': agent_id,
+                'action': action, 'description': description,
+            }, user_id=str(user_id))
+            return f"{label} access request sent to user. Waiting for approval."
+    except Exception:
+        pass
+    return f"Could not request {label.lower()} access — notification system unavailable."
+
+
+def _request_capability_consent(input_text: str) -> str:
+    return _request_consent('vision', 'enable_camera', 'Camera', input_text)
 
 
 def _request_screen_consent(input_text: str) -> str:
-    """Request screen access from user via approval card."""
-    user_id = thread_local_data.get_user_id()
-    try:
-        from integrations.agent_engine.liquid_ui_service import LiquidUIService
-        svc = LiquidUIService.get_instance()
-        svc.agent_request_approval(
-            agent_id='computer_use',
-            action='enable_screen',
-            description=f'Screen access needed: {input_text}',
-        )
-        return "Screen access request sent to user. Waiting for approval."
-    except Exception:
-        try:
-            import __main__ as _m
-            if hasattr(_m, 'broadcast_sse_event'):
-                _m.broadcast_sse_event('agent.ui.update', {
-                    'type': 'approval',
-                    'agent_id': 'computer_use',
-                    'action': 'enable_screen',
-                    'description': f'Screen access needed: {input_text}',
-                }, user_id=str(user_id))
-                return "Screen access request sent to user. Waiting for approval."
-        except Exception:
-            pass
-    return "Could not request screen access — notification system unavailable."
+    return _request_consent('computer_use', 'enable_screen', 'Screen', input_text)
 
 
 
