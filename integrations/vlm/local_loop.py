@@ -120,84 +120,85 @@ def run_local_agentic_loop(
             screenshot_b64 = take_screenshot(tier)
 
             if use_unified and qwen3vl is not None:
-                # ── Two-phase: LLM plans step (text+vision) → point_and_act grounds clicks ──
-                # Phase 1: Ask LLM "what's the next step?" with screenshot context.
-                #   Fast (~5s) because it outputs a small JSON, not full UI listing.
-                # Phase 2: If step needs a click, point_and_act grounds the coordinate.
-                #   Only runs for click actions, skipped for type/key/hotkey/done.
+                # ── Single VLM call: plan step + ground coordinates in one prompt ──
+                # One image encoding (~500 visual tokens) instead of two.
+                # Halves latency: ~10s per step instead of ~20s.
+                from integrations.vlm.local_computer_tool import VLM_IMG_W, VLM_IMG_H
 
-                # Phase 1: Step planning (vision + text → small JSON)
-                step_prompt = (
+                combined_prompt = (
+                    f"You are a computer use agent on {_os_name}.\n"
                     f"Task: {enhanced}\n\n"
-                    f"Iteration: {iteration + 1}. "
                 )
                 if extracted_responses:
                     last = extracted_responses[-1].get('content', '')
                     if isinstance(last, dict):
-                        step_prompt += f"Previous action: {last.get('action', '?')} — {last.get('reasoning', '')[:80]}. "
-                    step_prompt += "Verify if previous action succeeded from the screenshot. "
-                step_prompt += (
-                    "What is the NEXT single action? Respond in JSON:\n"
-                    '{"Reasoning": "...", "Next Action": "left_click|type|key|hotkey|scroll_up|scroll_down|wait|None", '
-                    '"value": "text to type or key to press", "Status": "IN_PROGRESS|DONE"}'
+                        combined_prompt += (
+                            f"Previous action: {last.get('action', '?')} — "
+                            f"{last.get('reasoning', '')[:80]}.\n"
+                            f"Check the screenshot: did it succeed?\n\n"
+                        )
+                combined_prompt += (
+                    "What is the SINGLE next action? Respond in JSON ONLY:\n"
+                    "{\n"
+                    '  "Reasoning": "What you see and why this action",\n'
+                    '  "Next Action": "left_click|right_click|double_click|type|key|hotkey|scroll_up|scroll_down|wait|None",\n'
+                    '  "coordinate": [x, y],\n'
+                    '  "value": "text to type or key name",\n'
+                    '  "Status": "IN_PROGRESS|DONE"\n'
+                    "}\n\n"
+                    "For click actions: provide <point>x,y</point> normalized 0-1000 coordinates.\n"
+                    "For type/key/hotkey: set coordinate to null, put text in value.\n"
+                    'When task is complete: "Next Action": "None", "Status": "DONE".'
                 )
 
-                step_resp = qwen3vl._call_api([{
+                raw = qwen3vl._call_api([{
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": step_prompt},
+                        {"type": "text", "text": combined_prompt},
                         {"type": "image_url", "image_url": {
                             "url": f"data:image/jpeg;base64,{screenshot_b64}"}},
                     ]
                 }])
-                action_json = _parse_vlm_response(step_resp)
-                logger.info(f"Phase 1 (plan): {action_json.get('Next Action')} "
-                            f"value={action_json.get('value', '')[:50]}")
+                action_json = _parse_vlm_response(raw)
 
-                # Phase 2: Route by action type
+                # Extract coordinates from <point>x,y</point> if present in raw
                 next_action = action_json.get('Next Action', 'None')
-                from integrations.vlm.local_computer_tool import VLM_IMG_W, VLM_IMG_H
-
                 _CLICK_ACTIONS = {'left_click', 'right_click', 'double_click',
-                                  'middle_click', 'hover', 'mouse_move', 'left_click_drag'}
-                _NO_COORD_ACTIONS = {'type', 'key', 'hotkey', 'wait',
-                                     'scroll_up', 'scroll_down', 'screenshot',
-                                     'list_folders_and_files', 'read_file_and_understand',
-                                     'write_file', 'open_file_gui'}
+                                  'middle_click', 'hover', 'mouse_move'}
 
                 if next_action in _CLICK_ACTIONS:
-                    # Needs precise coordinates — use point_and_act grounding
-                    click_target = action_json.get('Reasoning', enhanced)
-                    hist = []
-                    for r in extracted_responses[-3:]:
-                        c = r.get('content', '')
-                        if isinstance(c, dict):
-                            hist.append(f"{c.get('action', '?')}: {c.get('reasoning', '')[:80]}")
-                        else:
-                            hist.append(str(c)[:100])
-                    ground = qwen3vl.point_and_act(
-                        screenshot_b64, click_target,
-                        history=hist or None,
-                    )
-                    img_x = ground.get('screen_x', 0)
-                    img_y = ground.get('screen_y', 0)
+                    coord = action_json.get('coordinate')
+                    # Try parsing <point> tags from raw response
+                    import re as _re
+                    point_match = _re.search(r'<point>\s*(\d+)\s*,\s*(\d+)\s*</point>', raw or '')
+                    if point_match:
+                        nx, ny = int(point_match.group(1)), int(point_match.group(2))
+                    elif coord and isinstance(coord, list) and len(coord) == 2:
+                        nx, ny = coord[0], coord[1]
+                    else:
+                        nx, ny = 500, 500  # center fallback
+
+                    # Scale from 1000-normalized or image space to screen space
                     try:
                         from PIL import ImageGrab
                         _sw, _sh = ImageGrab.grab().size
-                        screen_x = int(img_x * _sw / VLM_IMG_W)
-                        screen_y = int(img_y * _sh / VLM_IMG_H)
+                        if nx <= 1000 and ny <= 1000:
+                            # Normalized 0-1000 coords
+                            screen_x = int(nx * _sw / 1000)
+                            screen_y = int(ny * _sh / 1000)
+                        else:
+                            # Image pixel coords
+                            screen_x = int(nx * _sw / VLM_IMG_W)
+                            screen_y = int(ny * _sh / VLM_IMG_H)
                     except Exception:
-                        screen_x, screen_y = img_x, img_y
+                        screen_x, screen_y = nx, ny
                     action_json['coordinate'] = [screen_x, screen_y]
-                    logger.info(f"Phase 2 (ground): {next_action} at ({screen_x},{screen_y}) "
-                                f"strategy={ground.get('strategy')}")
-                elif next_action in _NO_COORD_ACTIONS:
-                    # No grounding needed — type, key, hotkey, etc. pass through directly
-                    action_json['coordinate'] = None
-                    logger.info(f"Phase 2 (direct): {next_action} "
-                                f"value='{action_json.get('value', '')[:50]}'")
+                    logger.info(f"Action: {next_action} at ({screen_x},{screen_y}) "
+                                f"norm=({nx},{ny})")
                 else:
                     action_json['coordinate'] = None
+                    logger.info(f"Action: {next_action} "
+                                f"value='{action_json.get('value', '')[:50]}'")
 
                 parsed = {'screen_info': '', 'parsed_content_list': []}
             else:
