@@ -1616,14 +1616,21 @@ def _get_dynamic_capability_prompt() -> str:
     """
     parts = []
 
-    # Audio mode context (Nunba only)
+    # Audio mode context (Nunba only — verify TTS is actually available)
     if _is_bundled() if callable(_is_bundled) else _is_bundled:
-        parts.append(
-            'Your text output is auto-synthesized as audio. You can freely '
-            'mix languages (the system detects scripts and routes each to '
-            'the right TTS engine). For rich audio, embed tags: '
-            '<music genre="jazz" duration="10">mood</music> for music, '
-            '<sing duration="15">lyrics</sing> for singing voice.')
+        _tts_ok = False
+        try:
+            from tts.tts_engine import get_tts_engine
+            _tts_ok = get_tts_engine() is not None
+        except Exception:
+            pass
+        if _tts_ok:
+            parts.append(
+                'Your text output is auto-synthesized as audio. You can freely '
+                'mix languages (the system detects scripts and routes each to '
+                'the right TTS engine). For rich audio, embed tags: '
+                '<music genre="jazz" duration="10">mood</music> for music, '
+                '<sing duration="15">lyrics</sing> for singing voice.')
 
     # Dynamic capabilities from orchestrator (any mode)
     try:
@@ -2384,8 +2391,8 @@ def get_tools(req_tool, is_first: bool = False):
         try:
             from integrations.providers.agent_tools import get_provider_tools
             tools += get_provider_tools()
-        except Exception:
-            pass  # Non-blocking — provider tools are optional
+        except Exception as _prov_err:
+            app.logger.debug(f"Provider gateway tools not loaded: {_prov_err}")
 
         # Wrap all tool functions with logging
         for t in tools:
@@ -4586,10 +4593,22 @@ def _tts_synthesize_and_publish(text, user_id, request_id):
                 # Also push via SSE directly (publish_async → MessageBus doesn't reach SSE clients)
                 try:
                     import __main__ as _main_mod
-                    if hasattr(_main_mod, 'broadcast_sse_event'):
+                    _has_sse = hasattr(_main_mod, 'broadcast_sse_event')
+                    app.logger.info(f"TTS SSE: __main__={_main_mod.__name__}, has_broadcast={_has_sse}")
+                    if _has_sse:
                         _main_mod.broadcast_sse_event('message', _tts_payload, user_id=user_id)
-                except Exception:
-                    pass
+                    else:
+                        # Fallback: try importing from main_module directly
+                        try:
+                            import sys as _sys
+                            _mm = _sys.modules.get('main_module')
+                            if _mm and hasattr(_mm, 'broadcast_sse_event'):
+                                _mm.broadcast_sse_event('message', _tts_payload, user_id=user_id)
+                                app.logger.info("TTS SSE: broadcast via main_module fallback")
+                        except Exception:
+                            pass
+                except Exception as _sse_err:
+                    app.logger.warning(f"TTS SSE broadcast error: {_sse_err}")
                 app.logger.info(f"TTS async: published successfully")
             else:
                 app.logger.warning(f"TTS async: no audio file — path={audio_path}, exists={os.path.isfile(audio_path) if audio_path else False}")
