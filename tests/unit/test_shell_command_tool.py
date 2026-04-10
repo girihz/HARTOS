@@ -151,6 +151,88 @@ class TestShellCommandDenylist:
         mock_run.assert_called_once()
 
 
+class TestShellCommandHomoglyphBypass:
+    """Regression: attackers can't evade the denylist with full-width /
+    compatibility / zero-width unicode lookalikes.
+
+    Security audit April 2026 flagged this as MEDIUM severity: the old
+    denylist used text.lower() + ASCII regex, so 'ｒｍ -rf ~' slipped past
+    every pattern. NFKC normalization + zero-width stripping now applies
+    to the denylist check only (executed command stays as raw user text,
+    so legitimate unicode filenames still work)."""
+
+    @pytest.mark.parametrize('cmd', [
+        # Full-width ASCII block (U+FF01..U+FF5E)
+        'ｒｍ -rf ~',
+        'ｒｍ -rf /',
+        'ＲＭ -RF ~',
+        # Full-width C: + 'format'
+        'ｆｏｒｍａｔ Ｃ:',
+        # Mixed: real 'rm' but full-width flag / path
+        'rm -rf ／',
+        # Zero-width splitters injected inside the command name
+        'r\u200cm -rf ~',                 # ZWNJ between r and m
+        'r\u200dm -rf ~',                 # ZWJ
+        'r\ufeffm -rf ~',                 # BOM
+        # NBSP instead of space
+        'rm\u00a0-rf\u00a0~',
+        # Full-width shutdown
+        'ｓｈｕｔｄｏｗｎ -h now',
+        # Full-width del /s /q
+        'ｄｅｌ /s /q Ｃ:\\Users',
+    ])
+    @patch('hart_intelligence_entry.subprocess.run')
+    def test_homoglyph_bypass_blocked(self, mock_run, cmd):
+        result = _handle_shell_command_tool(cmd)
+        assert 'refused' in result.lower(), f'bypass slipped through: {cmd!r}'
+        assert 'destructive pattern' in result.lower()
+        mock_run.assert_not_called()
+
+    @pytest.mark.parametrize('cmd', [
+        # Ligature in filename should still reach subprocess unchanged.
+        # (Not a denylist hit — just making sure legitimate unicode
+        # doesn't get mangled by the check path.)
+        'cat ﬁle.txt',
+        # Full-width in non-denylisted contexts
+        'echo ｈｅｌｌｏ',
+        # Japanese filename
+        'cat テスト.txt',
+        # Emoji in echo
+        'echo 🚀 deploy',
+    ])
+    @patch('hart_intelligence_entry.subprocess.run')
+    def test_legitimate_unicode_still_allowed(self, mock_run, cmd):
+        mock_run.return_value = MagicMock(returncode=0, stdout='ok', stderr='')
+        result = _handle_shell_command_tool(cmd)
+        assert 'refused' not in result.lower()
+        mock_run.assert_called_once()
+
+    @patch('hart_intelligence_entry.subprocess.run')
+    def test_raw_text_is_executed_not_normalized(self, mock_run):
+        """If the raw command contains legitimate unicode filename chars,
+        subprocess must receive the RAW bytes, not the NFKC-normalized
+        version. Otherwise 'cat ﬁle.txt' (U+FB01) would execute as
+        'cat file.txt' and fail to find the real ligature file."""
+        mock_run.return_value = MagicMock(returncode=0, stdout='ok', stderr='')
+        cmd = 'cat ﬁle.txt'
+        _handle_shell_command_tool(cmd)
+        call_args = mock_run.call_args
+        argv = call_args[0][0]  # first positional arg is the argv list
+        # argv is ['cmd', '/c', <text>] or ['/bin/sh', '-c', <text>]
+        executed = argv[-1]
+        assert 'ﬁ' in executed, (
+            f'Normalized text was executed instead of raw — '
+            f'expected ligature ﬁ in {executed!r}'
+        )
+
+    @patch('hart_intelligence_entry.subprocess.run')
+    def test_denylist_check_is_case_insensitive_after_normalize(self, mock_run):
+        """Mixed-case full-width should still hit the denylist."""
+        result = _handle_shell_command_tool('Ｒm -RF ~')
+        assert 'refused' in result.lower()
+        mock_run.assert_not_called()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Timeout handling
 # ═══════════════════════════════════════════════════════════════════════════
