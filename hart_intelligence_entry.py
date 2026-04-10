@@ -2117,25 +2117,56 @@ def _handle_computer_action_tool(input_text: str) -> str:
     try:
         os.environ.setdefault('HEVOLVE_VLM_UNIFIED', 'true')
         from integrations.vlm.vlm_adapter import execute_vlm_instruction
+        # 180s is the floor for cold-start runs: first VLM forward pass alone
+        # can take 8-15s on the 4B model, and a realistic 12-iteration loop
+        # needs ~2.5 minutes. HEVOLVE_COMPUTER_ACTION_ETA lets the user raise
+        # it further without touching code.
+        max_eta = int(os.environ.get('HEVOLVE_COMPUTER_ACTION_ETA', '180'))
         message = {
             'instruction_to_vlm_agent': input_text,
             'user_id': str(user_id or 'guest'),
             'prompt_id': str(prompt_id or 0),
             'os_to_control': 'windows' if sys.platform == 'win32' else (
                 'macos' if sys.platform == 'darwin' else 'linux'),
-            'max_ETA_in_seconds': 60,
+            'max_ETA_in_seconds': max_eta,
         }
         result = execute_vlm_instruction(message)
-        if result and isinstance(result, dict):
-            responses = result.get('extracted_responses', [])
+        if not (result and isinstance(result, dict)):
+            return "Computer action completed (no detailed response)."
+
+        exit_reason = result.get('exit_reason', 'done')
+        responses = result.get('extracted_responses', [])
+        elapsed = result.get('execution_time_seconds', 0)
+        n_actions = len(responses)
+
+        if exit_reason == 'done':
             if responses:
-                last = responses[-1]
-                content = last.get('content', '')
-                if isinstance(content, dict):
-                    return f"Action: {content.get('action', '?')} — {content.get('reasoning', '')}"
-                return str(content)[:500]
-            return f"Completed in {result.get('execution_time_seconds', 0):.0f}s"
-        return "Computer action completed (no detailed response)."
+                last_content = responses[-1].get('content', '')
+                if isinstance(last_content, str):
+                    return last_content[:500]
+                return f"Done — {n_actions} actions in {elapsed:.0f}s."
+            return f"Done in {elapsed:.0f}s."
+
+        # Non-done paths: be honest to the router so it doesn't confabulate.
+        # The router sees this string as the tool's final answer and should
+        # turn it into a truthful user reply instead of pretending success.
+        tail_action = None
+        for resp in reversed(responses):
+            if resp.get('type') == 'action':
+                tail_action = resp.get('content', {})
+                break
+
+        reason_msg = {
+            'timeout': f"I tried for {elapsed:.0f}s ({n_actions} actions) but ran out of time before finishing.",
+            'max_iterations': f"I tried {n_actions} actions but the task didn't reach a clear completion.",
+            'action_error': f"I hit errors on 3 consecutive actions after trying {n_actions} steps and stopped to avoid breaking things.",
+            'grounding_failed': f"I couldn't reliably locate the UI element after {n_actions} attempts.",
+        }.get(exit_reason, f"Loop exited with reason '{exit_reason}' after {n_actions} actions.")
+
+        if tail_action:
+            reason_msg += f" Last attempt: {tail_action.get('action', '?')} ({tail_action.get('reasoning', '')[:120]})."
+        reason_msg += " Want me to try a different approach, or should I describe the steps so you can do it manually?"
+        return reason_msg
     except ImportError:
         return "Computer use unavailable — VLM adapter not installed."
     except Exception as e:

@@ -1352,6 +1352,7 @@ class TestFullActionLoop:
         result = run_local_agentic_loop(message, tier='inprocess', max_iterations=10)
 
         assert result['status'] == 'success'
+        assert result['exit_reason'] == 'done'
         assert len(result['extracted_responses']) == 2
 
         # First response should be the action
@@ -1408,7 +1409,9 @@ class TestFullActionLoop:
 
         with patch('integrations.vlm.local_loop.time.time', side_effect=advancing_time):
             result = run_local_agentic_loop(message, tier='inprocess', max_iterations=100)
-        assert result['status'] == 'success'
+        # Loop now reports incomplete+timeout instead of confidently claiming success
+        assert result['status'] == 'incomplete'
+        assert result['exit_reason'] == 'timeout'
         # Should have stopped after first iteration due to ETA timeout
         assert len(result['extracted_responses']) <= 1
 
@@ -1448,6 +1451,7 @@ class TestFullActionLoop:
 
         result = run_local_agentic_loop(message, tier='inprocess', max_iterations=5)
         assert result['status'] == 'success'
+        assert result['exit_reason'] == 'done'
         # Should have error + completion
         assert len(result['extracted_responses']) == 2
         assert result['extracted_responses'][0]['type'] == 'error'

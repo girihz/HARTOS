@@ -1301,6 +1301,10 @@ class TestComputerUseLocalLoop:
             self._make_message(max_eta=0), tier='inprocess', max_iterations=100)
         # Should exit much earlier than 100 iterations
         assert len(result['extracted_responses']) < 100
+        # Exit reason must be 'timeout' and status 'incomplete' so the
+        # router doesn't confidently claim success on a timed-out run.
+        assert result['status'] == 'incomplete'
+        assert result['exit_reason'] == 'timeout'
 
     def test_build_vision_prompt_first_iteration(self):
         """First prompt says 'Analyze the UI elements'."""
