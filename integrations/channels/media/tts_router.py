@@ -62,6 +62,11 @@ class TTSEngineSpec:
                                              # on the tool module; None for
                                              # CPU-only engines that have no
                                              # subprocess worker.
+    required_package: Optional[str] = None   # pip package name that must be
+                                             # importable at runtime; None
+                                             # for engines whose deps are
+                                             # bundled (e.g. piper) or CPU-only
+                                             # with no extra deps.
     sample_rate: int = 24000
 
 
@@ -80,6 +85,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_module='integrations.service_tools.chatterbox_tool',
         tool_function='chatterbox_synthesize',
         tool_worker_attr='_turbo',
+        required_package='chatterbox',
     ),
     'luxtts': TTSEngineSpec(
         engine_id='luxtts',
@@ -107,6 +113,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_module='integrations.service_tools.cosyvoice_tool',
         tool_function='cosyvoice_synthesize',
         tool_worker_attr='_tool',
+        required_package='cosyvoice',
     ),
     'f5_tts': TTSEngineSpec(
         engine_id='f5_tts',
@@ -121,6 +128,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_module='integrations.service_tools.f5_tts_tool',
         tool_function='f5_synthesize',
         tool_worker_attr='_tool',
+        required_package='f5_tts',
     ),
     'indic_parler': TTSEngineSpec(
         engine_id='indic_parler',
@@ -138,6 +146,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_module='integrations.service_tools.indic_parler_tool',
         tool_function='indic_parler_synthesize',
         tool_worker_attr='_tool',
+        required_package='parler_tts',
     ),
     'chatterbox_ml': TTSEngineSpec(
         engine_id='chatterbox_ml',
@@ -156,6 +165,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_module='integrations.service_tools.chatterbox_tool',
         tool_function='chatterbox_ml_synthesize',
         tool_worker_attr='_ml',
+        required_package='chatterbox',
     ),
     'pocket_tts': TTSEngineSpec(
         engine_id='pocket_tts',
