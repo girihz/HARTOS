@@ -458,12 +458,21 @@ class RuntimeToolManager:
             logger.info(f"Killed {tool_name} server (PID {proc.pid})")
 
     def _is_server_alive(self, tool_name: str) -> bool:
-        """Check if a sidecar server is still running."""
+        """Check if a sidecar server is still running.
+
+        For `whisper` the "server" is the STT subprocess worker managed
+        by `whisper_tool._stt_tool`; check its lifetime via ToolWorker.
+        For other in-process tools there is no separate process to
+        check — return False.
+        """
         config = TOOL_CONFIGS.get(tool_name, {})
         if config.get('is_inprocess'):
             if tool_name == 'whisper':
-                from .whisper_tool import _whisper_model
-                return _whisper_model is not None
+                try:
+                    from .whisper_tool import _stt_tool
+                    return _stt_tool.is_alive()
+                except Exception:
+                    return False
             return False
 
         proc = self._processes.get(tool_name)

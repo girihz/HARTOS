@@ -65,6 +65,17 @@ class ModelLoader:
         """Check if model files are on disk."""
         return False
 
+    def is_loaded(self, entry: ModelEntry) -> bool:
+        """Live probe — is the model actually running right now?
+
+        Default reads `entry.loaded` (the catalog flag). Subclasses that
+        have a real liveness signal (a running subprocess, an HTTP
+        health endpoint, etc.) SHOULD override this. Catalog state alone
+        can drift from reality after idle auto-stop, crashes, or
+        external process kills.
+        """
+        return bool(getattr(entry, 'loaded', False))
+
 
 class ModelOrchestrator:
     """Compute-aware model loader that works for ANY model type.
@@ -737,8 +748,51 @@ class ModelOrchestrator:
 
     # ── Dashboard ─────────────────────────────────────────────────
 
+    def reconcile_live_state(self) -> int:
+        """Sync catalog flags with the actual runtime state of each loader.
+
+        For every catalog entry, ask the matching loader "is this
+        actually loaded right now?" and update the catalog if the
+        answer differs from the stored flag. This catches:
+
+        - Workers that idle-auto-stopped (catalog says loaded, worker dead)
+        - Workers that crashed (same)
+        - Workers started outside the orchestrator (loaded but catalog False)
+
+        Returns the number of entries whose state changed.
+        """
+        changed = 0
+        for entry in self._catalog.list_all():
+            loader = self._loaders.get(entry.model_type)
+            if loader is None:
+                continue
+            try:
+                live = bool(loader.is_loaded(entry))
+            except Exception as e:
+                logger.debug(f"is_loaded probe failed for {entry.id}: {e}")
+                continue
+            if live != bool(entry.loaded):
+                if live:
+                    self._catalog.mark_loaded(
+                        entry.id, device=entry.device or 'unknown',
+                    )
+                else:
+                    self._catalog.mark_unloaded(entry.id)
+                    self._release_vram(entry)
+                changed += 1
+                logger.info(
+                    f"reconcile: {entry.id} catalog={entry.loaded} → live={live}"
+                )
+        return changed
+
     def get_status(self) -> dict:
-        """Full system state for admin dashboard."""
+        """Full system state for admin dashboard.
+
+        Reconciles catalog flags with live loader state before returning,
+        so the UI always sees reality (not a stale snapshot).
+        """
+        self.reconcile_live_state()
+
         cs = self._get_compute_state()
         entries = self._catalog.to_json()
 
