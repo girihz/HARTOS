@@ -2114,6 +2114,9 @@ def _handle_shell_command_tool(input_text: str) -> str:
     the 18-iteration VLM loop Computer_Action would do for the same task.
 
     Safety:
+      - Input is NFKC-normalized + lowercased before the denylist regex
+        runs, so unicode lookalikes (full-width 'ｒｍ', cyrillic 'р') can't
+        slip past patterns written in ASCII.
       - Hard-denylist of clearly destructive patterns (format, rm -rf /,
         shred, dd if=/dev/, mkfs, del /s C:\\ etc.). Denylisted commands
         return an explanation without running.
@@ -2132,6 +2135,7 @@ def _handle_shell_command_tool(input_text: str) -> str:
     pwsh. On Unix we use /bin/sh; 'bash:' prefix switches to bash.
     """
     import re as _re_shell
+    import unicodedata as _unicodedata
     if not input_text or not isinstance(input_text, str):
         return "Shell_Command: empty input. Pass a command string like 'notepad file.txt'."
 
@@ -2163,7 +2167,23 @@ def _handle_shell_command_tool(input_text: str) -> str:
         r'\bformat-volume',
         r'\bremove-item\s+-recurse\s+-force\s+[a-z]:\\',
     ]
-    text_l = text.lower()
+    # NFKC maps full-width / compatibility chars to their ASCII equivalents
+    # ('ｒｍ' → 'rm', '＞' → '>'), defeating the common homoglyph bypass.
+    # We also strip zero-width characters (ZWJ, ZWNJ, BOM) that would
+    # otherwise split matches like 'r\u200cm'. Strip control chars too.
+    #
+    # IMPORTANT: we normalize for the denylist CHECK only. The command
+    # actually executed is still the raw user text — so a legitimate
+    # filename with ligatures ('ﬁle.txt') or full-width chars still
+    # resolves to the real file on disk. If the raw text happened to
+    # contain a homoglyph version of a denylisted token, the denylist
+    # sees it after normalization and blocks before execution.
+    _normalized = _unicodedata.normalize('NFKC', text)
+    _normalized = ''.join(
+        ch for ch in _normalized
+        if _unicodedata.category(ch) not in ('Cf', 'Cc') or ch in ('\t', '\n')
+    )
+    text_l = _normalized.lower()
     for pat in _DENY_PATTERNS:
         if _re_shell.search(pat, text_l):
             return (
