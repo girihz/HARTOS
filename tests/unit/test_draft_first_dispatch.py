@@ -378,8 +378,11 @@ class TestTelemetryHooks:
 
     def test_latency_recorded_on_registry(self, dispatcher, monkeypatch):
         _mock_guardrails(monkeypatch)
+        # Confidence >= floor so delegate stays 'none' — isolates the
+        # single-call telemetry path (no expert scheduling).
+        draft_raw = '{"reply": "ok", "delegate": "none", "confidence": 0.95}'
         with patch.object(dispatcher, '_dispatch_to_model',
-                          return_value='{"reply": "ok", "delegate": "none"}'), \
+                          return_value=draft_raw), \
              patch.object(dispatcher, '_record_interaction_safely'), \
              patch.object(dispatcher._registry, 'record_latency') as mock_latency, \
              patch.object(dispatcher._registry, 'record_energy') as mock_energy:
@@ -388,3 +391,168 @@ class TestTelemetryHooks:
         mock_latency.assert_called_once()
         mock_energy.assert_called_once()
         assert mock_latency.call_args.args[0] == 'qwen3.5-0.8b-draft'
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Persona injection (Path 2: system agents)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestPersonaInjection:
+    """System agents like the Nunba personality agent have a custom
+    system_prompt. When chat_route routes one through draft-first, the
+    persona must be threaded through so the standby reply comes back
+    in character instead of generic first-responder voice."""
+
+    def test_no_persona_no_persona_block(self, dispatcher):
+        built = dispatcher._build_draft_classifier_prompt('hi there')
+        assert 'persona' not in built.lower()
+        assert 'You are a fast local first-responder' in built
+
+    def test_persona_is_prepended(self, dispatcher):
+        persona = (
+            'You are Nunba, a friendly local assistant who always uses '
+            'rustic metaphors when describing technical topics.'
+        )
+        built = dispatcher._build_draft_classifier_prompt(
+            'what is python', agent_persona=persona)
+        assert 'You are playing the following persona' in built
+        assert 'Nunba' in built
+        assert 'rustic metaphors' in built
+        # JSON schema is still there downstream of the persona block
+        assert '"delegate"' in built
+
+    def test_long_persona_is_capped(self, dispatcher):
+        """Persona over 800 chars must be snipped so a long system prompt
+        doesn't blow the 0.8B model's context budget."""
+        long_persona = 'X' * 2000
+        built = dispatcher._build_draft_classifier_prompt(
+            'hi', agent_persona=long_persona)
+        # The raw 'X' * 2000 never appears, only the 800-char snippet
+        assert 'X' * 2000 not in built
+        # But we DO have a long stretch of X's (up to the cap)
+        assert 'X' * 800 in built
+
+    def test_persona_flows_through_dispatch(
+            self, dispatcher, monkeypatch):
+        _mock_guardrails(monkeypatch)
+        captured_prompt = {}
+
+        def fake_dispatch(model, prompt, *a, **kw):
+            captured_prompt['text'] = prompt
+            return '{"reply": "G\'day!", "delegate": "none", "confidence": 0.9}'
+
+        with patch.object(dispatcher, '_dispatch_to_model',
+                          side_effect=fake_dispatch), \
+             patch.object(dispatcher, '_record_interaction_safely'):
+            result = dispatcher.dispatch_draft_first(
+                'how are you',
+                user_id='u1', prompt_id='p1',
+                agent_persona='You are Aussie Bot — reply with G\'day slang.',
+            )
+
+        assert 'Aussie Bot' in captured_prompt['text']
+        assert result['response'] == "G'day!"
+        assert result['delegate'] == 'none'
+
+    def test_empty_persona_treated_as_absent(self, dispatcher):
+        built_empty = dispatcher._build_draft_classifier_prompt(
+            'hi', agent_persona='')
+        built_none = dispatcher._build_draft_classifier_prompt(
+            'hi', agent_persona=None)
+        # Both should omit the persona block
+        assert 'persona' not in built_empty.lower()
+        assert 'persona' not in built_none.lower()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Reasoning-quality guard: low-confidence "none" must escalate
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestConfidenceFloor:
+    """The draft model must never regress reasoning quality. A confident
+    'none' is fine (greeting, single-fact); an unsure 'none' must still
+    schedule an expert verifier in the background so the user ends up
+    with the better answer."""
+
+    def test_high_confidence_none_no_expert(self, dispatcher, monkeypatch):
+        _mock_guardrails(monkeypatch)
+        draft_raw = '{"reply": "Hello!", "delegate": "none", "confidence": 0.95}'
+        with patch.object(dispatcher, '_dispatch_to_model',
+                          return_value=draft_raw), \
+             patch.object(dispatcher, '_record_interaction_safely'), \
+             patch.object(dispatcher._expert_pool, 'submit') as mock_submit:
+            result = dispatcher.dispatch_draft_first(
+                'hi', user_id='u1', prompt_id='p1')
+        assert result['delegate'] == 'none'
+        assert result['expert_pending'] is False
+        mock_submit.assert_not_called()
+
+    def test_low_confidence_none_escalates_to_local(
+            self, dispatcher, monkeypatch):
+        """Confidence below floor → treat 'none' as 'local' so expert runs."""
+        _mock_guardrails(monkeypatch)
+        draft_raw = '{"reply": "I think so?", "delegate": "none", "confidence": 0.3}'
+        with patch.object(dispatcher, '_dispatch_to_model',
+                          return_value=draft_raw), \
+             patch.object(dispatcher, '_record_interaction_safely'), \
+             patch.object(dispatcher, '_check_and_reserve_budget',
+                          return_value=True), \
+             patch.object(dispatcher._expert_pool, 'submit') as mock_submit:
+            result = dispatcher.dispatch_draft_first(
+                'what is the capital of Burkina Faso',
+                user_id='u1', prompt_id='p1')
+        # Draft reply still delivered as standby
+        assert result['response'] == 'I think so?'
+        # But delegate was promoted + expert scheduled
+        assert result['delegate'] == 'local'
+        assert result['expert_pending'] is True
+        mock_submit.assert_called_once()
+
+    def test_threshold_boundary_just_above(
+            self, dispatcher, monkeypatch):
+        """0.86 (just above floor 0.85) → stays 'none', no expert."""
+        _mock_guardrails(monkeypatch)
+        draft_raw = '{"reply": "yes", "delegate": "none", "confidence": 0.86}'
+        with patch.object(dispatcher, '_dispatch_to_model',
+                          return_value=draft_raw), \
+             patch.object(dispatcher, '_record_interaction_safely'), \
+             patch.object(dispatcher._expert_pool, 'submit') as mock_submit:
+            result = dispatcher.dispatch_draft_first(
+                'yes or no', user_id='u1', prompt_id='p1')
+        assert result['delegate'] == 'none'
+        assert result['expert_pending'] is False
+        mock_submit.assert_not_called()
+
+    def test_threshold_boundary_just_below(
+            self, dispatcher, monkeypatch):
+        """0.84 (just below floor 0.85) → escalates."""
+        _mock_guardrails(monkeypatch)
+        draft_raw = '{"reply": "yes", "delegate": "none", "confidence": 0.84}'
+        with patch.object(dispatcher, '_dispatch_to_model',
+                          return_value=draft_raw), \
+             patch.object(dispatcher, '_record_interaction_safely'), \
+             patch.object(dispatcher, '_check_and_reserve_budget',
+                          return_value=True), \
+             patch.object(dispatcher._expert_pool, 'submit') as mock_submit:
+            result = dispatcher.dispatch_draft_first(
+                'yes or no', user_id='u1', prompt_id='p1')
+        assert result['delegate'] == 'local'
+        mock_submit.assert_called_once()
+
+    def test_missing_confidence_defaults_to_zero_escalates(
+            self, dispatcher, monkeypatch):
+        """No confidence field → treated as 0.0, escalates."""
+        _mock_guardrails(monkeypatch)
+        draft_raw = '{"reply": "hi", "delegate": "none"}'
+        with patch.object(dispatcher, '_dispatch_to_model',
+                          return_value=draft_raw), \
+             patch.object(dispatcher, '_record_interaction_safely'), \
+             patch.object(dispatcher, '_check_and_reserve_budget',
+                          return_value=True), \
+             patch.object(dispatcher._expert_pool, 'submit') as mock_submit:
+            result = dispatcher.dispatch_draft_first(
+                'hi', user_id='u1', prompt_id='p1')
+        assert result['delegate'] == 'local'
+        mock_submit.assert_called_once()

@@ -5229,14 +5229,24 @@ def chat():
     probe = data.get('probe', None)
     intermediate = data.get('intermediate', None)
     speculative = data.get('speculative', False)
-    # Draft-first dispatch: Qwen3.5-0.8B answers immediately with a standby
-    # reply + delegate signal, then the real model runs in the background
-    # and its answer is pushed via crossbar. Opt-in via HEVOLVE_DRAFT_FIRST=1
-    # environment variable or explicit `draft_first=True` on the request.
-    draft_first = bool(
-        data.get('draft_first', False)
-        or os.environ.get('HEVOLVE_DRAFT_FIRST', '') == '1'
-    )
+    # Draft-first dispatch: Qwen3.5-0.8B standby reply + delegate signal.
+    # Default ON — the dispatcher gracefully returns 'no_draft_model' when
+    # the 0.8B isn't loaded and we transparently fall through to the normal
+    # path, so enabling by default is safe on fresh installs. Request body
+    # or env var can still override:
+    #   HEVOLVE_DRAFT_FIRST=0  → hard off (overrides request body)
+    #   HEVOLVE_DRAFT_FIRST=1  → hard on  (overrides request body)
+    #   draft_first in body     → per-request override
+    #   (nothing)               → default ON
+    _draft_first_env = os.environ.get('HEVOLVE_DRAFT_FIRST', '').strip()
+    if _draft_first_env == '0':
+        draft_first = False
+    elif _draft_first_env == '1':
+        draft_first = True
+    elif 'draft_first' in data:
+        draft_first = bool(data['draft_first'])
+    else:
+        draft_first = True
     model_config = data.get('model_config', None)
     task_source = data.get('task_source', 'own')
     thread_local_data.set_task_source(task_source)
@@ -5291,34 +5301,6 @@ def chat():
             from integrations.agent_engine.budget_gate import estimate_llm_cost_spark
             _est_cost = estimate_llm_cost_spark(prompt)
             app.logger.debug(f"Estimated LLM cost: {_est_cost} Spark for user={user_id}")
-        except ImportError:
-            pass
-
-    # Draft-first dispatch: Qwen3.5-0.8B standby reply + delegate signal.
-    # Opt-in via HEVOLVE_DRAFT_FIRST=1 or request body. Falls through to the
-    # normal path silently when the draft model isn't registered/loaded, so
-    # flipping the flag is safe even before the 0.8B model is downloaded.
-    if draft_first and prompt and user_id and prompt_id:
-        try:
-            from integrations.agent_engine.speculative_dispatcher import get_speculative_dispatcher
-            dispatcher = get_speculative_dispatcher()
-            result = dispatcher.dispatch_draft_first(
-                prompt, str(user_id), str(prompt_id))
-            # Only commit to the draft-first response when we actually got
-            # one. On 'no_draft_model' / circuit breaker / guardrail block
-            # the error field is set and result['response'] is empty —
-            # fall through to the normal path so the user still gets served.
-            if result.get('response'):
-                return jsonify({
-                    'response': result['response'],
-                    'Agent_status': 'Draft-First Mode',
-                    'speculation_id': result.get('speculation_id'),
-                    'expert_pending': result.get('expert_pending', False),
-                    'delegate': result.get('delegate'),
-                    'draft_model': result.get('draft_model'),
-                    'draft_confidence': result.get('draft_confidence'),
-                    'latency_ms': result.get('latency_ms'),
-                })
         except ImportError:
             pass
 
@@ -5451,6 +5433,40 @@ def chat():
                 review_agents[_ak] = False
                 conversation_agent[_ak] = True
                 _touch_agent_timestamp(_ak)
+
+    # ── Draft-first dispatch (Path 1: default chat  +  Path 2: system agents) ──
+    # This runs AFTER the prompt_id branch so we know whether the request
+    # is bound for autogen CREATE/REUSE. Skipped entirely for agentic
+    # orchestration — those are multi-step flows a 0.8B draft can't handle.
+    # For system agents (is_system_agent=True), custom_prompt is already
+    # populated with the persona and is forwarded so the standby reply
+    # comes back in character.
+    _is_agentic_orchestration = bool(create_agent) or bool(autonomous)
+    if draft_first and prompt and user_id and not _is_agentic_orchestration:
+        try:
+            from integrations.agent_engine.speculative_dispatcher import get_speculative_dispatcher
+            dispatcher = get_speculative_dispatcher()
+            result = dispatcher.dispatch_draft_first(
+                prompt, str(user_id),
+                str(prompt_id) if prompt_id else str(request_id or 'anon'),
+                agent_persona=custom_prompt or None,
+            )
+            # Only commit when the dispatcher actually produced a reply.
+            # no_draft_model / circuit breaker / guardrail block all leave
+            # result['response'] empty — fall through to the normal path.
+            if result.get('response'):
+                return jsonify({
+                    'response': result['response'],
+                    'Agent_status': 'Draft-First Mode',
+                    'speculation_id': result.get('speculation_id'),
+                    'expert_pending': result.get('expert_pending', False),
+                    'delegate': result.get('delegate'),
+                    'draft_model': result.get('draft_model'),
+                    'draft_confidence': result.get('draft_confidence'),
+                    'latency_ms': result.get('latency_ms'),
+                })
+        except ImportError:
+            pass
 
     if create_agent:
         # Generate prompt_id server-side if not provided

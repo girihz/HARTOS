@@ -35,6 +35,14 @@ logger = logging.getLogger('hevolve_social')
 _SIMILARITY_THRESHOLD = 0.80
 _RESPONSE_ADEQUATE = 'RESPONSE_ADEQUATE'
 
+# Minimum draft confidence required to commit the draft's reply as the
+# FINAL answer (delegate="none" path). Below this we schedule an expert
+# verification in the background regardless of what the draft said —
+# reasoning quality must never regress just because the 0.8B thought
+# it could handle the question. A confident "none" still takes the
+# fast path; an unsure "none" is treated as a quiet "local".
+_DRAFT_CONFIDENCE_FLOOR = 0.85
+
 
 class SpeculativeDispatcher:
     """Fast-first, expert-takeover speculative execution engine.
@@ -169,7 +177,8 @@ class SpeculativeDispatcher:
 
     def dispatch_draft_first(self, prompt: str, user_id: str, prompt_id: str,
                              goal_id: str = None, goal_type: str = 'general',
-                             node_id: str = None) -> dict:
+                             node_id: str = None,
+                             agent_persona: Optional[str] = None) -> dict:
         """Draft-first dispatch: tiny model answers immediately, signals whether
         to delegate.
 
@@ -221,7 +230,8 @@ class SpeculativeDispatcher:
             }
 
         # ── 2. Dispatch the draft with the classifier prompt ──
-        draft_prompt = self._build_draft_classifier_prompt(prompt)
+        draft_prompt = self._build_draft_classifier_prompt(
+            prompt, agent_persona=agent_persona)
         start = time.time()
         draft_raw = self._dispatch_to_model(
             draft_model, draft_prompt, user_id, prompt_id, goal_type, goal_id)
@@ -233,6 +243,20 @@ class SpeculativeDispatcher:
         draft_reply = parsed.get('reply') or draft_raw.strip()[:500]
         delegate = parsed.get('delegate', 'local')  # default on parse fail
         confidence = float(parsed.get('confidence') or 0.0)
+        # REASONING-QUALITY GUARD: an unsure "none" is not good enough to
+        # ship as the final answer. Promote it to "local" so an expert
+        # verifier still runs in the background. Keeps the single
+        # dispatch path — this is just delegate normalization, no new
+        # branch below. Ensures the draft model can never regress the
+        # reasoning quality the user gets — worst case they see the
+        # draft reply briefly as a standby and it's replaced when the
+        # 4B expert finishes via the existing crossbar delivery.
+        if delegate == 'none' and confidence < _DRAFT_CONFIDENCE_FLOOR:
+            logger.info(
+                f"draft-first: low-confidence 'none' ({confidence:.2f} < "
+                f"{_DRAFT_CONFIDENCE_FLOOR}) → escalating to local verifier"
+            )
+            delegate = 'local'
         self._record_interaction_safely(
             user_id=user_id, prompt_id=prompt_id, prompt=prompt,
             response=draft_reply, model_id=draft_model.model_id,
@@ -285,16 +309,36 @@ class SpeculativeDispatcher:
             return reason or 'constitutional filter'
         return None
 
-    def _build_draft_classifier_prompt(self, user_prompt: str) -> str:
+    def _build_draft_classifier_prompt(
+        self, user_prompt: str, agent_persona: Optional[str] = None,
+    ) -> str:
         """Wrap the user prompt with the draft-first classifier instruction.
 
         The draft's job is twofold: (a) produce a short standby reply fit
         for simple chat, (b) self-assess whether a bigger model is needed.
         The JSON schema is flat so a 0.8B model can reliably emit it.
+
+        If ``agent_persona`` is provided, it's prepended to the instruction
+        so the draft's reply is in the voice of the custom / system agent
+        the user is talking to instead of a generic first-responder. Used
+        for the Path-2 system-agent case (e.g. Nunba personality agent).
+
         Owns ONLY prompt construction — no I/O, no side effects.
         """
+        persona_block = ''
+        if agent_persona:
+            # Cap the persona at ~800 chars so a long system prompt doesn't
+            # blow the 0.8B model's context budget on a single-turn call.
+            snippet = agent_persona.strip()[:800]
+            persona_block = (
+                "You are playing the following persona — reply in this "
+                "voice, but keep the JSON schema below exactly as "
+                "specified. Persona:\n"
+                f"{snippet}\n\n"
+            )
         return (
-            "You are a fast local first-responder. Reply to the user in a "
+            persona_block
+            + "You are a fast local first-responder. Reply to the user in a "
             "short helpful way, and ALSO decide whether a bigger model "
             "should take over.\n\n"
             f"User: {user_prompt}\n\n"
