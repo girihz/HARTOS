@@ -302,8 +302,9 @@ class TestDistributedWorkerLoop:
     def test_worker_tick_claims_and_executes(self, mock_coordinator, mock_task,
                                               mock_guardrails):
         """Worker claims a task, executes via /chat, submits result."""
-        wl_mod = sys.modules['integrations.distributed_agent.worker_loop']
+        # Import first so sys.modules lookup succeeds regardless of test order.
         from integrations.distributed_agent.worker_loop import DistributedWorkerLoop
+        wl_mod = sys.modules['integrations.distributed_agent.worker_loop']
         mock_coordinator.claim_next_task.return_value = mock_task
 
         mock_resp = MagicMock()
@@ -331,8 +332,9 @@ class TestDistributedWorkerLoop:
                                                mock_guardrails):
         """Worker handles /chat failure gracefully."""
         import requests as _requests
-        wl_mod = sys.modules['integrations.distributed_agent.worker_loop']
+        # Import before sys.modules lookup so this test is order-independent.
         from integrations.distributed_agent.worker_loop import DistributedWorkerLoop
+        wl_mod = sys.modules['integrations.distributed_agent.worker_loop']
         mock_coordinator.claim_next_task.return_value = mock_task
 
         wl = DistributedWorkerLoop()
