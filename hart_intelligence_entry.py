@@ -5229,6 +5229,14 @@ def chat():
     probe = data.get('probe', None)
     intermediate = data.get('intermediate', None)
     speculative = data.get('speculative', False)
+    # Draft-first dispatch: Qwen3.5-0.8B answers immediately with a standby
+    # reply + delegate signal, then the real model runs in the background
+    # and its answer is pushed via crossbar. Opt-in via HEVOLVE_DRAFT_FIRST=1
+    # environment variable or explicit `draft_first=True` on the request.
+    draft_first = bool(
+        data.get('draft_first', False)
+        or os.environ.get('HEVOLVE_DRAFT_FIRST', '') == '1'
+    )
     model_config = data.get('model_config', None)
     task_source = data.get('task_source', 'own')
     thread_local_data.set_task_source(task_source)
@@ -5283,6 +5291,34 @@ def chat():
             from integrations.agent_engine.budget_gate import estimate_llm_cost_spark
             _est_cost = estimate_llm_cost_spark(prompt)
             app.logger.debug(f"Estimated LLM cost: {_est_cost} Spark for user={user_id}")
+        except ImportError:
+            pass
+
+    # Draft-first dispatch: Qwen3.5-0.8B standby reply + delegate signal.
+    # Opt-in via HEVOLVE_DRAFT_FIRST=1 or request body. Falls through to the
+    # normal path silently when the draft model isn't registered/loaded, so
+    # flipping the flag is safe even before the 0.8B model is downloaded.
+    if draft_first and prompt and user_id and prompt_id:
+        try:
+            from integrations.agent_engine.speculative_dispatcher import get_speculative_dispatcher
+            dispatcher = get_speculative_dispatcher()
+            result = dispatcher.dispatch_draft_first(
+                prompt, str(user_id), str(prompt_id))
+            # Only commit to the draft-first response when we actually got
+            # one. On 'no_draft_model' / circuit breaker / guardrail block
+            # the error field is set and result['response'] is empty —
+            # fall through to the normal path so the user still gets served.
+            if result.get('response'):
+                return jsonify({
+                    'response': result['response'],
+                    'Agent_status': 'Draft-First Mode',
+                    'speculation_id': result.get('speculation_id'),
+                    'expert_pending': result.get('expert_pending', False),
+                    'delegate': result.get('delegate'),
+                    'draft_model': result.get('draft_model'),
+                    'draft_confidence': result.get('draft_confidence'),
+                    'latency_ms': result.get('latency_ms'),
+                })
         except ImportError:
             pass
 
