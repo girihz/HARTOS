@@ -741,6 +741,18 @@ async def _stt_stream_handler(websocket):
     Sends back:
       - {"text": "...", "language": "en", "is_final": false} for interim
       - {"text": "...", "language": "en", "is_final": true} for final (pause detected)
+
+    CRASH ISOLATION:
+      - Model crashes are isolated: _transcribe_buffer routes through
+        _stt_tool.call() which handles subprocess crashes and returns
+        empty strings on failure.
+      - Protocol-level code (websocket frames, VAD, buffering) runs
+        in the daemon thread with an outer try/except (below) so
+        Python exceptions are caught and the connection closes cleanly.
+      - Remaining risks are C-level crashes in the websockets library
+        or audio decoders — low-probability and would require moving
+        the entire server into a subprocess with per-frame IPC, which
+        costs realtime latency. Deferred until evidence of actual crashes.
     """
     import io
     import tempfile
