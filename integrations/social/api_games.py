@@ -272,6 +272,86 @@ def submit_move(session_id):
         db.close()
 
 
+@games_bp.route('/games/<session_id>/ai_move', methods=['POST'])
+@require_auth
+@rate_limit('games_ai_move')  # per-session chatty polling allowed
+def ai_move(session_id):
+    """Generate a server-side AI move for a solo session (Phase 1).
+
+    The endpoint is read-only against the session — it returns a move
+    dict ready to feed into POST /games/<id>/move. The client does the
+    two-step dance (get-ai-move → submit-move) so the AI's turn is
+    observable in the normal move history.
+
+    Only the host user may request AI moves (prevents griefing another
+    player's turn). Board-game AI (boardgame engine family) is
+    client-authoritative — this endpoint returns an error for those
+    game types and the client falls back to local boardgame.io
+    MCTSBot. See landing-page/src/utils/gameAI.js (Nunba).
+
+    PHASE 1 LIMITATION — "host plays both sides":
+    The returned move, when submitted via POST /move, is authenticated
+    as g.user_id (the host) and credited to the host's score. There is
+    no distinct AI GameParticipant yet. Until Phase 2 adds one + a
+    submit_move_as_ai path, callers should treat this endpoint as a
+    "move hint" helper, NOT a true AI opponent. See game_ai.py module
+    docstring for the full Phase 2 plan.
+
+    TURN-OWNERSHIP NOTE:
+    The endpoint does NOT verify that it is currently the AI's turn
+    (there is no AI turn yet). For games where multiple players can
+    answer per round (trivia) this is inconsequential. For turn-based
+    engines (word_chain etc.) the caller is responsible for calling
+    at the correct moment. Future Phase 2 work will add a turn check
+    once AI participants exist.
+
+    Request JSON:
+        difficulty: 'easy' | 'medium' | 'hard'   (default 'medium')
+        ai_user_id: str                          (default 'ai')
+                    (cosmetic only in Phase 1 — submission still uses
+                     the authenticated host user_id)
+
+    Response JSON:
+        move: {...}                 — shape depends on engine
+        ai_user_id: str
+        difficulty: str
+    """
+    data = _get_json()
+    difficulty = data.get('difficulty', 'medium')
+    ai_user_id = data.get('ai_user_id', 'ai')
+
+    from .models import GameSession
+    db = get_db()
+    try:
+        session = db.query(GameSession).filter_by(id=session_id).first()
+        if not session:
+            return _err("Game session not found", 404)
+        if session.status != 'active':
+            return _err(f"Session not active (status: {session.status})")
+        if session.host_user_id != g.user_id:
+            return _err("Only the host can request AI moves", 403)
+
+        from .game_ai import generate_ai_move
+        move = generate_ai_move(
+            game_state=session.game_state,
+            game_type=session.game_type,
+            ai_user_id=ai_user_id,
+            difficulty=difficulty,
+        )
+        return _ok({
+            'move': move,
+            'ai_user_id': ai_user_id,
+            'difficulty': difficulty,
+        })
+    except ValueError as e:
+        return _err(str(e))
+    except Exception:
+        logger.exception("Error generating AI move")
+        return _err("Failed to generate AI move", 500)
+    finally:
+        db.close()
+
+
 @games_bp.route('/games/<session_id>/leave', methods=['POST'])
 @require_auth
 def leave_game(session_id):
