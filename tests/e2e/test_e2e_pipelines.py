@@ -1260,7 +1260,7 @@ class TestComputerUseLocalLoop:
            return_value='base64img')
     def test_loop_respects_max_iterations(self, mock_ss, mock_parse,
                                            mock_llm, mock_exec, mock_sleep):
-        """LLM always returns actions → stops at max_iterations."""
+        """LLM always returns IN_PROGRESS actions → stops at max_iterations."""
         mock_llm.return_value = json.dumps({
             'Reasoning': 'Clicking button',
             'Next Action': 'left_click',
@@ -1270,7 +1270,10 @@ class TestComputerUseLocalLoop:
         from integrations.vlm.local_loop import run_local_agentic_loop
         result = run_local_agentic_loop(
             self._make_message(), tier='http', max_iterations=3)
-        assert result['status'] == 'success'
+        # Loop now reports incomplete+max_iterations instead of confidently
+        # claiming success when no DONE signal was ever raised.
+        assert result['status'] == 'incomplete'
+        assert result['exit_reason'] == 'max_iterations'
         assert len(result['extracted_responses']) == 3
         assert mock_exec.call_count == 3
 
@@ -1481,7 +1484,7 @@ class TestComputerUseActions:
 
     @patch('integrations.vlm.local_computer_tool.pyautogui')
     def test_screenshot_inprocess(self, mock_gui):
-        """pyautogui.screenshot() → base64 PNG."""
+        """pyautogui.screenshot() → base64 JPEG (resize-preserving aspect)."""
         import io
         from PIL import Image
         # Create a tiny 1×1 image
@@ -1491,14 +1494,14 @@ class TestComputerUseActions:
         from integrations.vlm.local_computer_tool import take_screenshot
         b64 = take_screenshot(tier='inprocess')
         assert isinstance(b64, str)
-        # Verify it's valid base64 that decodes to PNG
+        # Verify it's valid base64 that decodes to JPEG (SOI marker)
         import base64 as b64_mod
         raw = b64_mod.b64decode(b64)
-        assert raw[:4] == b'\x89PNG'
+        assert raw[:3] == b'\xff\xd8\xff'
 
-    @patch('integrations.vlm.local_computer_tool.requests.get')
+    @patch('integrations.vlm.local_computer_tool.pooled_get')
     def test_screenshot_http(self, mock_get):
-        """HTTP tier calls localhost:5001/screenshot."""
+        """HTTP tier calls localhost:5001/screenshot via pooled_get."""
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock()
         mock_resp.json.return_value = {'base64_image': 'AAAA'}

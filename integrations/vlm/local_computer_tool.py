@@ -10,14 +10,22 @@ Tier 'http': HTTP to localhost:5001 (omnitool-gui Flask server)
 
 import os
 import io
+import sys
 import time
 import base64
 import logging
 
-# VLM screenshot dimensions — single source of truth.
-# All resize + coordinate scaling uses these.
-VLM_IMG_W = 1024
-VLM_IMG_H = 576
+# VLM screenshot long-edge — aspect ratio is PRESERVED during resize.
+# Old behavior (1024×576 forced) squished 16:10 screens into 16:9 and the
+# VLM's vertical coordinates drifted accordingly. Qwen3-VL handles 1280px
+# long edge comfortably; longer is better grounding, shorter is faster.
+# HEVOLVE_VLM_IMG_LONG_EDGE lets callers tune this.
+VLM_IMG_LONG_EDGE = int(os.environ.get('HEVOLVE_VLM_IMG_LONG_EDGE', '1280'))
+# Legacy constants kept for backward compat with existing call sites
+# and for tests that reference them. The *real* dimensions are computed
+# per-screenshot from the actual screen aspect ratio.
+VLM_IMG_W = VLM_IMG_LONG_EDGE
+VLM_IMG_H = int(VLM_IMG_LONG_EDGE * 9 / 16)
 
 logger = logging.getLogger('hevolve.vlm.computer_tool')
 
@@ -26,6 +34,32 @@ try:
     import pyautogui
 except ImportError:
     pyautogui = None
+
+
+def _ensure_dpi_aware():
+    """Make this process DPI-aware on Windows so screenshot pixels and
+    pyautogui click coordinates live in the same physical space.
+
+    Without this, on a 150%-scaled 2560×1440 display, pyautogui.size() returns
+    (1707, 960) while pyautogui.screenshot() captures the full 2560×1440 physical
+    pixels — so VLM-derived coordinates land in the wrong spot and frequently
+    miss Start menu / taskbar targets. Idempotent; safe to call repeatedly."""
+    if sys.platform != 'win32':
+        return
+    try:
+        import ctypes
+        # PROCESS_PER_MONITOR_DPI_AWARE = 2 (Win 8.1+). Falls back to
+        # SetProcessDPIAware on older versions. Both are no-ops if already set.
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except (AttributeError, OSError):
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception as e:
+        logger.debug(f"DPI awareness setup skipped: {e}")
+
+
+# Call at import time so every screenshot/click path is DPI-consistent
+_ensure_dpi_aware()
 
 try:
     import pyperclip
@@ -46,22 +80,33 @@ SUPPORTED_ACTIONS = {
 
 def take_screenshot(tier: str) -> str:
     """
-    Capture screen and return base64 PNG.
+    Capture screen and return base64 JPEG.
+
+    The image is resized to a long-edge of VLM_IMG_LONG_EDGE while
+    PRESERVING aspect ratio, so the VLM's normalized coordinates map
+    back to the physical screen without distortion. Screen DPI awareness
+    is enabled at import (see _ensure_dpi_aware()).
 
     Args:
         tier: 'inprocess' (pyautogui direct) or 'http' (localhost:5001)
     Returns:
-        Base64-encoded PNG screenshot string.
+        Base64-encoded JPEG screenshot string.
     """
     if tier == 'inprocess':
         if pyautogui is None:
             raise ImportError("pyautogui is required for in-process screenshots")
         img = pyautogui.screenshot()
-        # Resize for VLM — full-res PNG (293KB+) overflows context.
         from PIL import Image
-        img = img.resize((VLM_IMG_W, VLM_IMG_H), Image.LANCZOS)
+
+        w, h = img.size
+        long_edge = max(w, h)
+        if long_edge > VLM_IMG_LONG_EDGE:
+            scale = VLM_IMG_LONG_EDGE / long_edge
+            new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+            img = img.resize(new_size, Image.LANCZOS)
+
         buf = io.BytesIO()
-        img.save(buf, format='JPEG', quality=60)
+        img.save(buf, format='JPEG', quality=70)
         return base64.b64encode(buf.getvalue()).decode('ascii')
     else:
         resp = pooled_get('http://localhost:5001/screenshot', timeout=15)
