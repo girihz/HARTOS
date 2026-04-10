@@ -568,8 +568,13 @@ class TestMediaAgent:
         assert 'video_with_audio' in VALID_MODALITIES
         assert 'audio_speech_music' in VALID_MODALITIES
 
+    @patch('integrations.service_tools.media_agent._can_do', return_value=True)
     @patch('integrations.service_tools.media_agent._generate_image')
-    def test_generate_image_routing(self, mock_img):
+    def test_generate_image_routing(self, mock_img, mock_can_do):
+        """generate_media('...', 'image') should route to _generate_image
+        when the node reports image_gen capability. _can_do is patched
+        so the capability gate doesn't short-circuit to 'unavailable'
+        on test environments without a real image-gen sidecar."""
         from integrations.service_tools.media_agent import generate_media
         mock_img.return_value = {
             'status': 'completed', 'output_modality': 'image',
