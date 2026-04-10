@@ -22,6 +22,10 @@ logger = logging.getLogger('hevolve_social')
 # ─── Model Tier ───
 
 class ModelTier(Enum):
+    DRAFT = "draft"        # Tiny (< 1B) models — first-responder / classifier
+                           # only. Always local. Used by draft-first dispatcher
+                           # to emit a standby reply + routing signal before
+                           # waking a heavier model.
     FAST = "fast"          # Hive compute / local models / ultrafast
     BALANCED = "balanced"  # Mid-tier API or learning models
     EXPERT = "expert"      # GPT-4, Claude, DeepSeek — slower, higher quality
@@ -106,23 +110,49 @@ class ModelRegistry:
         with self._lock:
             return self._models.get(model_id)
 
+    def get_draft_model(self) -> Optional[ModelBackend]:
+        """Get the lowest-latency DRAFT tier model — the first-responder
+        that drives `SpeculativeDispatcher.dispatch_draft_first()`. DRAFT
+        models are tiny (<1B), always local, and are expected to emit a
+        standby reply + routing signal before a heavier model is woken.
+
+        Returns None if no DRAFT tier model is registered, which makes the
+        dispatcher gracefully fall through to the normal path."""
+        with self._lock:
+            candidates = [
+                m for m in self._models.values()
+                if m.tier == ModelTier.DRAFT
+            ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda m: m.avg_latency_ms)
+
     def get_fast_model(self, min_accuracy: float = 0.0) -> Optional[ModelBackend]:
-        """Get the lowest-latency model meeting minimum accuracy."""
+        """Get the lowest-latency model meeting minimum accuracy.
+
+        DRAFT tier is excluded from this selection — DRAFT models answer
+        via the dedicated draft-first path, not the speculative fast
+        path, because they can't produce final answers for complex tasks.
+        """
         with self._lock:
             candidates = [
                 m for m in self._models.values()
                 if m.accuracy_score >= min_accuracy
+                and m.tier != ModelTier.DRAFT
             ]
         if not candidates:
             return None
         return min(candidates, key=lambda m: m.avg_latency_ms)
 
     def get_expert_model(self, max_cost: float = float('inf')) -> Optional[ModelBackend]:
-        """Get the highest-accuracy model within budget."""
+        """Get the highest-accuracy model within budget. DRAFT models are
+        excluded — they answer via the draft-first path, never as an
+        expert cross-check."""
         with self._lock:
             candidates = [
                 m for m in self._models.values()
                 if m.cost_per_1k_tokens <= max_cost
+                and m.tier != ModelTier.DRAFT
             ]
         if not candidates:
             return None
@@ -234,9 +264,36 @@ model_registry = ModelRegistry()
 def _register_defaults():
     """Register default model backends. Only available if API keys are set."""
 
-    # 1. Local Qwen3.5-4B VL — default local model (256K context, vision+text, llama.cpp b8148+)
+    # 0. Local Qwen3.5 0.8B — DRAFT tier first-responder for the
+    #    draft-first dispatcher. Its job is to emit an immediate standby
+    #    reply plus a JSON routing signal saying whether the request can
+    #    be handled locally or needs delegation to the 4B or the hive.
+    #    ~200-400ms on consumer GPUs. Its interactions flow through
+    #    WorldModelBridge.record_interaction so HevolveAI's continual
+    #    learner can distill expert→draft over time (the draft gets
+    #    better at knowing when to delegate vs answer directly).
     from core.port_registry import get_local_llm_url
     _local_url = get_local_llm_url()
+
+    model_registry.register(ModelBackend(
+        model_id='qwen3.5-0.8b-draft',
+        display_name='Qwen3.5 0.8B (Draft)',
+        tier=ModelTier.DRAFT,
+        config_list_entry={
+            'model': 'Qwen3.5-0.8B-Instruct',
+            'api_key': 'dummy',
+            'base_url': _local_url,
+            'price': [0, 0],
+        },
+        avg_latency_ms=300.0,
+        accuracy_score=0.45,
+        cost_per_1k_tokens=0.0,
+        is_local=True,
+        hardware_dependent=True,
+        gpu_tdp_watts=80.0,
+    ))
+
+    # 1. Local Qwen3.5-4B VL — default local model (256K context, vision+text, llama.cpp b8148+)
 
     model_registry.register(ModelBackend(
         model_id='qwen3.5-4b-local',

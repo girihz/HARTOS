@@ -140,35 +140,20 @@ class SpeculativeDispatcher:
         fast_response = self._dispatch_to_model(
             fast_model, prompt, user_id, prompt_id, goal_type, goal_id)
         elapsed_ms = (time.time() - start) * 1000
-
-        # GUARDRAIL: energy tracking on EVERY call
-        self._registry.record_energy(fast_model.model_id, elapsed_ms)
-        self._registry.record_latency(fast_model.model_id, elapsed_ms)
-
-        # Record compute contribution for hive node (→ ad revenue)
-        self._record_compute_contribution(node_id, fast_model.model_id, elapsed_ms)
+        self._track_call_telemetry(fast_model, elapsed_ms, node_id)
 
         # ── EXPERT PATH (background) ──
         expert_model = self._registry.get_expert_model()
-        expert_pending = False
-
-        if expert_model and expert_model.model_id != fast_model.model_id:
-            if self._check_and_reserve_budget(user_id, goal_id, expert_model):
-                with self._lock:
-                    self._active[speculation_id] = {
-                        'fast_model': fast_model.model_id,
-                        'expert_model': expert_model.model_id,
-                        'user_id': user_id,
-                        'prompt_id': prompt_id,
-                        'goal_id': goal_id,
-                        'started_at': time.time(),
-                    }
-                self._expert_pool.submit(
-                    self._expert_background_task,
-                    speculation_id, prompt, fast_response,
-                    expert_model, user_id, prompt_id, goal_id, goal_type,
-                )
-                expert_pending = True
+        expert_pending = self._schedule_expert_background(
+            speculation_id=speculation_id,
+            prompt=prompt,
+            fast_response=fast_response,
+            expert_model=expert_model,
+            user_id=user_id, prompt_id=prompt_id,
+            goal_id=goal_id, goal_type=goal_type,
+            origin_model_id=fast_model.model_id,
+            origin_model_role='fast_model',
+        )
 
         return {
             'response': fast_response,
@@ -179,6 +164,287 @@ class SpeculativeDispatcher:
             'energy_kwh': round(
                 self._registry.get_total_energy_kwh(hours=0.01), 6),
         }
+
+    # ─── Draft-first dispatch (Qwen3.5-0.8B standby + delegate signal) ───
+
+    def dispatch_draft_first(self, prompt: str, user_id: str, prompt_id: str,
+                             goal_id: str = None, goal_type: str = 'general',
+                             node_id: str = None) -> dict:
+        """Draft-first dispatch: tiny model answers immediately, signals whether
+        to delegate.
+
+        Architecture (the piece the user asked for on top of the speculative
+        dispatcher):
+
+          1. The DRAFT tier model (Qwen3.5-0.8B) receives a wrapped prompt that
+             asks it to emit JSON:
+               { "reply": "...",
+                 "delegate": "none" | "local" | "hive",
+                 "confidence": 0.0-1.0 }
+             `delegate` is the draft's self-assessment of its place in the
+             hierarchy: can it answer, or should a bigger model take over?
+          2. Regardless of the delegate signal, the draft's ``reply`` is
+             returned SYNCHRONOUSLY as a standby response — the user sees
+             something within ~300ms even when delegation is needed.
+          3. When ``delegate != "none"`` (or the JSON can't be parsed), a
+             background expert task runs on the local FAST tier or is
+             dispatched to the hive — same code path as dispatch_speculative.
+          4. Both the draft's reply AND the eventual expert reply get fed
+             through ``WorldModelBridge.record_interaction`` with distinct
+             model_id tags so HevolveAI's continual learner can distill
+             the expert's improvements back into the draft over time.
+
+        Guardrails: the outer /chat handler already ran GuardrailEnforcer +
+        prompt_guard before calling us, so we only re-check constitutional
+        filter (cheap) and circuit breaker here. Budget + hive_ethos still
+        apply on the expert path via dispatch_speculative's helpers.
+
+        Returns a dict shaped like dispatch_speculative's response plus
+        ``delegate``, ``draft_model``, and ``draft_confidence`` fields so
+        callers can discriminate.
+        """
+        speculation_id = str(uuid.uuid4())[:12]
+
+        # ── 1. Gate checks (constitutional + circuit breaker + draft present) ──
+        gate_error = self._check_draft_first_gates(prompt)
+        if gate_error is not None:
+            return {
+                'response': '', 'speculation_id': speculation_id,
+                'delegate': 'none', 'error': gate_error, 'expert_pending': False,
+            }
+        draft_model = self._registry.get_draft_model()
+        if draft_model is None:
+            return {
+                'response': '', 'speculation_id': speculation_id,
+                'delegate': 'none', 'error': 'no_draft_model',
+                'expert_pending': False,
+            }
+
+        # ── 2. Dispatch the draft with the classifier prompt ──
+        draft_prompt = self._build_draft_classifier_prompt(prompt)
+        start = time.time()
+        draft_raw = self._dispatch_to_model(
+            draft_model, draft_prompt, user_id, prompt_id, goal_type, goal_id)
+        draft_latency_ms = (time.time() - start) * 1000
+        self._track_call_telemetry(draft_model, draft_latency_ms, node_id)
+
+        # ── 3. Parse envelope + record draft interaction ──
+        parsed = self._parse_draft_envelope(draft_raw)
+        draft_reply = parsed.get('reply') or draft_raw.strip()[:500]
+        delegate = parsed.get('delegate', 'local')  # default on parse fail
+        confidence = float(parsed.get('confidence') or 0.0)
+        self._record_interaction_safely(
+            user_id=user_id, prompt_id=prompt_id, prompt=prompt,
+            response=draft_reply, model_id=draft_model.model_id,
+            latency_ms=draft_latency_ms, node_id=node_id, goal_id=goal_id,
+        )
+
+        # ── 4. Schedule expert if the draft self-delegated ──
+        expert_pending = False
+        if delegate in ('local', 'hive'):
+            expert_model = self._pick_expert_for_delegate(delegate)
+            expert_pending = self._schedule_expert_background(
+                speculation_id=speculation_id,
+                prompt=prompt,
+                fast_response=draft_reply,
+                expert_model=expert_model,
+                user_id=user_id, prompt_id=prompt_id,
+                goal_id=goal_id, goal_type=goal_type,
+                origin_model_id=draft_model.model_id,
+                origin_model_role='draft_model',
+                delegate=delegate,
+            )
+
+        return {
+            'response': draft_reply,
+            'speculation_id': speculation_id,
+            'draft_model': draft_model.model_id,
+            'delegate': delegate,
+            'draft_confidence': confidence,
+            'expert_pending': expert_pending,
+            'latency_ms': round(draft_latency_ms, 1),
+            'energy_kwh': round(
+                self._registry.get_total_energy_kwh(hours=0.01), 6),
+        }
+
+    # ─── SRP helpers extracted from dispatch_draft_first ───
+
+    def _check_draft_first_gates(self, prompt: str) -> Optional[str]:
+        """Run the cheap gates (circuit breaker + constitutional filter)
+        that must pass before we spend any model time.
+
+        Returns None on success, or an error string identifying which gate
+        rejected the request. Keeps dispatch_draft_first's orchestration
+        thin — this method owns "is the system healthy enough to proceed".
+        """
+        from security.hive_guardrails import HiveCircuitBreaker, ConstitutionalFilter
+        if HiveCircuitBreaker.is_halted():
+            return 'Hive is halted'
+        passed, reason = ConstitutionalFilter.check_prompt(prompt)
+        if not passed:
+            return reason or 'constitutional filter'
+        return None
+
+    def _build_draft_classifier_prompt(self, user_prompt: str) -> str:
+        """Wrap the user prompt with the draft-first classifier instruction.
+
+        The draft's job is twofold: (a) produce a short standby reply fit
+        for simple chat, (b) self-assess whether a bigger model is needed.
+        The JSON schema is flat so a 0.8B model can reliably emit it.
+        Owns ONLY prompt construction — no I/O, no side effects.
+        """
+        return (
+            "You are a fast local first-responder. Reply to the user in a "
+            "short helpful way, and ALSO decide whether a bigger model "
+            "should take over.\n\n"
+            f"User: {user_prompt}\n\n"
+            "Respond with ONE JSON object on a single line and NOTHING else:\n"
+            '{"reply": "<your short reply to the user, 1-3 sentences>", '
+            '"delegate": "none" OR "local" OR "hive", '
+            '"confidence": <float 0-1>, '
+            '"reason": "<why you chose this delegate value>"}\n\n'
+            "Use delegate=\"none\" for greetings, small-talk, or anything you "
+            "can fully answer yourself. Use \"local\" if the request needs "
+            "tools, code, reasoning, or multi-step work the 4B model can "
+            "handle. Use \"hive\" if it needs large-model expertise, "
+            "long-context research, or specialized skill distribution."
+        )
+
+    def _track_call_telemetry(
+        self, model: 'ModelBackend', latency_ms: float, node_id: Optional[str],
+    ) -> None:
+        """Record the per-model telemetry trio (energy + latency +
+        compute-contribution for hive reward).
+
+        Owns ONLY the telemetry side-effects so dispatch_draft_first,
+        dispatch_speculative, and any future dispatch variant can share
+        one call path. No return value — this is fire-and-forget."""
+        self._registry.record_energy(model.model_id, latency_ms)
+        self._registry.record_latency(model.model_id, latency_ms)
+        self._record_compute_contribution(node_id, model.model_id, latency_ms)
+
+    def _schedule_expert_background(
+        self,
+        speculation_id: str,
+        prompt: str,
+        fast_response: str,
+        expert_model: Optional['ModelBackend'],
+        user_id: str,
+        prompt_id: str,
+        goal_id: Optional[str],
+        goal_type: str,
+        origin_model_id: str,
+        origin_model_role: str = 'fast_model',
+        delegate: Optional[str] = None,
+    ) -> bool:
+        """Schedule the expert-improvement task in the background pool.
+
+        Centralizes the registration into self._active + thread submit so
+        both dispatch_draft_first and dispatch_speculative share one code
+        path. Returns True if the expert was actually scheduled.
+
+        Guards:
+        - no expert model → nothing to schedule
+        - expert_model.model_id == origin_model_id → pointless, skip
+        - budget denied → skip
+        """
+        if expert_model is None:
+            return False
+        if expert_model.model_id == origin_model_id:
+            return False
+        if not self._check_and_reserve_budget(user_id, goal_id, expert_model):
+            return False
+
+        with self._lock:
+            entry = {
+                origin_model_role: origin_model_id,
+                'expert_model': expert_model.model_id,
+                'user_id': user_id,
+                'prompt_id': prompt_id,
+                'goal_id': goal_id,
+                'started_at': time.time(),
+            }
+            if delegate is not None:
+                entry['delegate'] = delegate
+            self._active[speculation_id] = entry
+
+        self._expert_pool.submit(
+            self._expert_background_task,
+            speculation_id, prompt, fast_response,
+            expert_model, user_id, prompt_id, goal_id, goal_type,
+        )
+        return True
+
+    def _parse_draft_envelope(self, raw: str) -> dict:
+        """Extract the {reply, delegate, confidence} JSON the draft should
+        have produced. Tolerant of markdown fences, prose wrappers, and
+        trailing commas.
+
+        Returns an empty dict on total parse failure — callers should treat
+        that as 'delegate to local' via the default in dispatch_draft_first."""
+        if not raw:
+            return {}
+        import json as _json
+        import re as _re
+
+        text = raw.strip()
+
+        # Strip ```json ... ``` fences if present
+        fence = _re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, _re.DOTALL)
+        if fence:
+            text = fence.group(1)
+
+        # Try raw parse first
+        try:
+            return _json.loads(text)
+        except (_json.JSONDecodeError, TypeError):
+            pass
+
+        # Fall back to the first {...} we can find
+        match = _re.search(r'\{.*\}', text, _re.DOTALL)
+        if match:
+            candidate = match.group(0)
+            # Trim trailing commas before } or ]
+            candidate = _re.sub(r',\s*([\}\]])', r'\1', candidate)
+            try:
+                return _json.loads(candidate)
+            except (_json.JSONDecodeError, TypeError):
+                pass
+
+        logger.debug(f"draft envelope parse failed: {raw[:120]!r}")
+        return {}
+
+    def _pick_expert_for_delegate(self, delegate: str):
+        """Select the background model for a given delegate value.
+
+        - "local": local FAST-tier model (e.g. Qwen3.5-4B)
+        - "hive":  highest-accuracy hive/expert model, falls back to local
+                   if no remote expert is available
+
+        Returns None if no suitable model exists — caller then treats the
+        draft's reply as the final answer."""
+        if delegate == 'local':
+            return self._registry.get_fast_model()
+        if delegate == 'hive':
+            expert = self._registry.get_expert_model()
+            if expert:
+                return expert
+            # Graceful fallback: no hive expert → use local fast
+            return self._registry.get_fast_model()
+        return None
+
+    def _record_interaction_safely(self, **kwargs) -> None:
+        """Feed an interaction into HevolveAI via WorldModelBridge. Never
+        raises — continual learning is best-effort and the chat path must
+        not break if HevolveAI is offline or the bridge is in circuit-open
+        mode. WorldModelBridge already handles guardrail + secret redaction
+        internally."""
+        try:
+            from integrations.agent_engine.world_model_bridge import get_world_model_bridge
+            bridge = get_world_model_bridge()
+            bridge.record_interaction(**kwargs)
+        except Exception as e:
+            logger.debug(f"record_interaction skipped: {e}")
 
     # ─── Background expert task ───
 
@@ -272,7 +538,13 @@ class SpeculativeDispatcher:
     def _dispatch_to_model(self, model: 'ModelBackend', prompt: str,
                            user_id: str, prompt_id: str,
                            goal_type: str, goal_id: str = None) -> str:
-        """Send prompt to a specific model via /chat endpoint with config override."""
+        """Send prompt to a specific model via /chat endpoint with config override.
+
+        Always passes ``speculative=False`` and ``draft_first=False`` on the
+        inner call so the dispatcher can never recursively re-enter itself
+        when HEVOLVE_DRAFT_FIRST or the legacy speculative flag is enabled
+        upstream. The outer chat route triggered us, and that's where the
+        decision to speculate was made."""
         import requests as req
         base_url = os.environ.get('HEVOLVE_BASE_URL', f'http://localhost:{get_port("backend")}')
         try:
@@ -286,6 +558,9 @@ class SpeculativeDispatcher:
                     'autonomous': True,
                     'casual_conv': False,
                     'model_config': model.to_config_list(),
+                    # Hard no-reentry guard — inner dispatch never speculates
+                    'speculative': False,
+                    'draft_first': False,
                 },
                 timeout=30,
             )
