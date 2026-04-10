@@ -590,17 +590,50 @@ class Qwen3VLBackend:
         result, nx, ny = self._parse_action_response(raw, img_w, img_h, task=task)
 
         # --- Strategy 3: elimination retry if coords look suspicious ---
-        # "Suspicious" = near dead center (400-600, 400-600) which usually means
-        # the model defaulted rather than actually grounding
+        # Patterns the model commonly falls into when it isn't actually grounding:
+        #   • dead center (400-600, 400-600): "I don't know, so middle"
+        #   • bottom edge (y > 930): clicks taskbar when asked for in-screen UI
+        #     (observed pattern: model says "Notepad is in Start menu" but
+        #     grounds to y=975 which is the taskbar strip below the Start menu)
+        #   • top edge (y < 30): clicks window chrome / title bar
+        # Only trigger the retry when the task itself is NOT about the
+        # suspected region — clicking the Start button at y=990 is legitimate,
+        # clicking a "Notepad tile" at y=990 is not.
         if nx is not None and ny is not None and result['action'] == 'left_click':
             is_center_biased = (350 < nx < 650 and 350 < ny < 650)
-            if is_center_biased:
-                logger.info(f"Center-biased coords ({nx},{ny}), retrying with elimination strategy")
+            task_lower = task.lower()
+            task_is_taskbar = self._is_taskbar_task(task) or any(
+                kw in task_lower for kw in ('taskbar', 'start button', 'system tray')
+            )
+            # Bottom edge hallucination: y > 930 on a task NOT about the
+            # taskbar means the model probably pointed into the taskbar strip
+            # while claiming it was pointing at in-app content.
+            is_bottom_edge_biased = (ny > 930 and not task_is_taskbar)
+            is_top_edge_biased = (ny < 30)
+            is_suspicious = is_center_biased or is_bottom_edge_biased or is_top_edge_biased
+            if is_suspicious:
+                bias_kind = (
+                    'center' if is_center_biased else
+                    'bottom-edge' if is_bottom_edge_biased else
+                    'top-edge'
+                )
+                logger.info(
+                    f"{bias_kind}-biased coords ({nx},{ny}) for non-taskbar task, "
+                    f"retrying with elimination strategy"
+                )
                 elim_prompt = (
                     f'I need to find the target for: {task}\n'
-                    f'Is it in the top half or bottom half of the screen? '
-                    f'Is it in the left third, middle third, or right third? '
-                    f'Now give the precise <point>x,y</point> (0-1000 normalized).'
+                    f'Describe its location precisely BEFORE giving coordinates:\n'
+                    f'  - Top half or bottom half?\n'
+                    f'  - Left third, middle third, or right third?\n'
+                    f'  - Is it inside a window, in a menu, or on the taskbar?\n'
+                    f'If the task asks to open an app and that app is not '
+                    f'already visible, the correct action is usually NOT a '
+                    f'click — respond with DONE and I will use a keyboard '
+                    f'shortcut instead.\n'
+                    f'Otherwise, give the precise <point>x,y</point> (0-1000 normalized) '
+                    f'and avoid the taskbar strip (y > 930) unless the target '
+                    f'is an actual taskbar icon.'
                 )
                 elim_raw = self._call_api([{
                     "role": "user",
@@ -612,8 +645,23 @@ class Qwen3VLBackend:
                     ]
                 }])
                 elim_result, enx, eny = self._parse_action_response(elim_raw, img_w, img_h, task=task)
-                if enx is not None and not (350 < enx < 650 and 350 < eny < 650):
-                    # Elimination gave non-center coords — trust it
+                # Only reject the retry if it reproduces the *same* bias we
+                # were retrying for. If we retried bottom-edge and the retry
+                # lands in the middle of the screen, that's a legitimate hit
+                # even if it happens to be near center — the whole point of
+                # the retry was to escape the bottom strip, not to verify the
+                # answer is off-center.
+                if enx is None or eny is None:
+                    reproduced_bias = True
+                elif is_bottom_edge_biased:
+                    reproduced_bias = (eny > 930 and not task_is_taskbar)
+                elif is_top_edge_biased:
+                    reproduced_bias = (eny < 30)
+                else:  # center-biased
+                    reproduced_bias = (350 < enx < 650 and 350 < eny < 650)
+
+                if not reproduced_bias:
+                    # Retry escaped the original bias — trust it
                     result = elim_result
                     result['strategy'] = 'elimination_retry'
                     logger.info(f"Elimination retry gave ({enx},{eny}) — using it")
