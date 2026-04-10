@@ -2106,6 +2106,25 @@ def _handle_screenshot_tool(input_text: str) -> str:
         return f"Screenshot error: {str(e)[:200]}"
 
 
+def _handle_navigate_app_tool(input_text: str) -> str:
+    """Resolve a spoken destination to a Nunba SPA route and attach a
+    structured ui_action the frontend LiquidActionBar can render.
+
+    The heavy lifting lives in integrations.ui_actions.navigate_tool so
+    autogen and LangChain share exactly one code path. Thread-local
+    ui_actions are read by the /chat handler on the way out."""
+    try:
+        from integrations.ui_actions import navigate_tool as _nt
+        role = getattr(thread_local_data, 'get_user_role', lambda: 'flat')() or 'flat'
+        return _nt.handle_navigate_app(
+            input_text, user_role=role, thread_local=thread_local_data,
+        )
+    except ImportError:
+        return "Navigate_App is not available on this node."
+    except Exception as e:
+        return f"Navigate_App error: {str(e)[:200]}"
+
+
 def _handle_computer_action_tool(input_text: str) -> str:
     """Execute GUI action on user's computer via VLM agentic loop.
 
@@ -2171,6 +2190,64 @@ def _handle_computer_action_tool(input_text: str) -> str:
         return "Computer use unavailable — VLM adapter not installed."
     except Exception as e:
         return f"Computer use error: {str(e)[:200]}"
+
+
+def _handle_connect_channel_tool(input_text: str) -> str:
+    """Register / connect a messaging channel (WhatsApp, Telegram, Discord,
+    Slack, etc.) from natural-language chat. Delegates to the existing
+    `register_channel` closure in integrations.channels.agent_tools so there's
+    exactly ONE registration code path — this is just the LangChain facade.
+
+    Input formats accepted:
+      - "whatsapp"                      → start setup, returns missing-fields
+      - "telegram {\"bot_token\":...}"  → register with config
+      - '{"channel": "slack",
+          "config": {"bot_token":...}}' → full JSON dict
+    """
+    import json as _json
+    try:
+        channel_type = None
+        config_json = '{}'
+        text = (input_text or '').strip()
+
+        if text.startswith('{'):
+            try:
+                parsed = _json.loads(text)
+                channel_type = (parsed.get('channel') or parsed.get('channel_type') or '').lower()
+                cfg = parsed.get('config') or {}
+                config_json = _json.dumps(cfg) if isinstance(cfg, dict) else str(cfg)
+            except _json.JSONDecodeError:
+                pass
+
+        if not channel_type:
+            parts = text.split(None, 1)
+            channel_type = parts[0].lower() if parts else ''
+            if len(parts) > 1:
+                config_json = parts[1].strip() or '{}'
+
+        if not channel_type:
+            return (
+                "Which channel should I connect? Say 'whatsapp', 'telegram', 'slack', "
+                "'discord', etc. You can also include credentials like "
+                "'telegram {\"bot_token\": \"123:ABC\"}'."
+            )
+
+        from integrations.channels.agent_tools import build_channel_tool_closures
+        ctx = {
+            'user_id': thread_local_data.get_user_id(),
+            'prompt_id': thread_local_data.get_prompt_id(),
+        }
+        tools = build_channel_tool_closures(ctx) or []
+        register_fn = next(
+            (t[2] for t in tools
+             if isinstance(t, tuple) and len(t) >= 3 and t[0] == 'register_channel'),
+            None,
+        )
+        if register_fn is None:
+            return "Channel registration is not available on this node."
+        return register_fn(channel_type, config_json)
+    except Exception as e:
+        return f"Channel connect error: {str(e)[:200]}"
 
 
 def _handle_agentic_router_tool(input_text):
@@ -2522,6 +2599,40 @@ def get_tools(req_tool, is_first: bool = False):
                     "Request user permission to see their screen for computer use. "
                     "Use when you need to see the screen but screen sharing is not "
                     "active. Input: reason for needing screen access."
+                ),
+            ),
+            Tool(
+                name="Connect_Channel",
+                func=_handle_connect_channel_tool,
+                description=(
+                    "Connect / register a messaging channel like WhatsApp, Telegram, "
+                    "Discord, Slack, Email, SMS, Teams, etc. so the user can chat with "
+                    "the agent outside Nunba. Use this tool whenever the user asks to "
+                    "'connect <service>', 'add <service>', 'link my <service>', "
+                    "'set up <service>', 'hook up <service>', or similar — especially "
+                    "for any of the 31 supported channels. Input: the channel name "
+                    "alone (e.g. 'whatsapp') to start setup and get the list of "
+                    "required credentials, OR 'channel_name <json_config>' to register "
+                    "with credentials (e.g. 'telegram {\"bot_token\":\"123:ABC\"}'). "
+                    "For WhatsApp specifically, passing just 'whatsapp' starts a QR "
+                    "authentication flow. Do NOT ask the user for credentials first — "
+                    "call this tool with just the channel name and it will tell you "
+                    "what's needed."
+                ),
+            ),
+            Tool(
+                name="Navigate_App",
+                func=_handle_navigate_app_tool,
+                description=(
+                    "Open a different page of the Nunba app for the user. Use this "
+                    "whenever the user says things like 'take me to the social feed', "
+                    "'open model management', 'show me the channels page', 'go to "
+                    "admin', 'show the marketplace', 'open games', etc. Input: the "
+                    "destination in natural language (e.g. 'model management' or "
+                    "'social feed'). The tool resolves it against the app's page "
+                    "registry and makes the frontend open that route — you don't "
+                    "need to give a URL, just say the page. After calling this tool, "
+                    "tell the user you're opening that page in a single short sentence."
                 ),
             ),
         ]
@@ -5660,7 +5771,23 @@ def chat():
     elapsed_time = end_time - start_time
     app.logger.info(f"time taken for this full call is {elapsed_time}")
 
-    return jsonify({'response': ans, 'intent': thread_local_data.get_recognize_intents(), 'req_token_count': thread_local_data.get_req_token_count(), 'res_token_count': thread_local_data.get_res_token_count(), 'history_request_id': thread_local_data.get_reqid_list(), **_resonance})
+    # If the Navigate_App tool fired during get_ans(), lift the resolved
+    # ui_actions into the response so the Nunba LiquidActionBar renders
+    # clickable page chips without a separate round-trip. Cleared afterward
+    # so the next request on the same thread starts fresh.
+    _ui_actions = thread_local_data.get_ui_actions()
+    if _ui_actions:
+        thread_local_data.clear_ui_actions()
+
+    return jsonify({
+        'response': ans,
+        'intent': thread_local_data.get_recognize_intents(),
+        'req_token_count': thread_local_data.get_req_token_count(),
+        'res_token_count': thread_local_data.get_res_token_count(),
+        'history_request_id': thread_local_data.get_reqid_list(),
+        'ui_actions': _ui_actions,
+        **_resonance,
+    })
 
 
 def evaluate_agent_after_creation_in_review(file_id, prompt, prompt_id, request_id, user_id):
