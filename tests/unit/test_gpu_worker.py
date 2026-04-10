@@ -447,6 +447,89 @@ def test_ft14_worker_args_forwarded_to_subprocess():
 # FT 15: idle timer actually stops the worker after inactivity
 # ═══════════════════════════════════════════════════════════════════
 
+def test_ft16_observer_fires_on_spawn_crash_stop():
+    """Observer API fires 'spawned' on first successful call,
+    'crashed' when the worker dies mid-request, and 'stopped' on
+    explicit stop(). Essential for wiring ToolWorker to model catalog
+    state updates."""
+    events = []
+
+    def listener(tool_name: str, event: str):
+        events.append((tool_name, event))
+
+    t = ToolWorker(
+        tool_name='observer_test',
+        tool_module=ECHO_MODULE,
+        vram_budget='tts_f5',
+        output_subdir='observer_test',
+        engine='test',
+        startup_timeout=10.0,
+        request_timeout=5.0,
+        idle_timeout=0,
+    )
+    t.add_observer(listener)
+    try:
+        # First call → spawn
+        r = t.call({'op': 'echo', 'hello': True})
+        assert 'error' not in r
+        assert ('observer_test', 'spawned') in events
+
+        # Crash the worker
+        events.clear()
+        r = t.call({'op': 'crash'})
+        assert r.get('transient') is True
+        assert ('observer_test', 'crashed') in events
+
+        # Next call respawns
+        events.clear()
+        r = t.call({'op': 'echo', 'after': True})
+        assert ('observer_test', 'spawned') in events
+
+        # Explicit stop → 'stopped'
+        events.clear()
+        t.stop()
+        assert ('observer_test', 'stopped') in events
+    finally:
+        try:
+            t.stop()
+        except Exception:
+            pass
+
+
+def test_ft17_observer_remove():
+    """remove_observer() unregisters cleanly; no events after removal."""
+    events = []
+    cb = lambda name, evt: events.append((name, evt))
+
+    t = ToolWorker(
+        tool_name='observer_remove_test',
+        tool_module=ECHO_MODULE,
+        vram_budget='tts_f5',
+        output_subdir='observer_remove_test',
+        engine='test',
+        startup_timeout=10.0,
+        request_timeout=5.0,
+        idle_timeout=0,
+    )
+    t.add_observer(cb)
+    try:
+        t.call({'op': 'echo'})
+        assert len(events) == 1  # spawned
+        t.remove_observer(cb)
+        t.call({'op': 'crash'})
+        try:
+            t.call({'op': 'echo'})
+        except Exception:
+            pass
+        # No new events after removal
+        assert len(events) == 1
+    finally:
+        try:
+            t.stop()
+        except Exception:
+            pass
+
+
 def test_ft15_idle_timer_stops_after_final_call_then_wait():
     """Explicit test of the auto-stop tail: after the LAST call, wait
     past idle_timeout and assert the worker is gone."""

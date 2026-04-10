@@ -650,6 +650,11 @@ class ToolWorker:
         self._lock = threading.Lock()
         self._last_used: float = 0.0
         self._idle_timer: Optional[threading.Timer] = None
+        # State change observers. Listeners receive (tool_name, event)
+        # where event is 'spawned' | 'stopped' | 'crashed'. Fired AFTER
+        # the state transition is complete so observers can probe
+        # is_alive() and get the new state.
+        self._observers: list = []
 
     # Back-compat shims for properties the tests still read
     @property
@@ -661,6 +666,37 @@ class ToolWorker:
     def worker_args(self) -> list:
         """Compat alias — old tests read this as ['<variant>'] or []."""
         return [self.variant] if self.variant else []
+
+    # ── Observer API ──────────────────────────────────────────────
+
+    def add_observer(self, callback: Callable[[str, str], None]) -> None:
+        """Register a state change listener.
+
+        The callback will be invoked with (tool_name, event) on every
+        state transition: 'spawned' when the worker subprocess becomes
+        READY, 'stopped' when it's cleanly stopped (user action or
+        idle auto-stop), 'crashed' when the subprocess dies mid-call.
+
+        Called after the transition so listeners can call .is_alive()
+        and see ground truth. Exceptions in listeners are swallowed —
+        a broken observer must never take down the worker.
+        """
+        self._observers.append(callback)
+
+    def remove_observer(self, callback: Callable[[str, str], None]) -> None:
+        """Unregister a previously-added observer (no-op if not present)."""
+        try:
+            self._observers.remove(callback)
+        except ValueError:
+            pass
+
+    def _notify(self, event: str) -> None:
+        """Fire a state-change event to every registered observer."""
+        for cb in list(self._observers):
+            try:
+                cb(self.tool_name, event)
+            except Exception as e:
+                logger.debug(f"observer {cb} failed for {event}: {e}")
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -683,6 +719,7 @@ class ToolWorker:
         except (WorkerCrash, WorkerTimeout) as e:
             # Subprocess died. Worker will respawn on next call.
             logger.warning(f"{self.tool_name}: worker crash: {e}")
+            self._notify('crashed')
             return {'error': f'{self.tool_name} crashed: {e}', 'transient': True}
         except WorkerError as e:
             return {'error': f'{self.tool_name} worker error: {e}'}
@@ -753,11 +790,13 @@ class ToolWorker:
 
     def stop(self) -> None:
         """Stop the worker and release VRAM."""
+        was_running = False
         with self._lock:
             if self._idle_timer is not None:
                 self._idle_timer.cancel()
                 self._idle_timer = None
             if self._worker is not None:
+                was_running = True
                 try:
                     self._worker.stop()
                 except Exception:
@@ -765,6 +804,8 @@ class ToolWorker:
                 self._worker = None
         self._release_vram()
         logger.info(f"{self.tool_name}: worker stopped")
+        if was_running:
+            self._notify('stopped')
 
     # ── Idle timeout ─────────────────────────────────────────────
 
@@ -804,6 +845,7 @@ class ToolWorker:
         do NOT need their own `if __name__ == '__main__':` blocks — the
         dispatcher imports them and picks up `_load` / `_synthesize`.
         """
+        spawned = False
         with self._lock:
             if self._worker is None or not self._worker.is_alive():
                 cli_args = [self.tool_module]
@@ -817,7 +859,13 @@ class ToolWorker:
                     args=cli_args,
                 )
                 self._worker.start()
-            return self._worker
+                spawned = True
+            worker = self._worker
+        if spawned:
+            # Fire observer event OUTSIDE the lock so callbacks can
+            # safely call back into this ToolWorker without deadlocking.
+            self._notify('spawned')
+        return worker
 
     def _get_output_dir(self) -> Path:
         d = Path(os.environ.get(
