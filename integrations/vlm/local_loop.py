@@ -159,6 +159,9 @@ def run_local_agentic_loop(
                             "url": f"data:image/jpeg;base64,{screenshot_b64}"}},
                     ]
                 }])
+                # Guard against None (e.g. thinking-only response with no content)
+                if raw is None:
+                    raw = ''
                 action_json = _parse_vlm_response(raw)
 
                 # Extract coordinates from <point>x,y</point> if present in raw
@@ -180,8 +183,8 @@ def run_local_agentic_loop(
 
                     # Scale from 1000-normalized or image space to screen space
                     try:
-                        from PIL import ImageGrab
-                        _sw, _sh = ImageGrab.grab().size
+                        import pyautogui as _pag
+                        _sw, _sh = _pag.size()
                         if nx <= 1000 and ny <= 1000:
                             # Normalized 0-1000 coords
                             screen_x = int(nx * _sw / 1000)
@@ -365,6 +368,8 @@ def _parse_vlm_response(response_text: str) -> dict:
 
     Matches OmniParser vlm_agent.py extract_data() pattern.
     """
+    if not response_text:
+        return {"Next Action": "None", "Status": "DONE", "Reasoning": "Empty VLM response"}
     # Try to extract JSON from code blocks first
     json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
     if json_match:
