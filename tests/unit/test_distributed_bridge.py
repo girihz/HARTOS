@@ -302,9 +302,7 @@ class TestDistributedWorkerLoop:
     def test_worker_tick_claims_and_executes(self, mock_coordinator, mock_task,
                                               mock_guardrails):
         """Worker claims a task, executes via /chat, submits result."""
-        # Import first so sys.modules lookup succeeds regardless of test order.
         from integrations.distributed_agent.worker_loop import DistributedWorkerLoop
-        wl_mod = sys.modules['integrations.distributed_agent.worker_loop']
         mock_coordinator.claim_next_task.return_value = mock_task
 
         mock_resp = MagicMock()
@@ -312,45 +310,29 @@ class TestDistributedWorkerLoop:
         mock_resp.json.return_value = {'response': 'Generated content'}
 
         wl = DistributedWorkerLoop()
-        original_requests = wl_mod.requests
-        with patch.object(wl, '_get_coordinator', return_value=mock_coordinator):
-            try:
-                mock_req = MagicMock()
-                mock_req.post.return_value = mock_resp
-                mock_req.RequestException = original_requests.RequestException
-                wl_mod.requests = mock_req
-                wl._tick()
-                # Task was claimed
-                mock_coordinator.claim_next_task.assert_called_once()
-                # Result was submitted
-                mock_coordinator.submit_result.assert_called_once_with(
-                    'task_abc123', wl._node_id, 'Generated content')
-            finally:
-                wl_mod.requests = original_requests
+        with patch.object(wl, '_get_coordinator', return_value=mock_coordinator), \
+             patch('integrations.distributed_agent.worker_loop.pooled_post',
+                   return_value=mock_resp) as mock_post:
+            wl._tick()
+            mock_coordinator.claim_next_task.assert_called_once()
+            mock_post.assert_called_once()
+            mock_coordinator.submit_result.assert_called_once_with(
+                'task_abc123', wl._node_id, 'Generated content')
 
     def test_worker_tick_handles_chat_failure(self, mock_coordinator, mock_task,
                                                mock_guardrails):
         """Worker handles /chat failure gracefully."""
         import requests as _requests
-        # Import before sys.modules lookup so this test is order-independent.
         from integrations.distributed_agent.worker_loop import DistributedWorkerLoop
-        wl_mod = sys.modules['integrations.distributed_agent.worker_loop']
         mock_coordinator.claim_next_task.return_value = mock_task
 
         wl = DistributedWorkerLoop()
-        original_requests = wl_mod.requests
-        with patch.object(wl, '_get_coordinator', return_value=mock_coordinator):
-            try:
-                mock_req = MagicMock()
-                mock_req.post.side_effect = _requests.RequestException("Connection refused")
-                mock_req.RequestException = _requests.RequestException
-                wl_mod.requests = mock_req
-                wl._tick()
-                # Task was claimed but result NOT submitted (failure)
-                mock_coordinator.claim_next_task.assert_called_once()
-                mock_coordinator.submit_result.assert_not_called()
-            finally:
-                wl_mod.requests = original_requests
+        with patch.object(wl, '_get_coordinator', return_value=mock_coordinator), \
+             patch('integrations.distributed_agent.worker_loop.pooled_post',
+                   side_effect=_requests.RequestException("Connection refused")):
+            wl._tick()
+            mock_coordinator.claim_next_task.assert_called_once()
+            mock_coordinator.submit_result.assert_not_called()
 
     def test_worker_guardrail_blocks_task(self, mock_coordinator, mock_task):
         """Worker respects guardrail blocks."""
