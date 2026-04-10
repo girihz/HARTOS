@@ -788,6 +788,23 @@ class ToolWorker:
         w = self._worker
         return w is not None and w.is_alive()
 
+    def set_idle_timeout(self, seconds: float) -> None:
+        """Update the idle auto-stop threshold.
+
+        Called by the model loader when the catalog entry's
+        idle_timeout_s changes, so admin-UI edits take effect without
+        restarting the worker. If a worker is currently running and
+        the timeout was previously disabled, arms the timer now.
+        """
+        self.idle_timeout = max(0.0, float(seconds))
+        if self.idle_timeout > 0 and self.is_alive():
+            # Re-arm timer with the new deadline
+            self._touch_idle()
+        elif self.idle_timeout <= 0 and self._idle_timer is not None:
+            with self._lock:
+                self._idle_timer.cancel()
+                self._idle_timer = None
+
     def stop(self) -> None:
         """Stop the worker and release VRAM."""
         was_running = False

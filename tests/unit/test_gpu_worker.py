@@ -496,6 +496,46 @@ def test_ft16_observer_fires_on_spawn_crash_stop():
             pass
 
 
+def test_ft18_set_idle_timeout_updates_threshold():
+    """set_idle_timeout() updates the auto-stop deadline and takes
+    effect on a running worker. Used by model loaders to sync the
+    catalog entry's idle_timeout_s to the worker instance."""
+    t = ToolWorker(
+        tool_name='idle_update_test',
+        tool_module=ECHO_MODULE,
+        vram_budget='tts_f5',
+        output_subdir='idle_update_test',
+        engine='test',
+        startup_timeout=10.0,
+        request_timeout=5.0,
+        idle_timeout=60.0,  # long initial timeout
+    )
+    try:
+        # Spawn worker and let the 60s timer arm
+        t.call({'op': 'echo'})
+        assert t.is_alive()
+        assert t.idle_timeout == 60.0
+
+        # Shrink the timeout — the timer should re-arm with the new value
+        t.set_idle_timeout(1.0)
+        assert t.idle_timeout == 1.0
+
+        # Wait past the new deadline → worker stops
+        time.sleep(1.8)
+        assert t._worker is None
+
+        # Also test disabling: spawn again, set to 0, confirm no auto-stop
+        t.call({'op': 'echo'})
+        t.set_idle_timeout(0)
+        time.sleep(0.5)
+        assert t.is_alive()
+    finally:
+        try:
+            t.stop()
+        except Exception:
+            pass
+
+
 def test_ft17_observer_remove():
     """remove_observer() unregisters cleanly; no events after removal."""
     events = []
