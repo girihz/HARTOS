@@ -55,6 +55,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import logging
 import threading
 import atexit
@@ -2106,6 +2107,125 @@ def _handle_screenshot_tool(input_text: str) -> str:
         return f"Screenshot error: {str(e)[:200]}"
 
 
+def _handle_shell_command_tool(input_text: str) -> str:
+    """Execute a shell / PowerShell / bash command on the user's computer
+    and return its stdout+stderr. This is the FAST path for anything that
+    can be done programmatically — `notepad file.txt` is one command vs
+    the 18-iteration VLM loop Computer_Action would do for the same task.
+
+    Safety:
+      - Hard-denylist of clearly destructive patterns (format, rm -rf /,
+        shred, dd if=/dev/, mkfs, del /s C:\\ etc.). Denylisted commands
+        return an explanation without running.
+      - 30-second timeout. Longer-running work should use Execute_Coding_Task.
+      - Output truncated to 4000 characters so a `tree /` style flood can't
+        blow the LLM context budget.
+      - Logged via _with_tool_logging on the Tool wrapper so every
+        invocation is auditable.
+
+    Input formats:
+      - 'notepad' / 'calc.exe' / 'explorer C:\\Users' — plain command string
+      - 'powershell: Get-Process | Select-Object -First 5' — explicit shell
+      - 'bash: ls -la ~ | head' — explicit shell
+
+    On Windows we use cmd.exe by default; 'powershell:' prefix switches to
+    pwsh. On Unix we use /bin/sh; 'bash:' prefix switches to bash.
+    """
+    import re as _re_shell
+    if not input_text or not isinstance(input_text, str):
+        return "Shell_Command: empty input. Pass a command string like 'notepad file.txt'."
+
+    text = input_text.strip()
+
+    # Explicit shell selector: 'powershell: <cmd>' / 'bash: <cmd>' / 'cmd: <cmd>'
+    shell_override = None
+    m = _re_shell.match(r'^(powershell|pwsh|bash|sh|cmd)\s*:\s*(.+)$', text, _re_shell.IGNORECASE)
+    if m:
+        shell_override = m.group(1).lower()
+        text = m.group(2).strip()
+
+    # --- Denylist of destructive patterns (case-insensitive, conservative)
+    _DENY_PATTERNS = [
+        r'\bformat\s+[a-z]:',                 # format C:
+        r'\brm\s+-rf\s+/\s*$',                # rm -rf /
+        r'\brm\s+-rf\s+--no-preserve-root',
+        r'\brm\s+-rf\s+~',                    # rm -rf ~
+        r'\bdel\s+/s\s+/q\s+[a-z]:\\',        # del /s /q C:\
+        r'\brmdir\s+/s\s+/q\s+[a-z]:\\',
+        r'\bmkfs\.',                          # mkfs.*
+        r'\bdd\s+if=/dev/(zero|random|urandom)\s+of=/dev/[sh]d',
+        r'\bshred\b',
+        r':\(\)\s*\{\s*:\|:&\s*\}\s*;:',      # fork bomb
+        r'\bhalt\b', r'\bpoweroff\b',
+        r'\breboot\b',                        # conservative — often benign but blocking
+        r'\bshutdown\s+-[srh]',
+        r'\breset-computermachinepassword',   # dangerous ps cmdlet (lowercased)
+        r'\bformat-volume',
+        r'\bremove-item\s+-recurse\s+-force\s+[a-z]:\\',
+    ]
+    text_l = text.lower()
+    for pat in _DENY_PATTERNS:
+        if _re_shell.search(pat, text_l):
+            return (
+                f"Shell_Command refused: the command matches a destructive "
+                f"pattern ('{pat}') and is blocked by the built-in safety list. "
+                f"If you really need this, ask the user to run it manually."
+            )
+
+    # --- Choose shell + argv
+    if sys.platform == 'win32':
+        if shell_override in ('powershell', 'pwsh'):
+            argv = ['powershell', '-NoProfile', '-Command', text]
+        elif shell_override in ('bash', 'sh'):
+            argv = ['bash', '-c', text]
+        else:
+            argv = ['cmd', '/c', text]
+    else:
+        if shell_override in ('powershell', 'pwsh'):
+            argv = ['pwsh', '-NoProfile', '-Command', text]
+        elif shell_override == 'bash':
+            argv = ['bash', '-c', text]
+        else:
+            argv = ['/bin/sh', '-c', text]
+
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            # Do NOT pass shell=True — argv already routes through the
+            # chosen shell and shell=True would double-parse the string.
+            shell=False,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            "Shell_Command timed out after 30s. For long-running work use "
+            "Execute_Coding_Task instead, which has a longer budget."
+        )
+    except FileNotFoundError as e:
+        return f"Shell_Command: interpreter not found — {e}"
+    except Exception as e:
+        return f"Shell_Command error: {type(e).__name__}: {str(e)[:200]}"
+
+    out = (proc.stdout or '').strip()
+    err = (proc.stderr or '').strip()
+    rc = proc.returncode
+
+    # Truncate combined output to 4000 chars max
+    combined = []
+    if out:
+        combined.append(out[:2000])
+    if err:
+        combined.append(f"[stderr]\n{err[:2000]}")
+    body = '\n'.join(combined) if combined else '(no output)'
+
+    header = f"Exit code: {rc}"
+    if len(body) > 4000:
+        body = body[:4000] + '\n...(truncated)'
+    return f"{header}\n{body}"
+
+
 def _handle_navigate_app_tool(input_text: str) -> str:
     """Resolve a spoken destination to a Nunba SPA route and attach a
     structured ui_action the frontend LiquidActionBar can render.
@@ -2565,13 +2685,44 @@ def get_tools(req_tool, is_first: bool = False):
             ),
 
             Tool(
+                name="Shell_Command",
+                func=_handle_shell_command_tool,
+                description=(
+                    "Run a single shell / PowerShell / bash command on the user's "
+                    "computer. ALWAYS prefer this over Computer_Action when the task "
+                    "is expressible as a command — it's deterministic, 100ms instead "
+                    "of 60+ seconds of VLM grounding, and doesn't need to see the "
+                    "screen. Use Shell_Command for: launching apps (notepad, calc, "
+                    "chrome, explorer C:\\path), opening files (notepad file.txt), "
+                    "listing directories (dir, ls), system info (systeminfo, "
+                    "Get-Process), creating/deleting files, running scripts, git "
+                    "operations, package installs, etc. Input formats: plain command "
+                    "string ('notepad hello.txt'), 'powershell: Get-Process | Select "
+                    "-First 5' to force PowerShell, 'bash: ls -la ~' to force bash. "
+                    "Destructive patterns (format C:, rm -rf /, fork bomb, etc.) are "
+                    "denied by a built-in safety list. 30-second timeout. Output "
+                    "truncated to 4000 chars. For long-running coding work use "
+                    "Execute_Coding_Task instead."
+                ),
+            ),
+            Tool(
                 name="Computer_Action",
                 func=_handle_computer_action_tool,
                 description=(
                     "Execute a GUI action on the user's computer: click buttons, "
-                    "type text, open apps, scroll. Uses VLM to identify what to click. "
-                    "Input: natural language instruction (e.g. 'open Chrome', "
-                    "'click the Save button', 'type hello in the search box')."
+                    "type text, scroll, interact with visible UI elements that can "
+                    "ONLY be reached through the graphical interface. Uses a VLM to "
+                    "identify what to click, so it's ~10-60 seconds per task. "
+                    "IMPORTANT: before picking this tool, ask yourself whether "
+                    "Shell_Command could do the same job — launching apps, opening "
+                    "files, running scripts, changing settings, etc. are almost "
+                    "always faster and more reliable via Shell_Command. Reserve "
+                    "Computer_Action for tasks that genuinely require visual "
+                    "grounding: clicking a specific button inside an already-running "
+                    "app's UI, picking a visible option from a GUI menu, dragging "
+                    "something, etc. Input: natural language instruction (e.g. "
+                    "'click the Save button in the open document', 'select the "
+                    "second item in the dropdown')."
                 ),
             ),
             Tool(
