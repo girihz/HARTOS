@@ -339,8 +339,19 @@ class Qwen3VLBackend:
         return 'left_click'
 
     def _parse_action_response(self, raw, img_w, img_h, task=''):
-        """Parse VLM response into action dict. Returns (result_dict, nx, ny) or (result_dict, None, None)."""
+        """Parse VLM response into action dict. Returns (result_dict, nx, ny) or (result_dict, None, None).
+
+        NOTE: img_w/img_h are VLM image dimensions (e.g. 1024x576), but pyautogui
+        needs SCREEN coordinates. We use pyautogui.size() for the final scaling.
+        """
         raw = raw.strip()
+
+        # Get actual screen dimensions for coordinate scaling
+        try:
+            import pyautogui as _pag
+            _screen_w, _screen_h = _pag.size()
+        except Exception:
+            _screen_w, _screen_h = img_w, img_h  # fallback to image dims
 
         if 'DONE' in raw.upper():
             return {'action': 'done', 'screen_x': 0, 'screen_y': 0,
@@ -380,8 +391,8 @@ class Qwen3VLBackend:
         m = re.search(r'<point>\s*(\d+)\s*,\s*(\d+)\s*</point>', raw)
         if m:
             nx, ny = int(m.group(1)), int(m.group(2))
-            px = int(nx * img_w / 1000)
-            py = int(ny * img_h / 1000)
+            px = int(nx * _screen_w / 1000)
+            py = int(ny * _screen_h / 1000)
             return {'action': action_type, 'screen_x': px, 'screen_y': py,
                     'norm_x': nx, 'norm_y': ny,
                     'text': '', 'done': False,
@@ -393,8 +404,8 @@ class Qwen3VLBackend:
         if len(nums) >= 2:
             nx, ny = int(nums[0]), int(nums[1])
             if 0 <= nx <= 1000 and 0 <= ny <= 1000:
-                px = int(nx * img_w / 1000)
-                py = int(ny * img_h / 1000)
+                px = int(nx * _screen_w / 1000)
+                py = int(ny * _screen_h / 1000)
                 return {'action': action_type, 'screen_x': px, 'screen_y': py,
                         'norm_x': nx, 'norm_y': ny,
                         'text': '', 'done': False,
@@ -501,14 +512,21 @@ class Qwen3VLBackend:
         os_context = self._get_os_context()
         img_w, img_h = self._get_image_dimensions(screenshot_b64)
 
+        # Screen dimensions for pyautogui coordinate scaling
+        try:
+            import pyautogui as _pag
+            screen_w, screen_h = _pag.size()
+        except Exception:
+            screen_w, screen_h = img_w, img_h
+
         # --- Strategy 1: Taskbar list for taskbar targets ---
         if self._is_taskbar_task(task):
             logger.info(f"Using taskbar_list strategy for: {task}")
             match, list_raw = self._taskbar_list_lookup(screenshot_b64, task)
             if match:
                 nx, ny, match_line = match
-                px = int(nx * img_w / 1000)
-                py = int(ny * img_h / 1000)
+                px = int(nx * screen_w / 1000)
+                py = int(ny * screen_h / 1000)
                 latency = time.time() - start
                 return {'action': 'left_click', 'screen_x': px, 'screen_y': py,
                         'norm_x': nx, 'norm_y': ny,
@@ -656,7 +674,13 @@ class Qwen3VLBackend:
             )
             resp.raise_for_status()
             data = resp.json()
-            return data['choices'][0]['message']['content']
+            msg = data['choices'][0]['message']
+            # Qwen3.5 thinking mode: content may be None if all output is in
+            # reasoning_content. Fall back to reasoning_content if content is empty.
+            content = msg.get('content')
+            if not content and msg.get('reasoning_content'):
+                content = msg['reasoning_content']
+            return content or ''
         except Exception as e:
             logger.error(f"Qwen3-VL API call failed: {e}")
             raise
