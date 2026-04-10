@@ -507,22 +507,30 @@ class TestPopulateVideoGenCatalog:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestPopulateFromSubsystems:
-    """Integration test: populate_from_subsystems() calls all 4 populators.
+    """Integration test: populate_from_subsystems() calls all built-in populators.
 
     Expected totals from the built-in _populate_* methods (no extra
     application-registered populators):
         TTS      :  9  (ENGINE_REGISTRY)
         STT      : 11  (5 faster-whisper + 6 sherpa-onnx)
-        VLM      :  4  (qwen3vl, minicpm-v2, mobilevlm, clip)
+        VLM      :  5  (qwen3vl, qwen08b caption, minicpm-v2, mobilevlm, clip)
         VideoGen :  2  (wan2gp, ltx2)
-        Total    : 26
+        AudioGen :  2  (acestep, diffrhythm)
+        Total    : 29
     """
 
     EXPECTED_TTS_COUNT = 9
     EXPECTED_STT_COUNT = 11
     EXPECTED_VLM_COUNT = 5  # +1 for qwen08b caption model
     EXPECTED_VIDEOGEN_COUNT = 2
-    EXPECTED_TOTAL = EXPECTED_TTS_COUNT + EXPECTED_STT_COUNT + EXPECTED_VLM_COUNT + EXPECTED_VIDEOGEN_COUNT
+    EXPECTED_AUDIOGEN_COUNT = 2  # acestep + diffrhythm
+    EXPECTED_TOTAL = (
+        EXPECTED_TTS_COUNT
+        + EXPECTED_STT_COUNT
+        + EXPECTED_VLM_COUNT
+        + EXPECTED_VIDEOGEN_COUNT
+        + EXPECTED_AUDIOGEN_COUNT
+    )
 
     @pytest.fixture
     def populated_catalog(self):
@@ -552,6 +560,12 @@ class TestPopulateFromSubsystems:
         vg = populated_catalog.list_by_type('video_gen')
         assert len(vg) == self.EXPECTED_VIDEOGEN_COUNT, (
             f"Expected {self.EXPECTED_VIDEOGEN_COUNT} VideoGen entries, got {len(vg)}"
+        )
+
+    def test_audiogen_entries_present(self, populated_catalog):
+        ag = populated_catalog.list_by_type('audio_gen')
+        assert len(ag) == self.EXPECTED_AUDIOGEN_COUNT, (
+            f"Expected {self.EXPECTED_AUDIOGEN_COUNT} AudioGen entries, got {len(ag)}"
         )
 
     def test_total_entry_count(self, populated_catalog):
