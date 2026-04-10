@@ -174,6 +174,19 @@ class FlaskChannelIntegration:
         except ImportError:
             logger.warning("Discord adapter not available")
 
+    def register_whatsapp(self, api_url: str = None, **kwargs) -> None:
+        """Register WhatsApp adapter."""
+        from .whatsapp_adapter import create_whatsapp_adapter
+
+        api_url = api_url or os.getenv("WHATSAPP_API_URL")
+        if not api_url:
+            logger.warning("WHATSAPP_API_URL not set, skipping registration")
+            return
+
+        adapter = create_whatsapp_adapter(api_url, **kwargs)
+        self.registry.register(adapter)
+        logger.info("WhatsApp adapter registered")
+
     def set_user_session(
         self,
         channel: str,
