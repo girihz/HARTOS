@@ -139,6 +139,30 @@ class ThreadLocalData:
     def clear_task_source(self):
         self._local.task_source = 'own'
 
+    # --- User role (central | regional | flat | guest) — used by the
+    #     ui_actions page registry to filter admin-only destinations ---
+
+    def set_user_role(self, role: str):
+        self._local.user_role = role
+
+    def get_user_role(self) -> str:
+        return getattr(self._local, 'user_role', 'flat')
+
+    # --- LiquidUI action bar signals (set by the Navigate_App tool) ---
+    # The Flask /chat handler reads these after the LangChain call
+    # returns and attaches them to the response JSON so the frontend
+    # LiquidActionBar renders route chips without any extra round trip.
+
+    def set_ui_actions(self, actions: list):
+        """Attach a list of ui_action dicts to the current request."""
+        self._local.ui_actions = list(actions or [])
+
+    def get_ui_actions(self) -> list:
+        return getattr(self._local, 'ui_actions', [])
+
+    def clear_ui_actions(self):
+        self._local.ui_actions = []
+
 
 thread_local_data = ThreadLocalData()
 
