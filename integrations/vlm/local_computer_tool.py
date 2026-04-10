@@ -68,13 +68,16 @@ except ImportError:
 
 from core.http_pool import pooled_get, pooled_post
 
-# Action types matching OmniParser computer.py Action literal
+# Action types matching OmniParser computer.py Action literal.
+# 'shell' is a Nunba extension — lets the VLM loop run deterministic commands
+# instead of GUI grounding for tasks that can be done programmatically
+# (e.g., launching an app, opening a file in its default handler).
 SUPPORTED_ACTIONS = {
     'key', 'type', 'mouse_move', 'left_click', 'left_click_drag',
     'right_click', 'middle_click', 'double_click', 'screenshot',
     'cursor_position', 'hover', 'list_folders_and_files',
     'Open_file_and_copy_paste', 'open_file_gui', 'write_file',
-    'read_file_and_understand', 'wait', 'hotkey',
+    'read_file_and_understand', 'wait', 'hotkey', 'shell',
 }
 
 
@@ -202,10 +205,10 @@ def _execute_inprocess(action: dict) -> dict:
         if not isinstance(coord, (list, tuple)) or len(coord) < 2:
             return {'output': '', 'error': f'Invalid coordinate format: {coord}'}
 
-    # File/wait actions don't need pyautogui
+    # File/wait/shell actions don't need pyautogui
     _NO_GUI_ACTIONS = {
         'list_folders_and_files', 'read_file_and_understand', 'write_file',
-        'Open_file_and_copy_paste', 'open_file_gui', 'wait',
+        'Open_file_and_copy_paste', 'open_file_gui', 'wait', 'shell',
     }
 
     if act not in _NO_GUI_ACTIONS and pyautogui is None:
@@ -312,6 +315,34 @@ def _execute_inprocess(action: dict) -> dict:
             path = action.get('path', '')
             os.startfile(path)
             return {'output': f'Opened {path}'}
+
+        elif act == 'shell':
+            # Deterministic command execution inside the VLM loop. Reuses
+            # hart_intelligence_entry._handle_shell_command_tool so the same
+            # denylist + timeout + truncation apply — single code path.
+            cmd = action.get('command', text)
+            if not cmd:
+                return {'output': '', 'error': 'shell action needs command string'}
+            try:
+                from hart_intelligence_entry import _handle_shell_command_tool
+                result_text = _handle_shell_command_tool(cmd)
+                # Output is already "Exit code: N\n<body>"; treat non-zero as
+                # non-fatal (VLM can decide what to do next) but surface it.
+                is_error = 'Exit code: 0' not in (result_text or '')
+                return {'output': result_text, 'status': 'error' if is_error else 'ok'}
+            except ImportError:
+                # Fallback: direct subprocess with same safety posture
+                import subprocess as _sp
+                argv = (['cmd', '/c', cmd] if sys.platform == 'win32'
+                        else ['/bin/sh', '-c', cmd])
+                try:
+                    proc = _sp.run(argv, capture_output=True, text=True, timeout=30)
+                    body = (proc.stdout or '')[:2000]
+                    if proc.stderr:
+                        body += f'\n[stderr]\n{proc.stderr[:2000]}'
+                    return {'output': f'Exit code: {proc.returncode}\n{body}'}
+                except _sp.TimeoutExpired:
+                    return {'output': '', 'error': 'shell: timeout after 30s'}
 
         elif act == 'Open_file_and_copy_paste':
             src = action.get('source_path', '')
