@@ -64,12 +64,17 @@ TOPIC_MAP = {
     'community.feed': 'com.hertzai.community.feed',
     # Fleet commands (RN subscribes for TTS, agent consent, game dispatch)
     'fleet.command': 'com.hertzai.hevolve.fleet.{device_id}',
+    # Fleet commands targeting all devices for a user (fan-out when device_id unknown)
+    'fleet.command.user': 'com.hertzai.hevolve.fleet.user.{user_id}',
     # Mock interview (RN only)
     'mock_interview': 'com.hertzai.mock_interview.{user_id}',
     # Telemetry (node → central only, metadata, never content)
     'telemetry.node': 'com.hartos.telemetry.{node_id}',
     # Compute routing status (client shows real-time routing info)
     'compute.routing': 'com.hertzai.hevolve.compute.routing.{user_id}',
+    # Compute relay — phone→HARTOS request + HARTOS→phone response (NAT traversal)
+    'compute.request': 'com.hertzai.hevolve.compute.request.{user_id}',
+    'compute.response': 'com.hertzai.hevolve.compute.response.{user_id}',
     # Remote desktop
     'remote_desktop.signal': 'com.hartos.remote_desktop.signal.{device_id}',
 }

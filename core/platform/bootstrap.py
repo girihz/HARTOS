@@ -185,14 +185,15 @@ def _wire_event_subscribers(bus) -> None:
                 if audio:
                     logger.debug("TTS synthesized %d bytes for user %s",
                                  len(audio), data.get('user_id', ''))
-                    # Push audio to fleet command channel for mobile playback
+                    # Push audio to fleet command channel for mobile playback.
+                    # Uses cmd_type (not 'command') to match the registry in
+                    # services/fleetCommandHandler.js (COMMAND_HANDLERS).
                     try:
                         from core.peer_link.message_bus import get_message_bus
-                        get_message_bus().publish('fleet.command', {
-                            'command': 'tts_playback',
+                        get_message_bus().publish('fleet.command.user', {
+                            'cmd_type': 'tts_stream',
+                            'text': text[:500],
                             'audio_size': len(audio),
-                            'text': text[:100],
-                            'user_id': data.get('user_id', ''),
                         }, user_id=data.get('user_id', ''))
                     except Exception:
                         pass
@@ -254,10 +255,12 @@ def _wire_event_subscribers(bus) -> None:
         user_id = data.get('user_id', '')
         if not user_id:
             return
+        # Publish with cmd_type to match the RN COMMAND_HANDLERS registry.
+        # Uses fleet.command.user topic for fan-out (no specific device_id).
         try:
             from core.peer_link.message_bus import get_message_bus
-            get_message_bus().publish('fleet.command', {
-                'command': 'notification_unconfirmed',
+            get_message_bus().publish('fleet.command.user', {
+                'cmd_type': 'notification_unconfirmed',
                 'msg_id': data.get('msg_id', ''),
                 'topic': data.get('topic', ''),
             }, user_id=user_id)
