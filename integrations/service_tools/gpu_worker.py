@@ -79,10 +79,101 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Cross-worker VRAM eviction registry
+# ═══════════════════════════════════════════════════════════════════
+#
+# Every ToolWorker instance registers itself here so that when a new
+# worker needs GPU memory and the VRAM manager reports insufficient
+# headroom, we can evict the least-recently-used OTHER worker(s) to
+# make room. Without this, spawning F5 on top of a loaded Chatterbox
+# ML would OOM the subprocess — correct crash isolation, but wasted
+# time because nobody told Chatterbox to step aside.
+
+_REGISTRY_LOCK = threading.Lock()
+_ALL_WORKERS: "List[weakref.ref['ToolWorker']]" = []
+
+
+def _register_tool_worker(tw: "ToolWorker") -> None:
+    """Register a ToolWorker so the cross-worker eviction sees it.
+
+    Uses weakref so dropping a ToolWorker doesn't keep it alive.
+    """
+    with _REGISTRY_LOCK:
+        # Prune dead refs opportunistically
+        _ALL_WORKERS[:] = [r for r in _ALL_WORKERS if r() is not None]
+        _ALL_WORKERS.append(weakref.ref(tw))
+
+
+def _live_tool_workers() -> "List[ToolWorker]":
+    """Return currently-alive ToolWorker instances (worker subprocess up)."""
+    with _REGISTRY_LOCK:
+        out = []
+        for r in _ALL_WORKERS:
+            tw = r()
+            if tw is not None and tw.is_alive():
+                out.append(tw)
+        return out
+
+
+def try_free_vram(needed_gb: float, exclude_tool: Optional[str] = None) -> bool:
+    """Stop LRU workers until `needed_gb` GB of GPU VRAM is free.
+
+    Called BEFORE spawning a heavy worker when the VRAM manager reports
+    insufficient free VRAM. Iterates live workers sorted by last-used
+    ascending (oldest first), skipping the worker identified by
+    `exclude_tool`, and stops each one until free VRAM meets the
+    threshold — or the registry runs out.
+
+    Returns True if the required headroom was reached, False otherwise.
+    """
+    try:
+        from integrations.service_tools.vram_manager import vram_manager
+    except ImportError:
+        return False
+
+    free_gb = vram_manager.get_free_vram()
+    if free_gb >= needed_gb:
+        return True
+
+    # Sort LRU first (smallest _last_used = longest idle)
+    candidates = sorted(
+        (tw for tw in _live_tool_workers() if tw.tool_name != exclude_tool),
+        key=lambda w: w._last_used or 0.0,
+    )
+
+    for tw in candidates:
+        logger.info(
+            f"VRAM eviction: stopping {tw.tool_name} to free memory for "
+            f"{exclude_tool or 'new worker'} "
+            f"(need {needed_gb:.1f}GB, have {vram_manager.get_free_vram():.1f}GB)"
+        )
+        try:
+            tw.stop()
+        except Exception as e:
+            logger.warning(f"eviction: failed to stop {tw.tool_name}: {e}")
+            continue
+
+        free_gb = vram_manager.get_free_vram()
+        if free_gb >= needed_gb:
+            logger.info(
+                f"VRAM eviction: freed enough ({free_gb:.1f}GB) for "
+                f"{exclude_tool or 'new worker'}"
+            )
+            return True
+
+    logger.warning(
+        f"VRAM eviction: couldn't free enough ({vram_manager.get_free_vram():.1f}GB "
+        f"free, need {needed_gb:.1f}GB)"
+    )
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -656,6 +747,10 @@ class ToolWorker:
         # is_alive() and get the new state.
         self._observers: list = []
 
+        # Register with the cross-worker registry so the LRU eviction
+        # policy can see this worker when other tools need VRAM.
+        _register_tool_worker(self)
+
     # Back-compat shims for properties the tests still read
     @property
     def worker_module(self) -> str:
@@ -865,6 +960,13 @@ class ToolWorker:
         spawned = False
         with self._lock:
             if self._worker is None or not self._worker.is_alive():
+                # Cross-worker VRAM eviction: if our budget won't fit
+                # in current free VRAM, stop LRU other workers to make
+                # room BEFORE spawning. Prevents a predictable OOM in
+                # the new subprocess while older idle workers hold
+                # memory they're not actively using.
+                self._ensure_vram_headroom()
+
                 cli_args = [self.tool_module]
                 if self.variant:
                     cli_args.append(self.variant)
@@ -883,6 +985,29 @@ class ToolWorker:
             # safely call back into this ToolWorker without deadlocking.
             self._notify('spawned')
         return worker
+
+    def _ensure_vram_headroom(self) -> None:
+        """Evict LRU workers if VRAM is too tight for this tool to fit.
+
+        Looks up this tool's declared VRAM budget from vram_manager.
+        If current free VRAM is below that budget, calls try_free_vram
+        to stop other workers (oldest-idle first). Silent no-op when
+        the tool has no registered budget or vram_manager is unavailable.
+        """
+        try:
+            from integrations.service_tools.vram_manager import (
+                vram_manager, VRAM_BUDGETS,
+            )
+        except ImportError:
+            return
+        budget = VRAM_BUDGETS.get(self.vram_budget)
+        if not budget:
+            return
+        _min_vram, model_gb = budget
+        free_gb = vram_manager.get_free_vram()
+        if free_gb >= model_gb:
+            return
+        try_free_vram(needed_gb=model_gb, exclude_tool=self.tool_name)
 
     def _get_output_dir(self) -> Path:
         d = Path(os.environ.get(
