@@ -131,7 +131,13 @@ _faster_whisper_model_size = None
 # faster-whisper (primary engine)
 # ═══════════════════════════════════════════════════════════════
 
-_FASTER_WHISPER_MODEL_SIZE = "base"  # CPU int8 — preserves GPU VRAM for TTS/VLM
+# Default faster-whisper model size. Can be overridden by the user via the
+# admin Model Management UI, which sets HEVOLVE_STT_MODEL_SIZE in the
+# orchestrator and then stops the worker so the next call respawns with
+# the new value picked up at subprocess startup.
+_FASTER_WHISPER_MODEL_SIZE = os.environ.get(
+    'HEVOLVE_STT_MODEL_SIZE', 'base',
+)  # CPU int8 — preserves GPU VRAM for TTS/VLM
 
 
 def _get_faster_whisper_model(model_size: str = "base"):
@@ -506,17 +512,36 @@ def select_whisper_model() -> str:
         return "moonshine-tiny"
 
 
-def whisper_transcribe(audio_path: str, language: str = None) -> str:
-    """Transcribe audio file to text.
+# ═══════════════════════════════════════════════════════════════
+# Subprocess isolation
+# ═══════════════════════════════════════════════════════════════
+#
+# STT engines (faster-whisper / sherpa-onnx / openai-whisper) all have
+# native C runtimes that can crash the parent process on CUDA OOM,
+# DLL conflicts, or audio decoder edge cases. Running them in a worker
+# subprocess contains those crashes: the worker dies, the parent catches
+# the exit code and returns an error JSON without bringing Nunba down.
+
+from .gpu_worker import ToolWorker  # noqa: E402
+
+_stt_tool = ToolWorker(
+    tool_name='whisper',
+    tool_module='integrations.service_tools.whisper_tool',
+    vram_budget='whisper_base',
+    output_subdir='stt',   # not used — STT doesn't generate files
+    engine='whisper',
+    startup_timeout=60.0,
+    request_timeout=180.0,  # long audio files can take a while
+    idle_timeout=300.0,     # free the model after 5 min idle
+)
+
+
+def _transcribe_impl(audio_path: str, language: str = None) -> str:
+    """Transcribe audio — runs inside the worker subprocess.
 
     Engine priority: faster-whisper → sherpa-onnx → openai-whisper.
 
-    Args:
-        audio_path: Path to audio file (WAV, MP3, WebM, etc.)
-        language: Optional language code (e.g. 'en', 'es'). Auto-detect if None.
-
-    Returns:
-        JSON string with 'text' and 'language' keys.
+    Returns JSON string with 'text' and 'language' keys.
     """
     # 1. Try faster-whisper (preferred — CTranslate2, 4x faster, multilingual)
     try:
@@ -549,7 +574,7 @@ def whisper_transcribe(audio_path: str, language: str = None) -> str:
     except Exception as e:
         logger.warning(f"sherpa-onnx failed, trying openai-whisper: {e}")
 
-    # 3. Fallback: openai-whisper (PyTorch)
+    # 3. Fallback: openai-whisper (PyTorch) — the risky path
     result = _legacy_transcribe(audio_path, language)
     if result:
         return result
@@ -557,16 +582,34 @@ def whisper_transcribe(audio_path: str, language: str = None) -> str:
     return json.dumps({"error": "No STT engine available (install faster-whisper)"})
 
 
-def whisper_detect_language(audio_path: str) -> str:
-    """Detect the language of an audio file.
+def whisper_transcribe(audio_path: str, language: str = None) -> str:
+    """Transcribe audio file to text (subprocess-isolated).
 
-    Uses faster-whisper (preferred) or openai-whisper for language detection.
+    Runs the STT engine chain in a dedicated worker subprocess so that
+    CUDA OOM / CTranslate2 crashes / PyTorch DLL segfaults can't kill
+    the parent process.
 
     Args:
-        audio_path: Path to audio file.
+        audio_path: Path to audio file (WAV, MP3, WebM, etc.)
+        language: Optional language code. Auto-detect if None.
 
     Returns:
-        JSON string with 'language' and 'probability' keys.
+        JSON string with 'text' and 'language' keys.
+    """
+    result = _stt_tool.call({
+        'op': 'transcribe',
+        'audio_path': audio_path,
+        'language': language,
+    })
+    if 'error' in result:
+        return json.dumps(result)
+    return result.get('raw_json', json.dumps(result))
+
+
+def _detect_language_impl(audio_path: str) -> str:
+    """Language detection — runs inside the worker subprocess.
+
+    Returns JSON string with 'language' and 'probability' keys.
     """
     # Try faster-whisper first (has built-in language detection)
     try:
@@ -612,8 +655,34 @@ def whisper_detect_language(audio_path: str) -> str:
         return json.dumps({"error": f"Language detection failed: {e}"})
 
 
+def whisper_detect_language(audio_path: str) -> str:
+    """Detect the language of an audio file (subprocess-isolated)."""
+    result = _stt_tool.call({
+        'op': 'detect_language',
+        'audio_path': audio_path,
+    })
+    if 'error' in result:
+        return json.dumps(result)
+    return result.get('raw_json', json.dumps(result))
+
+
 def unload_whisper():
-    """Unload all STT models to free memory."""
+    """Unload all STT models to free memory.
+
+    The actual models live inside the `_stt_tool` subprocess (see the
+    SUBPROCESS ISOLATION section above), so the authoritative unload is
+    stopping that worker. We ALSO clear the parent-side globals in case
+    a worker-side reference leaked into the parent module state during
+    an import.
+    """
+    # 1. Stop the worker subprocess — this is the real VRAM release.
+    try:
+        _stt_tool.stop()
+    except Exception as e:
+        logger.warning(f"failed to stop STT worker: {e}")
+
+    # 2. Also clear parent-side caches (only ever populated in the worker,
+    #    but defensive in case something called a legacy helper in-process).
     global _sherpa_recognizer, _sherpa_model_name
     global _whisper_model, _whisper_model_name
     global _faster_whisper_model, _faster_whisper_model_size
@@ -802,13 +871,15 @@ def _container_to_pcm(data: bytes) -> Optional[bytes]:
 
 
 def _transcribe_buffer(audio_buffer, keep_buffer: bool = False) -> tuple:
-    """Transcribe accumulated audio buffer using faster-whisper.
+    """Transcribe accumulated audio buffer via the subprocess STT worker.
 
-    Returns (text, language) tuple. Reuses the module-level faster-whisper
-    model instance (same one used by whisper_transcribe).
+    Returns (text, language) tuple.
+
+    Runs through `_stt_tool` so CUDA OOM or faster-whisper/CTranslate2
+    crashes on the realtime path only kill the worker subprocess — the
+    streaming WebSocket server (and the whole Nunba process) stay alive.
     """
     import tempfile
-    import numpy as np
 
     buf_bytes = audio_buffer.getvalue()
     if len(buf_bytes) < STREAM_SAMPLE_RATE * 2:  # < 1s of audio, skip
@@ -818,24 +889,10 @@ def _transcribe_buffer(audio_buffer, keep_buffer: bool = False) -> tuple:
         audio_buffer.seek(0)
         audio_buffer.truncate(0)
 
-    # Try direct numpy transcription (raw PCM)
-    try:
-        model = _get_faster_whisper_model(_FASTER_WHISPER_MODEL_SIZE)
-        audio_np = (
-            np.frombuffer(buf_bytes, dtype=np.int16)
-            .astype(np.float32) / 32768.0
-        )
-        segments, info = model.transcribe(
-            audio_np, beam_size=3, vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
-        )
-        text = ' '.join(seg.text for seg in segments).strip()
-        lang = info.language if info.language else 'unknown'
-        return (text, lang)
-    except Exception as e:
-        logger.debug(f"Direct PCM transcribe failed ({e}), trying temp file")
-
-    # Fallback: write to temp WAV file for faster-whisper
+    # Write PCM to a temp WAV file — the subprocess worker reads by
+    # path (simpler than shipping raw bytes over JSON). For realtime
+    # workloads this is still cheap (local disk, a few KB per chunk).
+    tmp = None
     try:
         import wave
         tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
@@ -844,20 +901,31 @@ def _transcribe_buffer(audio_buffer, keep_buffer: bool = False) -> tuple:
             wf.setsampwidth(STREAM_BYTES_PER_SAMPLE)
             wf.setframerate(STREAM_SAMPLE_RATE)
             wf.writeframes(buf_bytes)
+        tmp.close()
 
-        result_json = _faster_whisper_transcribe(tmp.name)
-        if result_json:
-            parsed = json.loads(result_json)
-            return (parsed.get('text', ''), parsed.get('language', 'unknown'))
-    except Exception as e:
-        logger.debug(f"WAV transcribe fallback failed: {e}")
-    finally:
+        result = _stt_tool.call({
+            'op': 'transcribe',
+            'audio_path': tmp.name,
+            'language': None,
+        })
+        if 'error' in result and not result.get('raw_json'):
+            logger.debug(f"Streaming transcribe failed: {result.get('error')}")
+            return ('', 'unknown')
+        raw = result.get('raw_json') or json.dumps(result)
         try:
-            os.unlink(tmp.name)
-        except Exception:
-            pass
-
-    return ('', 'unknown')
+            parsed = json.loads(raw)
+            return (parsed.get('text', ''), parsed.get('language', 'unknown'))
+        except json.JSONDecodeError:
+            return ('', 'unknown')
+    except Exception as e:
+        logger.debug(f"Streaming transcribe failed: {e}")
+        return ('', 'unknown')
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
 
 
 def start_stt_stream_server(port: int = 0) -> Optional[int]:
@@ -995,3 +1063,37 @@ class WhisperTool:
         tool_info.is_healthy = True
         service_tool_registry._tools["whisper"] = tool_info
         return True
+
+
+# ═══════════════════════════════════════════════════════════════
+# Worker callbacks (picked up by the centralized gpu_worker dispatcher)
+# ═══════════════════════════════════════════════════════════════
+#
+# The STT worker has no upfront load — each transcribe call lazy-
+# initializes the appropriate engine (faster-whisper / sherpa / legacy)
+# inside the subprocess. `_load` is a no-op; `_synthesize` dispatches
+# on the request op so one worker handles transcribe + detect_language.
+
+def _load():
+    """No upfront load — engines lazy-initialize per request."""
+    return None
+
+
+def _synthesize(_model, req: dict) -> dict:
+    """Dispatch STT requests inside the worker subprocess."""
+    op = req.get('op', 'transcribe')
+    if op == 'transcribe':
+        raw = _transcribe_impl(req.get('audio_path'), req.get('language'))
+    elif op == 'detect_language':
+        raw = _detect_language_impl(req.get('audio_path'))
+    else:
+        return {'error': f'Unknown op: {op}'}
+    # Return both the raw JSON (for pass-through) and parsed fields
+    try:
+        return {'raw_json': raw, **json.loads(raw)}
+    except json.JSONDecodeError:
+        return {'error': f'Invalid engine response: {raw[:200]}'}
+
+# NOTE: no `if __name__ == '__main__':` block — the centralized
+# dispatcher at integrations.service_tools.gpu_worker imports this
+# module and calls _load / _synthesize on spawn.

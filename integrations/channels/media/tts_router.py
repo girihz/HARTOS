@@ -57,7 +57,11 @@ class TTSEngineSpec:
     latency_cpu_ms: int         # estimated latency on CPU (0 if N/A)
     latency_cloud_ms: int       # estimated latency on cloud (0 if N/A)
     tool_module: Optional[str]  # Python module path for the tool
-    tool_function: Optional[str]  # function name within module
+    tool_function: Optional[str]  # parent-side synthesize function name
+    tool_worker_attr: Optional[str] = None  # ToolWorker attribute name
+                                             # on the tool module; None for
+                                             # CPU-only engines that have no
+                                             # subprocess worker.
     sample_rate: int = 24000
 
 
@@ -75,6 +79,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         latency_cloud_ms=0,
         tool_module='integrations.service_tools.chatterbox_tool',
         tool_function='chatterbox_synthesize',
+        tool_worker_attr='_turbo',
     ),
     'luxtts': TTSEngineSpec(
         engine_id='luxtts',
@@ -101,6 +106,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         latency_cloud_ms=0,
         tool_module='integrations.service_tools.cosyvoice_tool',
         tool_function='cosyvoice_synthesize',
+        tool_worker_attr='_tool',
     ),
     'f5_tts': TTSEngineSpec(
         engine_id='f5_tts',
@@ -114,6 +120,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         latency_cloud_ms=0,
         tool_module='integrations.service_tools.f5_tts_tool',
         tool_function='f5_synthesize',
+        tool_worker_attr='_tool',
     ),
     'indic_parler': TTSEngineSpec(
         engine_id='indic_parler',
@@ -130,6 +137,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         latency_cloud_ms=0,
         tool_module='integrations.service_tools.indic_parler_tool',
         tool_function='indic_parler_synthesize',
+        tool_worker_attr='_tool',
     ),
     'chatterbox_ml': TTSEngineSpec(
         engine_id='chatterbox_ml',
@@ -147,6 +155,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         latency_cloud_ms=0,
         tool_module='integrations.service_tools.chatterbox_tool',
         tool_function='chatterbox_ml_synthesize',
+        tool_worker_attr='_ml',
     ),
     'pocket_tts': TTSEngineSpec(
         engine_id='pocket_tts',
