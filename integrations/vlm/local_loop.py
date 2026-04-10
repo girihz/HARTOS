@@ -113,6 +113,87 @@ def run_local_agentic_loop(
     extracted_responses = []
     start_time = time.time()
 
+    # ── Fast path: "open [app]" on Windows → Win+R → type → Enter ──
+    # The VLM consistently mis-grounds Start menu tiles (it hallucinates the
+    # taskbar position and clicks the wrong thing). Win+R is deterministic:
+    # no grounding needed, works for any installed app by name. We only try
+    # this if the task looks like a plain "open X" with no qualifiers that
+    # require Start menu semantics (e.g. "pin to taskbar").
+    _os_lower = _os_name.lower()
+    if _os_lower == 'windows':
+        import re as _re_open
+        open_match = _re_open.match(
+            r'^\s*(?:open|launch|start|run)\s+(?:the\s+)?'
+            r'(?:notepad|calculator|calc|paint|mspaint|explorer|file\s*explorer|'
+            r'cmd|command\s*prompt|powershell|terminal|control\s*panel|'
+            r'task\s*manager|notepad\+\+|wordpad|winword|excel|outlook|'
+            r'chrome|firefox|edge|msedge|brave|opera|safari|'
+            r'vs\s*code|vscode|code|pycharm|intellij|sublime)'
+            r'(?:\s+(?:on|in|from)\s+my\s+(?:computer|pc|desktop|system))?\s*\.?$',
+            enhanced.lower()
+        )
+        if open_match:
+            _app_map = {
+                'notepad': 'notepad', 'calc': 'calc', 'calculator': 'calc',
+                'paint': 'mspaint', 'mspaint': 'mspaint',
+                'explorer': 'explorer', 'file explorer': 'explorer',
+                'fileexplorer': 'explorer',
+                'cmd': 'cmd', 'command prompt': 'cmd', 'commandprompt': 'cmd',
+                'powershell': 'powershell', 'terminal': 'wt',
+                'control panel': 'control', 'controlpanel': 'control',
+                'task manager': 'taskmgr', 'taskmanager': 'taskmgr',
+                'notepad++': 'notepad++', 'wordpad': 'write',
+                'winword': 'winword', 'excel': 'excel', 'outlook': 'outlook',
+                'chrome': 'chrome', 'firefox': 'firefox',
+                'edge': 'msedge', 'msedge': 'msedge',
+                'brave': 'brave', 'opera': 'opera', 'safari': 'safari',
+                'vs code': 'code', 'vscode': 'code', 'code': 'code',
+                'pycharm': 'pycharm64', 'intellij': 'idea64',
+                'sublime': 'sublime_text',
+            }
+            # Re-extract the target app keyword from the original task
+            for key, exe in _app_map.items():
+                if key in enhanced.lower():
+                    app_exe = exe
+                    break
+            else:
+                app_exe = None
+
+            if app_exe:
+                logger.info(f"Fast path: Win+R → {app_exe} for task '{enhanced[:60]}'")
+                try:
+                    # Win+R opens Run dialog, type executable name, Enter
+                    execute_action({'action': 'hotkey', 'value': 'win+r'}, tier)
+                    time.sleep(0.4)  # let Run dialog appear
+                    execute_action({'action': 'type', 'value': app_exe}, tier)
+                    time.sleep(0.15)
+                    execute_action({'action': 'key', 'value': 'enter'}, tier)
+                    time.sleep(0.8)  # let app launch
+
+                    extracted_responses.append({
+                        'type': 'action',
+                        'content': {
+                            'action': 'win_r_shortcut',
+                            'reasoning': f'Fast path: opened {app_exe} via Win+R',
+                            'result': 'ok',
+                            'ok': True,
+                        },
+                        'iteration': 1,
+                    })
+                    extracted_responses.append({
+                        'type': 'completion',
+                        'content': f'Opened {app_exe} via Win+R',
+                        'iteration': 1,
+                    })
+                    return {
+                        'status': 'success',
+                        'exit_reason': 'done',
+                        'extracted_responses': extracted_responses,
+                        'execution_time_seconds': time.time() - start_time,
+                    }
+                except Exception as e:
+                    logger.warning(f"Win+R fast path failed: {e} — falling through to VLM loop")
+
     for iteration in range(max_iterations):
         elapsed = time.time() - start_time
         if elapsed > max_eta:

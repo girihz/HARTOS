@@ -1459,6 +1459,141 @@ class TestFullActionLoop:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Win+R Fast-Path Tests (local_loop.py)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestWinRFastPath:
+    """Verify 'open [app]' on Windows deterministically uses Win+R instead
+    of trusting the VLM to ground Start menu tiles (which hallucinates)."""
+
+    @patch('integrations.vlm.local_loop.platform.system', return_value='Windows')
+    @patch('integrations.vlm.local_computer_tool.execute_action')
+    def test_open_notepad_uses_winr(self, mock_execute, mock_platform):
+        """'open notepad' should take the fast path: Win+R → notepad → Enter."""
+        # Reload local_loop so module-level _os_name picks up the Windows patch
+        import importlib, integrations.vlm.local_loop as ll
+        importlib.reload(ll)
+        mock_execute.return_value = {"output": "ok", "status": "success"}
+
+        message = {
+            "instruction_to_vlm_agent": "open notepad",
+            "user_id": "u",
+            "prompt_id": "p",
+            "max_ETA_in_seconds": 300,
+        }
+        result = ll.run_local_agentic_loop(message, tier='inprocess', max_iterations=10)
+
+        assert result['status'] == 'success'
+        assert result['exit_reason'] == 'done'
+        # Three actions: Win+R hotkey, type 'notepad', Enter
+        assert mock_execute.call_count == 3
+        call_actions = [c.args[0]['action'] for c in mock_execute.call_args_list]
+        assert call_actions == ['hotkey', 'type', 'key']
+        # First call was win+r
+        assert mock_execute.call_args_list[0].args[0]['value'] == 'win+r'
+        # Second call typed the executable
+        assert mock_execute.call_args_list[1].args[0]['value'] == 'notepad'
+        # Third call pressed Enter
+        assert mock_execute.call_args_list[2].args[0]['value'] == 'enter'
+
+    @patch('integrations.vlm.local_loop.platform.system', return_value='Windows')
+    @patch('integrations.vlm.local_computer_tool.execute_action')
+    def test_open_calc_maps_to_calc_exe(self, mock_execute, mock_platform):
+        """'open calculator' → Win+R → calc (maps to the executable name)."""
+        import importlib, integrations.vlm.local_loop as ll
+        importlib.reload(ll)
+        mock_execute.return_value = {"output": "ok", "status": "success"}
+
+        result = ll.run_local_agentic_loop({
+            "instruction_to_vlm_agent": "open the calculator",
+            "user_id": "u", "prompt_id": "p", "max_ETA_in_seconds": 300,
+        }, tier='inprocess', max_iterations=10)
+
+        assert result['exit_reason'] == 'done'
+        assert mock_execute.call_args_list[1].args[0]['value'] == 'calc'
+
+    @patch('integrations.vlm.local_loop.platform.system', return_value='Linux')
+    @patch('integrations.vlm.local_computer_tool.execute_action')
+    def test_open_notepad_skips_winr_on_linux(self, mock_execute, mock_platform):
+        """Fast path is Windows-only — Linux 'open notepad' falls through
+        to the normal VLM loop."""
+        import importlib, integrations.vlm.local_loop as ll
+        importlib.reload(ll)
+        # make the VLM loop exit immediately by having take_screenshot fail
+        with patch('integrations.vlm.local_computer_tool.take_screenshot',
+                   side_effect=Exception('stub')):
+            result = ll.run_local_agentic_loop({
+                "instruction_to_vlm_agent": "open notepad",
+                "user_id": "u", "prompt_id": "p", "max_ETA_in_seconds": 5,
+            }, tier='inprocess', max_iterations=3)
+        # Fast path did NOT fire (Linux), so no Win+R hotkey calls
+        assert not any(
+            c.args[0].get('action') == 'hotkey' and c.args[0].get('value') == 'win+r'
+            for c in mock_execute.call_args_list
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Bottom-edge Bias Retry Tests (qwen3vl_backend.point_and_act)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestPointAndActBottomEdgeRetry:
+    """Verify the elimination retry fires for bottom-edge hallucinations,
+    not only center-bias. See curious-jingling-glade plan / notepad log:
+    VLM kept returning y=975 norm (taskbar) for Start menu tasks."""
+
+    @patch('integrations.vlm.qwen3vl_backend.Qwen3VLBackend._get_image_dimensions',
+           return_value=(1920, 1080))
+    @patch('integrations.vlm.qwen3vl_backend.Qwen3VLBackend._get_os_context',
+           return_value='Windows')
+    @patch('integrations.vlm.qwen3vl_backend.Qwen3VLBackend._call_api')
+    def test_bottom_edge_coords_trigger_retry(self, mock_api, mock_os, mock_dims,
+                                               sample_screenshot_b64):
+        """y=975 norm on a non-taskbar task should trigger elimination retry."""
+        from integrations.vlm.qwen3vl_backend import Qwen3VLBackend
+
+        # First call: bottom-edge click at norm (456, 975) — taskbar strip
+        first_response = 'The Notepad icon is visible. <point>456,975</point>'
+        # Retry call: non-center, non-edge coords in the upper-right quadrant
+        retry_response = 'Upper right area of the window. <point>720,220</point>'
+        mock_api.side_effect = [first_response, retry_response]
+
+        backend = Qwen3VLBackend()
+        # Task avoids any word in _TASKBAR_KEYWORDS so taskbar_list strategy
+        # doesn't fire — goes straight to describe_first, then retry on bottom-edge.
+        result = backend.point_and_act(sample_screenshot_b64, 'click the Save button')
+
+        # Two calls: primary describe_first + elimination retry
+        assert mock_api.call_count == 2
+        assert result.get('strategy') == 'elimination_retry'
+
+    @patch('integrations.vlm.qwen3vl_backend.Qwen3VLBackend._get_image_dimensions',
+           return_value=(1920, 1080))
+    @patch('integrations.vlm.qwen3vl_backend.Qwen3VLBackend._get_os_context',
+           return_value='Windows')
+    @patch('integrations.vlm.qwen3vl_backend.Qwen3VLBackend._call_api')
+    def test_bottom_edge_ok_for_taskbar_task(self, mock_api, mock_os, mock_dims,
+                                              sample_screenshot_b64):
+        """y=975 norm IS legitimate when the task IS about the taskbar —
+        no retry should fire because the coordinate matches the target."""
+        from integrations.vlm.qwen3vl_backend import Qwen3VLBackend
+
+        first_response = 'The Chrome icon is on the taskbar. <point>500,990</point>'
+        mock_api.return_value = first_response  # only one call expected
+
+        backend = Qwen3VLBackend()
+        # 'chrome' IS in _TASKBAR_KEYWORDS, so bottom-edge is expected
+        result = backend.point_and_act(sample_screenshot_b64, 'click chrome taskbar icon')
+
+        # Taskbar tasks go through _taskbar_list_lookup first, NOT describe_first.
+        # The mock serves both the taskbar_list call and the describe_first fallback,
+        # but crucially NO elimination retry fires on the bottom-edge result.
+        assert result.get('strategy') != 'elimination_retry'
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Local Computer Tool Tests
 # ═══════════════════════════════════════════════════════════════════════════
 
