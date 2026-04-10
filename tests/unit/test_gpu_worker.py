@@ -496,6 +496,61 @@ def test_ft16_observer_fires_on_spawn_crash_stop():
             pass
 
 
+def test_ft19_try_free_vram_stops_lru_workers():
+    """try_free_vram() should stop live workers oldest-idle-first until
+    the VRAM budget is met. Mocks vram_manager to avoid needing a GPU."""
+    from unittest.mock import patch
+    from integrations.service_tools import gpu_worker as gw
+
+    # Spawn 3 workers with staggered _last_used timestamps (oldest first)
+    workers = []
+    try:
+        for i in range(3):
+            w = ToolWorker(
+                tool_name=f'evict_test_{i}',
+                tool_module=ECHO_MODULE,
+                vram_budget='tts_f5',
+                output_subdir=f'evict_test_{i}',
+                engine='test',
+                startup_timeout=10.0,
+                request_timeout=5.0,
+                idle_timeout=0,
+            )
+            workers.append(w)
+            w.call({'op': 'echo', 'i': i})
+            # Stagger last_used so evict_test_0 is oldest
+            w._last_used = time.monotonic() - (3 - i)
+
+        # Mock vram_manager.get_free_vram to start low, jump up each stop
+        call_count = {'n': 0}
+        vram_sequence = [0.2, 0.5, 1.2, 2.5]  # 4 reads: low, after stop 1, 2, 3
+
+        class _FakeVM:
+            def get_free_vram(self):
+                idx = min(call_count['n'], len(vram_sequence) - 1)
+                call_count['n'] += 1
+                return vram_sequence[idx]
+
+        with patch.dict('sys.modules', {'integrations.service_tools.vram_manager':
+                type('M', (), {'vram_manager': _FakeVM()})()}):
+            freed = gw.try_free_vram(
+                needed_gb=1.0,
+                exclude_tool='evict_test_2',  # keep newest alive
+            )
+
+        assert freed is True, f"should have freed enough VRAM, calls={call_count['n']}"
+        # evict_test_0 (oldest) and evict_test_1 should have been stopped
+        assert not workers[0].is_alive(), "oldest should be evicted first"
+        # evict_test_2 must NOT be stopped (it's in exclude_tool)
+        assert workers[2].is_alive(), "exclude_tool must stay running"
+    finally:
+        for w in workers:
+            try:
+                w.stop()
+            except Exception:
+                pass
+
+
 def test_ft18_set_idle_timeout_updates_threshold():
     """set_idle_timeout() updates the auto-stop deadline and takes
     effect on a running worker. Used by model loaders to sync the
