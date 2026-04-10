@@ -80,6 +80,12 @@ def run_local_agentic_loop(
     prompt_id = message.get('prompt_id', '')
     max_eta = message.get('max_ETA_in_seconds', 1800)
 
+    # exit_reason is overwritten as the loop progresses. Defaults to max_iterations
+    # so a loop that runs to the iteration cap without a DONE signal is honest
+    # about it to the caller (instead of pretending status='success').
+    exit_reason = 'max_iterations'
+    consecutive_action_errors = 0
+
     # Detect unified Qwen3-VL mode
     use_unified = os.environ.get('HEVOLVE_VLM_UNIFIED', '').lower() in ('1', 'true')
 
@@ -111,6 +117,7 @@ def run_local_agentic_loop(
         elapsed = time.time() - start_time
         if elapsed > max_eta:
             logger.warning(f"VLM loop hit ETA limit ({max_eta}s) at iteration {iteration}")
+            exit_reason = 'timeout'
             break
 
         logger.info(f"VLM loop iteration {iteration + 1}/{max_iterations}")
@@ -198,6 +205,27 @@ def run_local_agentic_loop(
                     action_json['coordinate'] = [screen_x, screen_y]
                     logger.info(f"Action: {next_action} at ({screen_x},{screen_y}) "
                                 f"norm=({nx},{ny})")
+                    # Sanity check: flag clicks in the likely taskbar region.
+                    # If the VLM's reasoning talks about a Start menu item or
+                    # app window but the coordinate lands in the bottom 50px,
+                    # the grounding probably drifted onto the taskbar strip.
+                    # We log a warning and let the verify step catch it; the
+                    # router will see exit_reason=action_error if this pattern
+                    # keeps happening, so it can respond honestly.
+                    try:
+                        import pyautogui as _pag2
+                        _sw2, _sh2 = _pag2.size()
+                        reasoning_lc = (action_json.get('Reasoning') or '').lower()
+                        if (screen_y >= _sh2 - 50
+                                and any(t in reasoning_lc for t in
+                                        ('start menu', 'menu item', 'recommended', 'pinned'))):
+                            logger.warning(
+                                f"VLM click ({screen_x},{screen_y}) is in taskbar "
+                                f"region (screen height={_sh2}), but reasoning "
+                                f"mentions Start menu — probable grounding drift"
+                            )
+                    except Exception:
+                        pass
                 else:
                     action_json['coordinate'] = None
                     logger.info(f"Action: {next_action} "
@@ -234,11 +262,17 @@ def run_local_agentic_loop(
                     "content": action_json.get('Reasoning', 'Task completed'),
                     "iteration": iteration + 1,
                 })
+                exit_reason = 'done'
                 break
 
             # 5. Execute the action
             action_payload = _build_action_payload(action_json, parsed)
             result = execute_action(action_payload, tier)
+            action_ok = result.get('status') != 'error'
+            if action_ok:
+                consecutive_action_errors = 0
+            else:
+                consecutive_action_errors += 1
 
             extracted_responses.append({
                 "type": "action",
@@ -246,9 +280,18 @@ def run_local_agentic_loop(
                     "action": next_action,
                     "reasoning": action_json.get('Reasoning', ''),
                     "result": result.get('output', ''),
+                    "ok": action_ok,
                 },
                 "iteration": iteration + 1,
             })
+
+            # Bail after 3 consecutive action errors — something is structurally
+            # broken (bad coordinates, action type mismatch, subprocess dead)
+            # and more iterations won't help.
+            if consecutive_action_errors >= 3:
+                logger.warning("VLM loop: 3 consecutive action errors, aborting")
+                exit_reason = 'action_error'
+                break
 
             # Small delay between iterations (let UI update)
             time.sleep(0.5)
@@ -260,16 +303,26 @@ def run_local_agentic_loop(
                 "content": str(e),
                 "iteration": iteration + 1,
             })
+            consecutive_action_errors += 1
+            if consecutive_action_errors >= 3:
+                logger.warning("VLM loop: 3 consecutive iteration errors, aborting")
+                exit_reason = 'action_error'
+                break
             # Continue to next iteration rather than aborting
             continue
 
     execution_time = time.time() - start_time
     logger.info(
-        f"VLM loop finished: {len(extracted_responses)} actions in {execution_time:.1f}s"
+        f"VLM loop finished: {len(extracted_responses)} actions in "
+        f"{execution_time:.1f}s (exit_reason={exit_reason})"
     )
 
+    # status mirrors exit_reason: only 'done' is a real success. Callers
+    # (LangChain router, autogen) can inspect exit_reason to craft an honest
+    # response instead of confidently lying when the loop timed out.
     return {
-        "status": "success",
+        "status": "success" if exit_reason == 'done' else "incomplete",
+        "exit_reason": exit_reason,
         "extracted_responses": extracted_responses,
         "execution_time_seconds": execution_time,
     }
