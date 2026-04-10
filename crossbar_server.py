@@ -94,6 +94,53 @@ async def on_remote_desktop_signal(msg):
         pass
 
 
+async def on_compute_request(msg):
+    """Handle compute relay request from phone behind NAT.
+
+    Phone publishes to com.hertzai.hevolve.compute.request.{user_id},
+    HARTOS processes locally, responds on compute.response.{user_id}.
+    Same user_id scoping as fleet commands — no cross-user leakage.
+    """
+    try:
+        data = msg if isinstance(msg, dict) else {}
+        user_id = data.get('user_id', '')
+        request_id = data.get('request_id', '')
+        text = data.get('text', '')
+
+        if not text or not user_id:
+            return
+
+        # Process via the same /chat endpoint everything else uses
+        import requests as http_requests
+        from core.port_registry import get_port
+        resp = http_requests.post(
+            f'http://localhost:{get_port("backend")}/chat',
+            json={
+                'text': [text] if isinstance(text, str) else text,
+                'raw_text': text if isinstance(text, str) else str(text),
+                'user_id': user_id,
+                'source': 'compute_relay',
+                'request_id': request_id,
+            },
+            timeout=60,
+        )
+        result = resp.json() if resp.ok else {'error': f'HTTP {resp.status_code}'}
+        result['request_id'] = request_id
+
+        # Publish response back via WAMP (reaches phone through NAT)
+        response_topic = f'com.hertzai.hevolve.compute.response.{user_id}'
+        if wamp_session:
+            wamp_session.publish(response_topic, result)
+
+    except Exception as e:
+        print(f"Compute relay error: {e}")
+        if wamp_session and user_id:
+            wamp_session.publish(
+                f'com.hertzai.hevolve.compute.response.{user_id}',
+                {'error': str(e), 'request_id': request_id}
+            )
+
+
 @component.on_join
 async def joined(session, details):
     """Handles session join and subscription setup."""
@@ -105,6 +152,19 @@ async def joined(session, details):
         print("Subscribed to topic")
     except Exception as e:
         print(f"Could not subscribe to topic: {e}")
+
+    # Compute relay — same-user phone→HARTOS behind NAT
+    try:
+        from integrations.social.models import get_db, User
+        # Subscribe to all active user compute topics
+        # For now, use a wildcard-style approach: subscribe to the user who owns this node
+        owner_id = os.environ.get('HEVOLVE_OWNER_USER_ID', '')
+        if owner_id:
+            compute_topic = f"com.hertzai.hevolve.compute.request.{owner_id}"
+            await session.subscribe(on_compute_request, compute_topic)
+            print(f"Subscribed to compute relay: {compute_topic}")
+    except Exception as e:
+        print(f"Compute relay subscription skipped: {e}")
 
     # Remote desktop signaling topics
     try:
