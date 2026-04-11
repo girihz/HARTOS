@@ -64,14 +64,35 @@ class FlaskChannelIntegration:
         """
         Handle incoming message from any channel.
 
-        Routes to Flask API and returns response.
+        Routes to Flask API and returns response. Resolves the
+        Hevolve user_id via UserChannelBinding first — the user
+        registered this channel (e.g. WhatsApp +1234) to their
+        Hevolve account via Connect_Channel, and the binding row
+        is the single source of truth for (channel, sender_id) →
+        user_id. Falls back to the session cache and finally the
+        configured default.
         """
         try:
             # Get or create persistent session (replaces plain dict)
             session = self._session_manager.get_session(
                 message.channel, message.sender_id
             )
-            user_id = session.user_id if session and session.user_id else self.default_user_id
+
+            # ── Resolve user_id ───────────────────────────────────
+            # 1. UserChannelBinding (durable DB row written by
+            #    Connect_Channel tool + response router)
+            # 2. Session cache (in-memory per (channel, sender_id))
+            # 3. Configured default
+            # Without step 1, a WhatsApp user who bound their
+            # account via Connect_Channel would still hit the chat
+            # as user_id=10077 (default) and lose access to their
+            # per-user memory / bindings / tool permissions.
+            user_id = self._resolve_user_id_for_sender(
+                channel=message.channel,
+                sender_id=message.sender_id,
+                fallback=(session.user_id if session and session.user_id
+                          else self.default_user_id),
+            )
             prompt_id = session.prompt_id if session and session.prompt_id else self.default_prompt_id
 
             # Track message in session history
@@ -144,6 +165,50 @@ class FlaskChannelIntegration:
         except Exception as e:
             logger.error(f"Error handling message: {e}")
             return "Sorry, an unexpected error occurred."
+
+    def _resolve_user_id_for_sender(
+        self, channel: str, sender_id: str, fallback,
+    ):
+        """Resolve (channel_type, channel_sender_id) → Hevolve user_id
+        via the UserChannelBinding table.
+
+        Returns the bound user_id when the user has registered this
+        channel via the Connect_Channel tool, otherwise the provided
+        fallback (session cache or default). The lookup must never
+        raise — binding DB failures log at debug and fall through so
+        message handling is never blocked by a transient DB issue.
+        """
+        if not channel or not sender_id:
+            return fallback
+        try:
+            from integrations.social.models import get_db, UserChannelBinding
+        except ImportError:
+            return fallback
+        try:
+            db = get_db()
+            try:
+                row = db.query(UserChannelBinding).filter_by(
+                    channel_type=str(channel).lower(),
+                    channel_sender_id=str(sender_id),
+                    is_active=True,
+                ).first()
+                if row and row.user_id:
+                    logger.debug(
+                        f"Channel binding resolved: {channel}:{sender_id} "
+                        f"→ user_id={row.user_id}"
+                    )
+                    return row.user_id
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(
+                f"UserChannelBinding lookup failed "
+                f"({channel}:{sender_id}): {e}"
+            )
+        return fallback
 
     def register_telegram(self, token: str = None, **kwargs) -> None:
         """Register Telegram adapter."""
