@@ -5059,6 +5059,60 @@ def _tune_resonance_after_chat(user_id, prompt_text, response_text):
 _tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='tts_async')
 
 
+def _chat_reply(user_id, request_id, response_text: str, **payload):
+    """Return a /chat JSON response AND fire TTS synthesis in the background.
+
+    Every reply path from the /chat handler must go through this helper
+    so the TTS synthesis trigger lives in ONE place:
+
+      - Reuse path (chat_agent from reuse_recipe)
+      - Autonomous creation from reuse
+      - Creation suggested from reuse
+      - Agentic_Router tool fired
+      - Create_Agent tool fired (autonomous)
+      - Create_Agent tool fired (interactive)
+      - Normal LangChain get_ans path
+      - Evaluation mode after creation
+
+    Before this helper existed, only the normal LangChain path fired
+    ``_tts_synthesize_and_publish`` inline (hart_intelligence_entry.py
+    line 6095), so every other reply route delivered text-only to the
+    frontend and the user saw no audio — the exact symptom reported
+    on 2026-04-11 ("hi got text reply but no TTS"). Consolidating here
+    makes it impossible for a new reply branch to accidentally skip
+    TTS: you can't return from /chat without calling this helper
+    (the old jsonify was renamed at each return site to match).
+
+    The TTS call is fire-and-forget — it submits work to the
+    background ``_tts_executor`` and returns immediately. No hot-path
+    latency is added; the frontend already subscribes to
+    com.hertzai.pupit.{userId} and plays whatever audio lands there.
+
+    Args:
+        user_id: User id for pupit topic routing.
+        request_id: Request id for correlating TTS audio to the chat
+            reply on the frontend.
+        response_text: The assistant's reply text. Empty strings skip
+            the TTS call (the old line 6096 else-branch still logs
+            the empty-response error for observability).
+        **payload: Extra keys to merge into the JSON response body.
+            The caller's previous jsonify arguments become kwargs.
+
+    Returns:
+        A Flask ``Response`` from ``jsonify(...)`` with the merged
+        payload — semantically identical to the old inline
+        ``return jsonify({'response': response_text, **payload})``.
+    """
+    if response_text:
+        try:
+            _tts_synthesize_and_publish(response_text, user_id, request_id)
+        except Exception as e:
+            # Never let a TTS failure block delivery of the text reply.
+            app.logger.debug(f"_chat_reply: TTS dispatch skipped: {e}")
+    payload['response'] = response_text
+    return jsonify(payload)
+
+
 def _tts_synthesize_and_publish(text, user_id, request_id):
     """Fire-and-forget: synthesize TTS, push audio via WAMP.
 
@@ -5605,7 +5659,12 @@ def chat():
                 except Exception:
                     app.logger.debug(f'Cloud DB unreachable for prompt_id={prompt_id}, using local-only')
             if not user_id or not prompt:
-                return jsonify({'response': 'Need user_id and text to create agent', 'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0, 'history_request_id': []})
+                return _chat_reply(
+                    user_id, request_id,
+                    'Need user_id and text to create agent',
+                    intent=['FINAL_ANSWER'],
+                    req_token_count=0, res_token_count=0, history_request_id=[],
+                )
             if autonomous:
                 # Check if an existing agent can handle this task before creating new one
                 try:
@@ -5651,11 +5710,14 @@ def chat():
                             _record_lifecycle('completed', user_id, prompt_id,
                                              f'Autonomous full pipeline: gather + recipe in one shot')
                             _push_workflow_flowchart(user_id, prompt_id, request_id)
-                            return jsonify({'response': recipe_response, 'intent': ['FINAL_ANSWER'],
-                                            'req_token_count': 0, 'res_token_count': 0,
-                                            'history_request_id': [],
-                                            'Agent_status': 'completed',
-                                            'autonomous_creation': True, 'prompt_id': prompt_id})
+                            return _chat_reply(
+                                user_id, request_id, recipe_response,
+                                intent=['FINAL_ANSWER'],
+                                req_token_count=0, res_token_count=0,
+                                history_request_id=[],
+                                Agent_status='completed',
+                                autonomous_creation=True, prompt_id=prompt_id,
+                            )
                         else:
                             app.logger.info(f'Autonomous recipe() returned: {str(recipe_response)[:100]}')
                     except Exception as e:
@@ -5676,11 +5738,14 @@ def chat():
                 _record_lifecycle('Review Mode', user_id, prompt_id,
                                  f'Autonomous creation via dispatch: {prompt[:100]}')
                 _push_workflow_flowchart(user_id, prompt_id, request_id)
-                return jsonify({'response': auto_response, 'intent': ['FINAL_ANSWER'],
-                                'req_token_count': 0, 'res_token_count': 0,
-                                'history_request_id': [],
-                                'Agent_status': 'Review Mode',
-                                'autonomous_creation': True, 'prompt_id': prompt_id})
+                return _chat_reply(
+                    user_id, request_id, auto_response,
+                    intent=['FINAL_ANSWER'],
+                    req_token_count=0, res_token_count=0,
+                    history_request_id=[],
+                    Agent_status='Review Mode',
+                    autonomous_creation=True, prompt_id=prompt_id,
+                )
             from gather_agentdetails import gather_info
 
             # --- Turn counter: force-complete after MAX_GATHER_TURNS ---
@@ -5782,13 +5847,24 @@ def chat():
                     app.logger.info('PENDING STATUS')
                     ans = new_res.get('question') or new_res.get('review_details', response)
                     _record_lifecycle('Creation Mode', user_id, prompt_id, f'Agent creation turn {turn_num}')
-                    return jsonify({'response': ans, 'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0, 'history_request_id': [],'Agent_status':'Creation Mode', 'prompt_id': prompt_id})
+                    return _chat_reply(
+                        user_id, request_id, ans,
+                        intent=['FINAL_ANSWER'],
+                        req_token_count=0, res_token_count=0, history_request_id=[],
+                        Agent_status='Creation Mode', prompt_id=prompt_id,
+                    )
                 else:
                     # Completed (or forced completion after max turns)
                     app.logger.info('COMPLETED STATUS')
                     _save_and_enter_review(new_res)
                     _push_workflow_flowchart(user_id, prompt_id, request_id)
-                    return jsonify({'response': 'Got Agent details successfully lets move on to review them one at a time', 'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0, 'history_request_id': [],'Agent_status':'Review Mode', 'prompt_id': prompt_id})
+                    return _chat_reply(
+                        user_id, request_id,
+                        'Got Agent details successfully lets move on to review them one at a time',
+                        intent=['FINAL_ANSWER'],
+                        req_token_count=0, res_token_count=0, history_request_id=[],
+                        Agent_status='Review Mode', prompt_id=prompt_id,
+                    )
 
             except Exception as e:
                 app.logger.error(f'gather_info parse error on turn {turn_num}: {e}')
@@ -5823,9 +5899,20 @@ def chat():
                     }
                     _save_and_enter_review(partial)
                     _record_lifecycle('Review Mode', user_id, prompt_id, f'Force-completed after {turn_num} failed turns')
-                    return jsonify({'response': 'Agent created with available details. Moving to review.', 'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0, 'history_request_id': [],'Agent_status':'Review Mode', 'prompt_id': prompt_id})
+                    return _chat_reply(
+                        user_id, request_id,
+                        'Agent created with available details. Moving to review.',
+                        intent=['FINAL_ANSWER'],
+                        req_token_count=0, res_token_count=0, history_request_id=[],
+                        Agent_status='Review Mode', prompt_id=prompt_id,
+                    )
                 _record_lifecycle('Creation Mode', user_id, prompt_id, f'Creation continuing after parse error: {e}')
-                return jsonify({'response': response, 'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0, 'history_request_id': [],'Agent_status':'Creation Mode', 'prompt_id': prompt_id})
+                return _chat_reply(
+                    user_id, request_id, response,
+                    intent=['FINAL_ANSWER'],
+                    req_token_count=0, res_token_count=0, history_request_id=[],
+                    Agent_status='Creation Mode', prompt_id=prompt_id,
+                )
         # Phase 2: Review Phase (re-snapshot flags under lock after Phase 1 may have mutated)
         with _user_lock:
             _in_review = _ak in review_agents and review_agents[_ak]
@@ -5855,9 +5942,19 @@ def chat():
                     app.logger.debug(f"Social agent bridge skipped: {e}")
                 _record_lifecycle('completed', user_id, prompt_id, 'Agent creation completed successfully')
                 _push_workflow_flowchart(user_id, prompt_id, request_id)
-                return jsonify({'response': response, 'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0, 'history_request_id': [],'Agent_status':'completed'})
+                return _chat_reply(
+                    user_id, request_id, response,
+                    intent=['FINAL_ANSWER'],
+                    req_token_count=0, res_token_count=0, history_request_id=[],
+                    Agent_status='completed',
+                )
             _record_lifecycle('Review Mode', user_id, prompt_id, 'Agent details being reviewed')
-            return jsonify({'response': response, 'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0, 'history_request_id': [],'Agent_status':'Review Mode'})
+            return _chat_reply(
+                user_id, request_id, response,
+                intent=['FINAL_ANSWER'],
+                req_token_count=0, res_token_count=0, history_request_id=[],
+                Agent_status='Review Mode',
+            )
         # Phase 3: Evaluation Phase
         if _in_review and _in_convo:
             return evaluate_agent_after_creation_in_review(file_id, prompt, prompt_id, request_id, user_id)
@@ -5869,9 +5966,12 @@ def chat():
 
 
         if chat_agent is None:
-            return jsonify({'response': 'Agent reuse module is unavailable. Please check server dependencies.',
-                            'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0,
-                            'history_request_id': []})
+            return _chat_reply(
+                user_id, request_id,
+                'Agent reuse module is unavailable. Please check server dependencies.',
+                intent=['FINAL_ANSWER'],
+                req_token_count=0, res_token_count=0, history_request_id=[],
+            )
 
         response = chat_agent(user_id,prompt,prompt_id,file_id,request_id)
 
@@ -5897,44 +5997,51 @@ def chat():
                     review_agents[_ak_new] = True
                     _touch_agent_timestamp(_ak_new)
                     _record_lifecycle('Review Mode', user_id, new_prompt_id, f'Autonomous creation from reuse: {agent_desc[:100]}')
-                    return jsonify({
-                        'response': auto_response,
-                        'intent': ['FINAL_ANSWER'],
-                        'req_token_count': 0, 'res_token_count': 0,
-                        'history_request_id': [],
-                        'Agent_status': 'Review Mode',
-                        'autonomous_creation': True,
-                        'prompt_id': new_prompt_id,
-                    })
+                    return _chat_reply(
+                        user_id, request_id, auto_response,
+                        intent=['FINAL_ANSWER'],
+                        req_token_count=0, res_token_count=0,
+                        history_request_id=[],
+                        Agent_status='Review Mode',
+                        autonomous_creation=True,
+                        prompt_id=new_prompt_id,
+                    )
                 else:
                     _record_lifecycle('Reuse Mode', user_id, new_prompt_id, f'Creation suggested from reuse: {agent_desc[:100]}')
-                    return jsonify({
-                        'response': response,
-                        'intent': ['FINAL_ANSWER'],
-                        'req_token_count': 0, 'res_token_count': 0,
-                        'history_request_id': [],
-                        'Agent_status': 'Reuse Mode',
-                        'creation_suggested': True,
-                        'suggested_agent_description': agent_desc,
-                        'prompt_id': new_prompt_id,
-                    })
+                    return _chat_reply(
+                        user_id, request_id, response,
+                        intent=['FINAL_ANSWER'],
+                        req_token_count=0, res_token_count=0,
+                        history_request_id=[],
+                        Agent_status='Reuse Mode',
+                        creation_suggested=True,
+                        suggested_agent_description=agent_desc,
+                        prompt_id=new_prompt_id,
+                    )
 
             # Fallback: pattern matching on agent response text
             if _response_signals_creation(response):
                 app.logger.info('Reuse agent response text signals new agent creation needed')
                 _record_lifecycle('Reuse Mode', user_id, prompt_id, 'Creation suggested via response pattern')
-                return jsonify({
-                    'response': response,
-                    'intent': ['FINAL_ANSWER'],
-                    'req_token_count': 0, 'res_token_count': 0,
-                    'history_request_id': [],
-                    'Agent_status': 'Reuse Mode',
-                    'creation_suggested': True,
-                })
+                return _chat_reply(
+                    user_id, request_id, response,
+                    intent=['FINAL_ANSWER'],
+                    req_token_count=0, res_token_count=0,
+                    history_request_id=[],
+                    Agent_status='Reuse Mode',
+                    creation_suggested=True,
+                )
 
         _record_lifecycle('Reuse Mode', user_id, prompt_id, 'Agent reused for conversation')
         _resonance = _tune_resonance_after_chat(user_id, prompt, response)
-        return jsonify({'response': response, 'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0, 'history_request_id': [],'Agent_status':'Reuse Mode', **_resonance})
+        # Route through _chat_reply so TTS fires on the reuse path too
+        # (the legacy jsonify here skipped synth, causing the 2026-04-11
+        # "hi got text but no audio" regression).
+        return _chat_reply(
+            user_id, request_id, response,
+            intent=['FINAL_ANSWER'], req_token_count=0, res_token_count=0,
+            history_request_id=[], Agent_status='Reuse Mode', **_resonance,
+        )
 
     if prompt_id:
         try:
@@ -5999,21 +6106,21 @@ def chat():
         app.logger.info(f'Agentic_Router tool fired: task="{task_desc[:80] if task_desc else ""}", '
                         f'steps={len(plan_steps)}, matched_agent={matched_agent}')
 
-        return jsonify({
-            'response': ans,
-            'intent': ['FINAL_ANSWER'],
-            'Agent_status': 'Plan Mode',
-            'agentic_plan': {
+        return _chat_reply(
+            user_id, request_id, ans,
+            intent=['FINAL_ANSWER'],
+            Agent_status='Plan Mode',
+            agentic_plan={
                 'task_description': task_desc,
                 'steps': plan_steps,
                 'matched_agent_id': matched_agent,
                 'requires_consent': True,
             },
-            'prompt_id': prompt_id if prompt_id else _next_prompt_id(),
-            'req_token_count': thread_local_data.get_req_token_count(),
-            'res_token_count': thread_local_data.get_res_token_count(),
-            'history_request_id': thread_local_data.get_reqid_list(),
-        })
+            prompt_id=prompt_id if prompt_id else _next_prompt_id(),
+            req_token_count=thread_local_data.get_req_token_count(),
+            res_token_count=thread_local_data.get_res_token_count(),
+            history_request_id=thread_local_data.get_reqid_list(),
+        )
 
     # --- Step 16c: Check if LLM's Create_Agent tool fired during get_ans() ---
     if thread_local_data.get_creation_requested():
@@ -6030,15 +6137,15 @@ def chat():
             review_agents[_ak_new] = True
             _touch_agent_timestamp(_ak_new)
             _record_lifecycle('Review Mode', user_id, new_prompt_id, f'Autonomous creation via LLM tool: {agent_description[:100]}')
-            return jsonify({
-                'response': auto_response,
-                'intent': ['FINAL_ANSWER'],
-                'req_token_count': 0, 'res_token_count': 0,
-                'history_request_id': [],
-                'Agent_status': 'Review Mode',
-                'autonomous_creation': True,
-                'prompt_id': new_prompt_id,
-            })
+            return _chat_reply(
+                user_id, request_id, auto_response,
+                intent=['FINAL_ANSWER'],
+                req_token_count=0, res_token_count=0,
+                history_request_id=[],
+                Agent_status='Review Mode',
+                autonomous_creation=True,
+                prompt_id=new_prompt_id,
+            )
         else:
             # Interactive: start gather_info, return first question
             from gather_agentdetails import gather_info
@@ -6060,14 +6167,14 @@ def chat():
             except Exception:
                 resp_text = ans
             _record_lifecycle('Creation Mode', user_id, new_prompt_id, f'Interactive creation via LLM tool: {agent_description[:100]}')
-            return jsonify({
-                'response': resp_text,
-                'intent': ['FINAL_ANSWER'],
-                'req_token_count': 0, 'res_token_count': 0,
-                'history_request_id': [],
-                'Agent_status': 'Creation Mode',
-                'prompt_id': new_prompt_id,
-            })
+            return _chat_reply(
+                user_id, request_id, resp_text,
+                intent=['FINAL_ANSWER'],
+                req_token_count=0, res_token_count=0,
+                history_request_id=[],
+                Agent_status='Creation Mode',
+                prompt_id=new_prompt_id,
+            )
 
     if req_tool == 'Image_Inference_Tool':
         action_response = pooled_post(f'{DB_URL}/create_action',)
@@ -6088,11 +6195,7 @@ def chat():
                      'uid': request_id, 'task_id': f"CHAT_{str(request_id)}", 'request_id': request_id,
                      **_resonance}
         publish_async('com.hertzai.longrunning.log', post_dict)
-
-        # Async TTS: synthesize audio in background, push via WAMP when ready.
-        # Same pattern as chatbot_pipeline/chatbot.py → make_it_talk → publish('pupit').
-        # Frontend already subscribes to com.hertzai.pupit.{userId}.
-        _tts_synthesize_and_publish(ans, user_id, request_id)
+        # TTS fires below via _chat_reply — don't duplicate the call here.
     else:
         post_dict = {'user_id': user_id, 'status': 'ERROR', 'task_name': "CHAT", 'uid': request_id,
                      'task_id': f"CHAT_{str(request_id)}", 'request_id': request_id, 'failure_reason': 'Got null response from GPT'}
@@ -6110,27 +6213,33 @@ def chat():
     if _ui_actions:
         thread_local_data.clear_ui_actions()
 
-    return jsonify({
-        'response': ans,
-        'intent': thread_local_data.get_recognize_intents(),
-        'req_token_count': thread_local_data.get_req_token_count(),
-        'res_token_count': thread_local_data.get_res_token_count(),
-        'history_request_id': thread_local_data.get_reqid_list(),
-        'ui_actions': _ui_actions,
+    return _chat_reply(
+        user_id, request_id, ans,
+        intent=thread_local_data.get_recognize_intents(),
+        req_token_count=thread_local_data.get_req_token_count(),
+        res_token_count=thread_local_data.get_res_token_count(),
+        history_request_id=thread_local_data.get_reqid_list(),
+        ui_actions=_ui_actions,
         **_resonance,
-    })
+    )
 
 
 def evaluate_agent_after_creation_in_review(file_id, prompt, prompt_id, request_id, user_id):
     if chat_agent is None:
-        return jsonify({'response': 'Agent reuse module is unavailable. Please check server dependencies.',
-                        'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0,
-                        'history_request_id': [], 'Agent_status': 'Evaluation Mode'})
+        return _chat_reply(
+            user_id, request_id,
+            'Agent reuse module is unavailable. Please check server dependencies.',
+            intent=['FINAL_ANSWER'], req_token_count=0, res_token_count=0,
+            history_request_id=[], Agent_status='Evaluation Mode',
+        )
     response = chat_agent(user_id, prompt, prompt_id, file_id, request_id)
     _record_lifecycle('Evaluation Mode', user_id, prompt_id, 'Agent being evaluated after creation')
     _resonance = _tune_resonance_after_chat(user_id, prompt, response)
-    return jsonify({'response': response, 'intent': ['FINAL_ANSWER'], 'req_token_count': 0, 'res_token_count': 0,
-                    'history_request_id': [], 'Agent_status': 'Evaluation Mode', **_resonance})
+    return _chat_reply(
+        user_id, request_id, response,
+        intent=['FINAL_ANSWER'], req_token_count=0, res_token_count=0,
+        history_request_id=[], Agent_status='Evaluation Mode', **_resonance,
+    )
 
 
 def set_flags_to_enter_review_mode(no_of_flow, user_id, prompt_id=''):
