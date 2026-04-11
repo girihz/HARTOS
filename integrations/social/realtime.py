@@ -79,13 +79,8 @@ def on_notification(user_id: str, notification_dict: dict):
         **notification_dict,
     }, user_id=user_id)
     # Also broadcast to SSE clients (Nunba desktop) — scoped to the target user
-    try:
-        import sys
-        main_mod = sys.modules.get('__main__')
-        if main_mod and hasattr(main_mod, 'broadcast_sse_event'):
-            main_mod.broadcast_sse_event('notification', {
-                'user_id': user_id,
-                **notification_dict,
-            }, user_id=user_id)
-    except Exception:
-        pass
+    from core.platform.events import broadcast_sse_safe
+    broadcast_sse_safe('notification', {
+        'user_id': user_id,
+        **notification_dict,
+    }, user_id=user_id)
