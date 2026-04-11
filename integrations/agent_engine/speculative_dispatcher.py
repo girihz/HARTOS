@@ -214,19 +214,22 @@ class SpeculativeDispatcher:
         """
         speculation_id = str(uuid.uuid4())[:12]
 
-        # ── 1. Gate checks (constitutional + circuit breaker + draft present) ──
-        gate_error = self._check_draft_first_gates(prompt)
-        if gate_error is not None:
-            return {
-                'response': '', 'speculation_id': speculation_id,
-                'delegate': 'none', 'error': gate_error, 'expert_pending': False,
-            }
+        # ── 1. Local preconditions (cheapest first, so a missing registry
+        # entry never triggers an unnecessary network probe).
         draft_model = self._registry.get_draft_model()
         if draft_model is None:
             return {
                 'response': '', 'speculation_id': speculation_id,
                 'delegate': 'none', 'error': 'no_draft_model',
                 'expert_pending': False,
+            }
+
+        # ── 2. Gate checks (constitutional + circuit breaker + draft server probe)
+        gate_error = self._check_draft_first_gates(prompt)
+        if gate_error is not None:
+            return {
+                'response': '', 'speculation_id': speculation_id,
+                'delegate': 'none', 'error': gate_error, 'expert_pending': False,
             }
 
         # ── 2. Dispatch the draft with the classifier prompt ──
@@ -303,9 +306,17 @@ class SpeculativeDispatcher:
 
     # ─── SRP helpers extracted from dispatch_draft_first ───
 
+    # Class-level toggle the health probe can flip off in tests. Prod
+    # leaves it enabled so dead-port POSTs short-circuit cleanly; unit
+    # tests that mock _dispatch_to_model set it to False so the mocked
+    # dispatch actually runs. Kept as a class attribute (not instance)
+    # so fixtures can patch once for the whole suite.
+    _health_probe_enabled: bool = True
+
     def _check_draft_first_gates(self, prompt: str) -> Optional[str]:
-        """Run the cheap gates (circuit breaker + constitutional filter)
-        that must pass before we spend any model time.
+        """Run the cheap gates (circuit breaker + constitutional filter +
+        draft-server health probe) that must pass before we spend any
+        model time.
 
         Returns None on success, or an error string identifying which gate
         rejected the request. Keeps dispatch_draft_first's orchestration
@@ -317,7 +328,42 @@ class SpeculativeDispatcher:
         passed, reason = ConstitutionalFilter.check_prompt(prompt)
         if not passed:
             return reason or 'constitutional filter'
+        # Fast TCP probe against the draft server. If the 0.8B caption
+        # server (port 8081) isn't listening, fall through to the normal
+        # 4B path instead of POSTing to a dead port and waiting for a
+        # socket timeout on every chat request. Cache the result for 30s
+        # so we don't probe on every message.
+        if self._health_probe_enabled and not self._draft_server_alive():
+            return 'draft_server_offline'
         return None
+
+    _draft_probe_ts: float = 0.0
+    _draft_probe_ok: bool = False
+
+    def _draft_server_alive(self) -> bool:
+        """Cheap TCP probe against the draft server endpoint. Cached
+        for 30s so the dispatcher stays responsive under chat load.
+        Returns True if a connect() to the draft host:port succeeds."""
+        import socket
+        import time as _t
+        now = _t.time()
+        if now - self._draft_probe_ts < 30.0:
+            return self._draft_probe_ok
+        ok = False
+        try:
+            from core.port_registry import get_local_draft_url
+            url = get_local_draft_url()
+            # http://host:port/v1 → (host, port)
+            _body = url.split('://', 1)[-1].split('/', 1)[0]
+            host, _, port_s = _body.partition(':')
+            port = int(port_s) if port_s else 80
+            with socket.create_connection((host, port), timeout=0.5):
+                ok = True
+        except Exception:
+            ok = False
+        self.__class__._draft_probe_ts = now
+        self.__class__._draft_probe_ok = ok
+        return ok
 
     def _build_draft_classifier_prompt(
         self, user_prompt: str, agent_persona: Optional[str] = None,

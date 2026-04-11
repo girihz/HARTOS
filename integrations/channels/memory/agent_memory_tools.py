@@ -16,12 +16,48 @@ Framework adapters (thin wrappers):
 import json
 import logging
 import re
+import time
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 # UUID hex pattern (16 chars) — used to detect direct vs semantic backtrace
 _UUID_PATTERN = re.compile(r'^[a-f0-9]{16}$')
+
+# Shortcut like "2h" / "30m" / "7d" → seconds offset from now
+_REL_TIME_PATTERN = re.compile(r'^\s*(\d+)\s*([smhd])\s*$', re.IGNORECASE)
+
+
+def _parse_time_arg(arg: 'str | None') -> 'float | None':
+    """Accept ISO-8601, bare date, or relative shortcut and return a
+    UNIX epoch timestamp (seconds). Returns None on empty / unparseable
+    input so callers pass it straight through to the store filter."""
+    if arg is None:
+        return None
+    s = str(arg).strip()
+    if not s or s.lower() in ('none', 'null', ''):
+        return None
+    # Relative: "1h", "30m", "7d", "45s" → now - offset
+    m = _REL_TIME_PATTERN.match(s)
+    if m:
+        amount = int(m.group(1))
+        unit = m.group(2).lower()
+        scale = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[unit]
+        return time.time() - amount * scale
+    # ISO-8601 + common variants
+    s2 = s.rstrip('Z').rstrip('z')
+    for fmt in (
+        '%Y-%m-%dT%H:%M:%S.%f',
+        '%Y-%m-%dT%H:%M:%S',
+        '%Y-%m-%d %H:%M:%S',
+        '%Y-%m-%d',
+    ):
+        try:
+            return datetime.strptime(s2, fmt).timestamp()
+        except ValueError:
+            continue
+    return None
 
 
 def create_memory_tools(
@@ -71,10 +107,24 @@ def create_memory_tools(
     def recall_memory(
         query: str,
         mode: str = "hybrid",
+        since: 'str | None' = None,
+        until: 'str | None' = None,
     ) -> str:
-        """Search all memories using natural language. Returns matching memories with IDs for backtrace."""
+        """Search all memories using natural language.
+
+        Returns matching memories with IDs for backtrace. Optional
+        ``since`` / ``until`` restrict the result to a time window —
+        use ISO-8601 ('2026-04-10T15:00') or a bare date ('2026-04-10')
+        or a relative shortcut ('1h', '24h', '7d'). Pass both for a
+        bounded range, either for a one-sided filter.
+        """
         try:
-            nodes = graph.recall(query, mode=mode, top_k=5)
+            _since_ts = _parse_time_arg(since)
+            _until_ts = _parse_time_arg(until)
+            nodes = graph.recall(
+                query, mode=mode, top_k=5,
+                since=_since_ts, until=_until_ts,
+            )
             if not nodes:
                 return "No matching memories found."
 

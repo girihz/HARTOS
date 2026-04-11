@@ -4,12 +4,17 @@ Scheduled Message Manager for HevolveBot Integration.
 Provides scheduling and management of delayed messages.
 """
 
+import json
+import logging
+import os
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Callable
 import threading
+
+logger = logging.getLogger(__name__)
 
 
 class MessageStatus(Enum):
@@ -73,17 +78,136 @@ class ScheduledMessageManager:
     - Retry failed deliveries
     """
 
-    def __init__(self, delivery_handler: Optional[Callable[[ScheduledMessage], bool]] = None):
+    def __init__(
+        self,
+        delivery_handler: Optional[Callable[[ScheduledMessage], bool]] = None,
+        persist_path: Optional[str] = None,
+    ):
         """
         Initialize the ScheduledMessageManager.
 
         Args:
             delivery_handler: Optional function to actually deliver messages
+            persist_path: Optional JSON file path for durable storage. When
+                provided, the manager loads existing messages on startup
+                and writes to disk on every mutation so pending reminders
+                survive restarts. Defaults to ~/.nunba/data/scheduled_messages.json
+                when None (set to '' to disable).
         """
         self._messages: Dict[str, ScheduledMessage] = {}
         self._lock = threading.Lock()
         self._delivery_handler = delivery_handler
         self._delivery_history: List[MessageDeliveryResult] = []
+        # File persistence — default to ~/.nunba/data/scheduled_messages.json
+        # so the enumerate tool / list_pending survive process restarts.
+        # Pass persist_path='' to opt out (used by unit tests that don't
+        # want to touch the filesystem).
+        if persist_path is None:
+            persist_path = os.path.join(
+                os.path.expanduser('~'), '.nunba', 'data',
+                'scheduled_messages.json',
+            )
+        self._persist_path = persist_path or None
+        if self._persist_path:
+            self._load_from_disk()
+
+    def _load_from_disk(self) -> None:
+        """Read ``self._persist_path`` and hydrate ``self._messages``.
+        Silently no-ops if the file doesn't exist or is unreadable —
+        the manager must always start up cleanly."""
+        if not self._persist_path or not os.path.isfile(self._persist_path):
+            return
+        try:
+            with open(self._persist_path, encoding='utf-8') as fp:
+                raw = json.load(fp)
+            if not isinstance(raw, list):
+                return
+            for row in raw:
+                try:
+                    msg = self._deserialise_message(row)
+                    if msg is not None:
+                        self._messages[msg.id] = msg
+                except Exception as e:
+                    logger.debug(f"skip corrupt scheduled message row: {e}")
+            logger.info(
+                f"ScheduledMessageManager: loaded {len(self._messages)} "
+                f"messages from {self._persist_path}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load scheduled messages: {e}")
+
+    def _persist_to_disk(self) -> None:
+        """Write ``self._messages`` atomically to ``self._persist_path``.
+        Called from every mutation under ``self._lock``. Swallows
+        exceptions — disk failures must never break the caller."""
+        if not self._persist_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._persist_path), exist_ok=True)
+            serialised = [
+                self._serialise_message(m) for m in self._messages.values()
+            ]
+            tmp = self._persist_path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fp:
+                json.dump(serialised, fp, indent=2)
+            os.replace(tmp, self._persist_path)
+        except Exception as e:
+            logger.debug(f"Failed to persist scheduled messages: {e}")
+
+    @staticmethod
+    def _serialise_message(m: ScheduledMessage) -> Dict[str, Any]:
+        """Dataclass → JSON-compatible dict. Enums → value strings,
+        datetimes → ISO strings. Safe for list comprehensions."""
+        def _iso(dt: Optional[datetime]) -> Optional[str]:
+            return dt.isoformat() if dt is not None else None
+        return {
+            'id': m.id, 'channel_id': m.channel_id, 'content': m.content,
+            'scheduled_time': _iso(m.scheduled_time),
+            'status': m.status.value,
+            'sender_id': m.sender_id, 'thread_id': m.thread_id,
+            'attachments': m.attachments, 'metadata': m.metadata,
+            'recurrence': m.recurrence.value,
+            'recurrence_interval': m.recurrence_interval,
+            'recurrence_end': _iso(m.recurrence_end),
+            'created_at': _iso(m.created_at),
+            'sent_at': _iso(m.sent_at),
+            'error': m.error, 'retry_count': m.retry_count,
+            'max_retries': m.max_retries,
+        }
+
+    @staticmethod
+    def _deserialise_message(row: Dict[str, Any]) -> Optional[ScheduledMessage]:
+        """JSON row → ScheduledMessage. Returns None on any field that
+        can't be rehydrated so a corrupt row can't poison the whole file."""
+        def _dt(v: Any) -> Optional[datetime]:
+            if not v:
+                return None
+            try:
+                return datetime.fromisoformat(v)
+            except Exception:
+                return None
+        try:
+            return ScheduledMessage(
+                id=row['id'],
+                channel_id=row['channel_id'],
+                content=row.get('content', ''),
+                scheduled_time=_dt(row.get('scheduled_time')) or datetime.now(),
+                status=MessageStatus(row.get('status', 'pending')),
+                sender_id=row.get('sender_id'),
+                thread_id=row.get('thread_id'),
+                attachments=row.get('attachments') or [],
+                metadata=row.get('metadata') or {},
+                recurrence=RecurrenceType(row.get('recurrence', 'none')),
+                recurrence_interval=row.get('recurrence_interval'),
+                recurrence_end=_dt(row.get('recurrence_end')),
+                created_at=_dt(row.get('created_at')) or datetime.now(),
+                sent_at=_dt(row.get('sent_at')),
+                error=row.get('error'),
+                retry_count=row.get('retry_count', 0),
+                max_retries=row.get('max_retries', 3),
+            )
+        except Exception:
+            return None
 
     def schedule(
         self,
@@ -145,6 +269,7 @@ class ScheduledMessageManager:
 
         with self._lock:
             self._messages[message_id] = message
+            self._persist_to_disk()
 
         return message
 
@@ -198,6 +323,7 @@ class ScheduledMessageManager:
                 message = self._messages[message_id]
                 if message.status == MessageStatus.PENDING:
                     message.status = MessageStatus.CANCELLED
+                    self._persist_to_disk()
                     return True
         return False
 
@@ -224,6 +350,7 @@ class ScheduledMessageManager:
                 message = self._messages[message_id]
                 if message.status == MessageStatus.PENDING:
                     message.scheduled_time = new_time
+                    self._persist_to_disk()
                     return message
         return None
 
@@ -247,6 +374,7 @@ class ScheduledMessageManager:
                 message = self._messages[message_id]
                 if message.status == MessageStatus.PENDING:
                     message.content = content
+                    self._persist_to_disk()
                     return message
         return None
 
