@@ -1647,8 +1647,13 @@ def _get_dynamic_capability_prompt() -> str:
 
 # create prompt
 def create_prompt(tools):
+    # We don't have the user's actual query at prompt-template build time
+    # (LangChain will substitute {input} later), so no greeting short-
+    # circuit is possible here. The 30s cache + 1.5s budget inside
+    # get_user_context still applies, so repeat constructions within
+    # the window never re-hit the backend.
     user_details, actions = get_action_user_details(
-        user_id=thread_local_data.get_user_id())
+        user_id=thread_local_data.get_user_id(), query='')
     # Build dynamic identity based on active agent config
     _active_agent_config = thread_local_data.get_agent_config() if hasattr(thread_local_data, 'get_agent_config') else None
     _owner_name = ''
@@ -3596,178 +3601,29 @@ def get_memory(user_id: int):
     return SimpleMemChatMemory.load_or_create(user_id)
 
 
-def get_action_user_details(user_id):
-    '''
-        This function help to extract action that user have perfomed till time
-    '''
-    # Initialize default values
-    user_details = "No user details available."
-    actions = "user has not performed any actions yet."
+def get_action_user_details(user_id, query: str = ''):
+    """Thin delegate to the canonical user-context resolver.
 
-    unwanted_actions = ['Topic Cofirmation', 'Langchain', 'Assessment Ended', 'Casual Conversation', 'Topic confirmation',
-                        'Topic not found', 'Topic Confirmation', 'Topic Listing', 'Probe', 'Question Answering', 'Fallback']
-    action_url = f"{ACTION_API}?user_id={user_id}"
+    The full action-history + profile fetch lives in
+    ``core.user_context.get_user_context`` which layers:
 
-    # Todo: get, and populate timezone from client
-    time_zone = "Asia/Kolkata"
+      1. Greeting short-circuit — "hi", "hello" etc. skip the HTTP
+         call entirely (33.8s → ~0s on the hot path).
+      2. 30-second per-user TTL cache — subsequent /chat messages
+         within the window reuse the last fetch.
+      3. 1.5-second total hot-path budget — a stalled backend can't
+         block chat more than 1.5s; background refresh populates the
+         cache for the next request.
+      4. Unified format — the same rich output that was previously
+         duplicated across hart_intelligence_entry, create_recipe,
+         and reuse_recipe with subtle drift.
 
-    india_tz = pytz.timezone(time_zone)
-
-    payload = {}
-    headers = {}
-
-    try:
-        response = requests.request(
-            "GET", action_url, headers=headers, data=payload, timeout=5.0)
-    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-        app.logger.error(f"Failed to get actions from {action_url}: {e}")
-        post_dict = {'user_id': user_id, 'status': TaskStatus.ERROR.value, 'task_name': TaskNames.GET_ACTION_USER_DETAILS.value, 'uid': thread_local_data.get_request_id(
-        ), 'task_id': f"{TaskNames.GET_ACTION_USER_DETAILS.value}_{str(thread_local_data.get_request_id())}", 'request_id': thread_local_data.get_request_id(), 'failure_reason': f'Connection timeout/error at get action api: {e}'}
-        publish_async('com.hertzai.longrunning.log', post_dict)
-        # Continue with defaults instead of crashing
-        response = None
-
-    if response and response.status_code == 200:
-
-        data = response.json()
-
-        # Filter out unwanted actions
-        filtered_data = [obj for obj in data if obj["action"]
-                         not in unwanted_actions and obj["zeroshot_label"]
-                         not in ['Video Reasoning', 'Screen Reasoning']]
-
-        filtered_data_video = [
-            obj for obj in data if obj["zeroshot_label"] == 'Video Reasoning']
-        filtered_data_screen = [
-            obj for obj in data if obj["zeroshot_label"] == 'Screen Reasoning']
-        # Dictionary to store the first and last occurrence dates for each action
-        action_occurrences = {}
-
-        # Iterate over the filtered data
-        for obj in filtered_data:
-            action = obj["action"]
-            date = parse_date(obj["created_date"])
-            gpt3_label = obj["gpt3_label"]
-
-            if action not in action_occurrences:
-                action_occurrences[action] = [date, date]
-            else:
-                first_date, last_date = action_occurrences[action]
-                first_date = min(first_date, date)
-                last_date = max(last_date, date)
-                action_occurrences[action] = [first_date, last_date]
-
-        # Construct the final list of actions with first and last occurrences
-        action_texts = []
-        for action, dates in action_occurrences.items():
-            first_date, last_date = dates
-            first_action_text = f"{action} on {first_date.astimezone(india_tz).strftime('%Y-%m-%dT%H:%M:%S')}"
-            action_texts.append(first_action_text)
-            if first_date != last_date:
-                last_action_text = f"{action} on {last_date.astimezone(india_tz).strftime('%Y-%m-%dT%H:%M:%S')}"
-                action_texts.append(last_action_text)
-
-        # Process video data
-        video_context_texts = []
-        for obj in filtered_data_video:
-            action = obj["action"]
-            date = parse_date(obj["created_date"])
-            gpt3_label = obj["gpt3_label"]
-
-            if gpt3_label == 'Visual Context':
-                now = datetime.now()
-                # Check if the action is older than 5 minutes
-                if (now - date) > timedelta(minutes=5):
-                    continue
-            first_action_text = f"{action} on {date.astimezone(india_tz).strftime('%Y-%m-%dT%H:%M:%S')}"
-
-            video_context_texts.append(first_action_text)
-
-        if video_context_texts:
-            action_texts.append('<Last_5_Minutes_Visual_Context_Start>')
-            action_texts.extend(video_context_texts)
-            action_texts.append('<Last_5_Minutes_Visual_Context_End>')
-            action_texts.append(
-                'If a person is identified in Visual_Context section that\'s most probably the user (me) & most likely not taking any selfie.')
-
-        # Process screen context data (shorter window — 2 minutes)
-        screen_context_texts = []
-        for obj in filtered_data_screen:
-            action = obj["action"]
-            date = parse_date(obj["created_date"])
-            now = datetime.now()
-            # Screen context goes stale faster — 2 minute window
-            if (now - date) > timedelta(minutes=2):
-                continue
-            screen_text = f"{action} on {date.astimezone(india_tz).strftime('%Y-%m-%dT%H:%M:%S')}"
-            screen_context_texts.append(screen_text)
-
-        if screen_context_texts:
-            action_texts.append('<Last_2_Minutes_Screen_Context_Start>')
-            action_texts.extend(screen_context_texts)
-            action_texts.append('<Last_2_Minutes_Screen_Context_End>')
-            action_texts.append(
-                'Screen_Context shows what is currently displayed on the user\'s computer screen.')
-
-        if len(action_texts) == 0:
-            action_texts = ['user has not performed any actions yet.']
-
-        actions = ", ".join(action_texts)
-        # Get the current time
-
-        # Format the time in the desired format
-        formatted_time = datetime.now(pytz.utc).astimezone(
-            india_tz).strftime('%Y-%m-%d %H:%M:%S')
-
-        actions = actions + ". List of actions ends. <PREVIOUS_USER_ACTION_END> \n " + "Today's datetime in "+time_zone + "is: " + formatted_time + \
-            " in this format:'%Y-%m-%dT%H:%M:%S' \n Whenever user is asking about current date or current time at particular location then use this datetime format by asking what user's location is. Use the previous sentence datetime info to answer current time based questions coupled with google_search for current time or full_history for historical conversation based answers. Take a deep breath and think step by step.\n"
-        # user detail api
-    else:
-        post_dict = {'user_id': user_id, 'status': TaskStatus.ERROR.value, 'task_name': TaskNames.GET_ACTION_USER_DETAILS.value, 'uid': thread_local_data.get_request_id(
-        ), 'task_id': f"{TaskNames.GET_ACTION_USER_DETAILS.value}_{str(thread_local_data.get_request_id())}", 'request_id': thread_local_data.get_request_id(), 'failure_reason': 'Exception happend at get action api end'}
-        publish_async('com.hertzai.longrunning.log', post_dict)
-
-    url = STUDENT_API
-    payload = json.dumps({
-        "user_id": user_id
-    })
-    headers = {
-        'Content-Type': 'application/json'
-    }
-
-    try:
-        response = requests.request("POST", url, headers=headers, data=payload, timeout=5.0)
-    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-        app.logger.error(f"Failed to get user details from {url}: {e}")
-        post_dict = {'user_id': user_id, 'status': TaskStatus.ERROR.value, 'task_name': TaskNames.GET_ACTION_USER_DETAILS.value, 'uid': thread_local_data.get_request_id(
-        ), 'task_id': f"{TaskNames.GET_ACTION_USER_DETAILS.value}_{str(thread_local_data.get_request_id())}", 'request_id': thread_local_data.get_request_id(), 'failure_reason': f'Connection timeout/error at get user detail api: {e}'}
-        publish_async('com.hertzai.longrunning.log', post_dict)
-        return user_details, actions  # Return defaults
-
-    if response.status_code == 200:
-        user_data = response.json()
-
-        # Privacy-first: use .get() with graceful defaults for local/guest users
-        # who have no cloud profile. Missing fields are noted so the agent can
-        # ask the user naturally and store in local DB when volunteered.
-        _uname = user_data.get("name") or user_data.get("display_name") or user_data.get("username") or "User"
-        _gender = user_data.get("gender", "not specified")
-        _lang = user_data.get("preferred_language", "not specified")
-        _dob = user_data.get("dob", "not specified")
-        _eng = user_data.get("english_proficiency", "not specified")
-        _created = user_data.get("created_date", "unknown")
-        _standard = user_data.get("standard", "not specified")
-        _pays = user_data.get("who_pays_for_course", "not specified")
-
-        user_details = f'''Below are the information about the user.
-        user_name: {_uname} (Call the user by this name only when required and not always), gender: {_gender}, who_pays_for_course: {_pays}(Entity Responsible for Paying the Course Fees), preferred_language: {_lang}(User's Preferred Language), date_of_birth: {_dob}, english_proficiency: {_eng}(User's English Proficiency Level), created_date: {_created}(user creation date), standard: {_standard}(User's Standard in which user studying)
-        If any of the above fields show "not specified", do not ask the user for this information proactively. Only note it when naturally relevant. The user's privacy is paramount — store preferences locally when volunteered, never push for personal data.
-        '''
-    else:
-        post_dict = {'user_id': user_id, 'status': TaskStatus.ERROR.value, 'task_name': TaskNames.GET_ACTION_USER_DETAILS.value, 'uid': thread_local_data.get_request_id(
-        ), 'task_id': f"{TaskNames.GET_ACTION_USER_DETAILS.value}_{str(thread_local_data.get_request_id())}", 'request_id': thread_local_data.get_request_id(), 'failure_reason': 'Exception happend at get user detail api end'}
-        publish_async('com.hertzai.longrunning.log', post_dict)
-    return user_details, actions
+    This shim is retained (rather than removing the symbol) so any
+    dynamic caller via ``getattr(hart_intelligence_entry, 'get_action_user_details')``
+    keeps working. New code should import ``get_user_context`` directly.
+    """
+    from core.user_context import get_user_context
+    return get_user_context(user_id=user_id, mode='reuse', query=query)
 
 
 def get_time_based_history(prompt: str, session_id: str, start_date: str, end_date: str):
@@ -4820,7 +4676,11 @@ def get_ans(casual_conv, req_tool, user_id, query, custom_prompt, preferred_lang
         actions = ""
         app.logger.info("Skipped get_action_user_details (casual_conv=True)")
     else:
-        user_details, actions = get_action_user_details(user_id=user_id)
+        # Pass the raw user query so the greeting short-circuit inside
+        # core.user_context.get_user_context fires for short "hi" /
+        # "hello" / "hey" messages. Longer substantive queries still go
+        # through the HTTP fetch (budget-bounded + cached).
+        user_details, actions = get_action_user_details(user_id=user_id, query=query)
         app.logger.info(
             "time taken by get_action_user_details %s seconds", time.time() - start_time)
     app.logger.info(casual_conv)
