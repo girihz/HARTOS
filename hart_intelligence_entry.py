@@ -2054,16 +2054,12 @@ def _request_consent(agent_id: str, action: str, label: str, input_text: str) ->
     except Exception:
         pass
     # Fallback: SSE (Nunba desktop WebView2)
-    try:
-        import __main__ as _m
-        if hasattr(_m, 'broadcast_sse_event'):
-            _m.broadcast_sse_event('agent.ui.update', {
-                'type': 'approval', 'agent_id': agent_id,
-                'action': action, 'description': description,
-            }, user_id=str(user_id))
-            return f"{label} access request sent to user. Waiting for approval."
-    except Exception:
-        pass
+    from core.platform.events import broadcast_sse_safe
+    if broadcast_sse_safe('agent.ui.update', {
+        'type': 'approval', 'agent_id': agent_id,
+        'action': action, 'description': description,
+    }, user_id=str(user_id)):
+        return f"{label} access request sent to user. Waiting for approval."
     return f"Could not request {label.lower()} access — notification system unavailable."
 
 
@@ -5259,25 +5255,12 @@ def _tts_synthesize_and_publish(text, user_id, request_id):
                     'action': 'TTS',
                 }
                 publish_async(f'com.hertzai.pupit.{user_id}', json.dumps(_tts_payload))
-                # Also push via SSE directly (publish_async → MessageBus doesn't reach SSE clients)
-                try:
-                    import __main__ as _main_mod
-                    _has_sse = hasattr(_main_mod, 'broadcast_sse_event')
-                    app.logger.info(f"TTS SSE: __main__={_main_mod.__name__}, has_broadcast={_has_sse}")
-                    if _has_sse:
-                        _main_mod.broadcast_sse_event('message', _tts_payload, user_id=user_id)
-                    else:
-                        # Fallback: try importing from main_module directly
-                        try:
-                            import sys as _sys
-                            _mm = _sys.modules.get('main_module')
-                            if _mm and hasattr(_mm, 'broadcast_sse_event'):
-                                _mm.broadcast_sse_event('message', _tts_payload, user_id=user_id)
-                                app.logger.info("TTS SSE: broadcast via main_module fallback")
-                        except Exception:
-                            pass
-                except Exception as _sse_err:
-                    app.logger.warning(f"TTS SSE broadcast error: {_sse_err}")
+                # Also push via SSE directly — publish_async → MessageBus/WAMP doesn't
+                # reach SSE clients, so the unified helper fans out to the Nunba
+                # main.py SSE broker. See core/platform/events.broadcast_sse_safe.
+                from core.platform.events import broadcast_sse_safe
+                if not broadcast_sse_safe('message', _tts_payload, user_id=user_id):
+                    app.logger.debug("TTS SSE: broadcast_sse_event unavailable (Nunba main not loaded)")
                 app.logger.info(f"TTS async: published successfully")
             else:
                 app.logger.warning(f"TTS async: no audio file — path={audio_path}, exists={os.path.isfile(audio_path) if audio_path else False}")

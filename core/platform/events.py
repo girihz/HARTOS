@@ -378,3 +378,46 @@ def emit_event(topic: str, data: Any = None, async_: bool = True) -> None:
             bus.emit(topic, data)
     except Exception:
         pass  # Never block callers — event emission is best-effort
+
+
+def broadcast_sse_safe(event_type: str, data: Any, user_id: Any = None) -> bool:
+    """Best-effort SSE broadcast to Nunba desktop clients.
+
+    Nunba's ``main.py`` exposes ``broadcast_sse_event`` on ``__main__`` —
+    the SSE fan-out is still a distinct transport from the WAMP /
+    MessageBus path, so callers that want to reach SSE listeners must
+    push there explicitly. This helper encapsulates the
+    ``import __main__`` + ``sys.modules.get('main_module')`` fallback
+    chain so ``hart_intelligence_entry``, ``integrations.social.realtime``,
+    ``model_orchestrator``, etc. don't each reimplement the same 10-line
+    try/except block. Until EventBus grows a proper SSE transport
+    adapter, this is the canonical single-call entrypoint for pushing a
+    payload to SSE subscribers.
+
+    Args:
+        event_type: SSE ``event:`` type string (e.g. ``'notification'``,
+                    ``'message'``, ``'capability_update'``).
+        data:       JSON-serializable payload dict.
+        user_id:    Target user for per-user routing. ``None`` broadcasts
+                    to every connected SSE client.
+
+    Returns:
+        ``True`` if the broadcast function was resolved and invoked,
+        ``False`` otherwise. Never raises — SSE delivery is best-effort
+        and must not block the caller or mask the primary transport.
+    """
+    try:
+        import sys as _sys
+        import __main__ as _main_mod
+        broadcast = getattr(_main_mod, 'broadcast_sse_event', None)
+        if broadcast is None:
+            _mm = _sys.modules.get('main_module')
+            if _mm is not None:
+                broadcast = getattr(_mm, 'broadcast_sse_event', None)
+        if broadcast is None:
+            return False
+        broadcast(event_type, data, user_id=user_id)
+        return True
+    except Exception as e:
+        logger.debug("SSE broadcast skipped: %s", e)
+        return False
