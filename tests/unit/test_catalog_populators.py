@@ -39,10 +39,10 @@ def fresh_catalog() -> ModelCatalog:
 class TestPopulateTtsCatalog:
     """Tests for populate_tts_catalog from integrations.channels.media.tts_router."""
 
-    # The ENGINE_REGISTRY currently has exactly 9 engines:
+    # ENGINE_REGISTRY currently has 10 engines:
     #   chatterbox_turbo, luxtts, cosyvoice3, f5_tts, indic_parler,
-    #   chatterbox_ml, pocket_tts, espeak, makeittalk
-    EXPECTED_COUNT = 9
+    #   chatterbox_ml, pocket_tts, espeak, makeittalk, piper
+    EXPECTED_COUNT = 10
 
     # Every catalog ID produced by populate_tts_catalog
     # (engine_id.replace("_", "-") prefixed with "tts-")
@@ -56,6 +56,7 @@ class TestPopulateTtsCatalog:
         'tts-pocket-tts',
         'tts-espeak',
         'tts-makeittalk',
+        'tts-piper',
     }
 
     # These IDs must also appear as keys in ModelOrchestrator._CATALOG_TO_VRAM_KEY
@@ -511,15 +512,17 @@ class TestPopulateFromSubsystems:
 
     Expected totals from the built-in _populate_* methods (no extra
     application-registered populators):
-        TTS      :  9  (ENGINE_REGISTRY)
+        TTS      : 10  (ENGINE_REGISTRY — chatterbox_turbo/ml, luxtts,
+                       cosyvoice3, f5_tts, indic_parler, pocket_tts,
+                       espeak, makeittalk, piper)
         STT      : 11  (5 faster-whisper + 6 sherpa-onnx)
         VLM      :  5  (qwen3vl, qwen08b caption, minicpm-v2, mobilevlm, clip)
         VideoGen :  2  (wan2gp, ltx2)
         AudioGen :  2  (acestep, diffrhythm)
-        Total    : 29
+        Total    : 30
     """
 
-    EXPECTED_TTS_COUNT = 9
+    EXPECTED_TTS_COUNT = 10
     EXPECTED_STT_COUNT = 11
     EXPECTED_VLM_COUNT = 5  # +1 for qwen08b caption model
     EXPECTED_VIDEOGEN_COUNT = 2
