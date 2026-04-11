@@ -97,6 +97,33 @@ class ModelState:
     # Inference guard
     active_inference_count: int = 0
 
+    # ─── Eviction policy flags ────────────────────────────────────
+    # These are the 2026-04-12 fix for the "llama-server kept dying
+    # every 5 minutes" incident. The default idle eviction loop
+    # (_evict_idle_models → _update_priorities) used to demote ANY
+    # idle model to EVICTABLE after its timeout, unconditionally,
+    # which killed the 4B main LLM mid-session even though nobody
+    # was competing for VRAM.
+
+    #: True ⇒ the model is NEVER evicted, regardless of idle time,
+    #: VRAM pressure, or RAM pressure. Reserved for the draft 0.8B
+    #: classifier which is the first-contact path for EVERY chat
+    #: message. Killing the draft means every reply cold-starts a
+    #: 500 MB model + mmproj, so pinning it is always the right call.
+    #: Use sparingly — pinned models consume their VRAM budget
+    #: forever, so this must only tag models where the eviction
+    #: cost always outweighs the freed VRAM.
+    pinned: bool = False
+
+    #: True ⇒ the model is evicted ONLY when VRAM pressure is
+    #: detected (phase 3 of _tick), never by passive idle timeout
+    #: (phase 7). Applied to main-tier chat LLMs (2B / 4B) so a
+    #: 30-second idle doesn't kill the server the user is actively
+    #: talking to. Passive idle eviction is intended for STT / TTS /
+    #: VLM one-shot models where a cold start is cheap and the
+    #: VRAM is better spent on the model you're about to use next.
+    pressure_evict_only: bool = False
+
     # Crash recovery tracking
     crash_count: int = 0              # Consecutive crashes (resets on successful access)
     last_crash_time: float = 0.0      # Timestamp of last crash
@@ -532,11 +559,34 @@ class ModelLifecycleManager:
             pass
 
     def _update_priorities(self):
-        """Recalculate priority for every tracked model."""
+        """Recalculate priority for every tracked model.
+
+        Respects two eviction-policy flags on each ModelState:
+
+          * ``pinned`` — the model is always ACTIVE; no matter how
+            long it idles, it is never demoted to EVICTABLE. Applied
+            to the draft 0.8B classifier which every chat message
+            hits first.
+
+          * ``pressure_evict_only`` — the model never enters the
+            EVICTABLE priority through the passive idle path. It
+            can still hit EVICTABLE temporarily in
+            ``_respond_to_vram_pressure`` / ``_respond_to_ram_pressure``
+            which is exactly what "evict under pressure" means.
+            Applied to main-tier chat LLMs (2B / 4B) so a 30-second
+            idle doesn't kill the server the user is actively
+            talking to.
+        """
         now = time.time()
         with self._lock:
             for state in self._models.values():
                 if state.device == ModelDevice.UNLOADED:
+                    continue
+
+                # Pinned models are permanently ACTIVE. They stay loaded
+                # for the life of the process and never feel eviction.
+                if state.pinned:
+                    state.priority = ModelPriority.ACTIVE
                     continue
 
                 if state.active_inference_count > 0:
@@ -555,7 +605,16 @@ class ModelLifecycleManager:
                     else:
                         state.priority = ModelPriority.IDLE
                 else:
-                    state.priority = ModelPriority.EVICTABLE
+                    # Past the idle timeout. A normal model becomes
+                    # EVICTABLE and is swept up by _evict_idle_models
+                    # in phase 7. A pressure_evict_only model is
+                    # capped at IDLE so it survives the passive sweep
+                    # and only gets unloaded when VRAM pressure forces
+                    # the hand in phase 3.
+                    if state.pressure_evict_only:
+                        state.priority = ModelPriority.IDLE
+                    else:
+                        state.priority = ModelPriority.EVICTABLE
 
     def _detect_vram_pressure(self) -> bool:
         """True if current VRAM usage exceeds threshold."""
@@ -599,13 +658,18 @@ class ModelLifecycleManager:
         """Evict or offload GPU models to relieve VRAM pressure.
 
         Strategy: EVICTABLE first (LRU) → IDLE offload to CPU → WARM offload.
-        Never touches ACTIVE models.
+        Never touches ACTIVE models. Never touches pinned models — the
+        ``pinned`` guard is a second safety net on top of the
+        ``_update_priorities`` rule that forces pinned models into
+        ACTIVE priority. It catches out-of-band callers that might
+        invoke this method between priority-update phases.
         """
         with self._lock:
             candidates = sorted(
                 [s for s in self._models.values()
                  if s.device in (ModelDevice.GPU, ModelDevice.CPU_OFFLOAD)
-                 and s.priority != ModelPriority.ACTIVE],
+                 and s.priority != ModelPriority.ACTIVE
+                 and not s.pinned],
                 key=lambda s: (_PRIORITY_RANK.get(s.priority, 99),
                                s.last_access_time)
             )
@@ -625,12 +689,18 @@ class ModelLifecycleManager:
                 self._do_unload(name)
 
     def _respond_to_ram_pressure(self):
-        """Unload CPU models under RAM pressure (LRU first)."""
+        """Unload CPU models under RAM pressure (LRU first).
+
+        Pinned models are excluded as a second safety net — the
+        ``pinned`` guard ensures a draft classifier that was
+        offloaded to CPU for any reason still survives RAM pressure.
+        """
         with self._lock:
             candidates = sorted(
                 [s for s in self._models.values()
                  if s.device == ModelDevice.CPU
-                 and s.priority != ModelPriority.ACTIVE],
+                 and s.priority != ModelPriority.ACTIVE
+                 and not s.pinned],
                 key=lambda s: s.last_access_time
             )
             names = [s.name for s in candidates]
@@ -644,7 +714,8 @@ class ModelLifecycleManager:
         """Reduce system load by evicting non-essential models.
 
         Under CPU pressure, background model processes consume cycles.
-        Evict EVICTABLE and IDLE models to free CPU for user-facing work.
+        Evict EVICTABLE and IDLE models to free CPU for user-facing
+        work. Pinned models are exempt as a second safety net.
         """
         with self._lock:
             evictable = [
@@ -652,13 +723,23 @@ class ModelLifecycleManager:
                 if s.priority in (ModelPriority.EVICTABLE, ModelPriority.IDLE)
                 and s.device != ModelDevice.UNLOADED
                 and s.active_inference_count == 0
+                and not s.pinned
             ]
         for name in evictable:
             logger.info(f"Lifecycle: evicting '{name}' due to CPU pressure")
             self._do_unload(name)
 
     def _evict_idle_models(self):
-        """Background GC: unload models past their idle timeout."""
+        """Background GC: unload models past their idle timeout.
+
+        Belt-and-suspenders: the ``pinned`` and ``pressure_evict_only``
+        guards live in :meth:`_update_priorities` which never demotes
+        those models to EVICTABLE, so they don't appear in the
+        candidate list below. We still check ``pinned`` explicitly
+        here as a second safety net — if a future code path assigns
+        EVICTABLE directly (e.g. manual admin eviction), pinning
+        should still beat it.
+        """
         now = time.time()
         with self._lock:
             evictable = [
@@ -666,12 +747,13 @@ class ModelLifecycleManager:
                 if s.priority == ModelPriority.EVICTABLE
                 and s.device != ModelDevice.UNLOADED
                 and s.active_inference_count == 0
+                and not s.pinned
             ]
 
         for name in evictable:
             with self._lock:
                 state = self._models.get(name)
-            if not state:
+            if not state or state.pinned:
                 continue
             idle_s = now - state.last_access_time if state.last_access_time else float('inf')
             if idle_s > state.idle_timeout_s:
