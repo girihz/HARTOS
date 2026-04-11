@@ -143,7 +143,6 @@ from lifecycle_hooks import (
     lifecycle_hook_track_fallback_request,
     lifecycle_hook_track_recipe_request,
     lifecycle_hook_track_termination,
-    lifecycle_hook_publish_narration,
     lifecycle_hook_process_verifier_response,
     lifecycle_hook_track_recipe_completion,
     lifecycle_hook_check_all_actions_terminated, StateTransitionError, lifecycle_hook_validate_final_agent_creation,
@@ -1922,7 +1921,14 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             lifecycle_hook_track_user_fallback(user_prompt, user_tasks, group_chat)  # 8. Track user fallback
             lifecycle_hook_track_recipe_request(user_prompt, user_tasks, group_chat)  # 9. Track recipe request
             lifecycle_hook_track_termination(user_prompt, user_tasks, group_chat)  # 11. Track termination
-            lifecycle_hook_publish_narration(user_prompt, user_id, group_chat)  # 13. Publish user-facing narration (dedupe)
+            # Hook 13 removed: publish_intermediate_thoughts_to_user
+            # (delegated to publish_agent_thought at the top of this
+            # file) is the SINGLE canonical Crossbar publisher for
+            # agent-to-agent thought streaming. It fires later in
+            # state_transition on line 2145. The old lifecycle_hook_
+            # publish_narration was a parallel publisher emitting a
+            # different JSON shape on the same topic — removed to keep
+            # one mechanism, one message format.
 
             # Enhanced agent selection with state awareness
             if user_prompt and user_tasks[user_prompt]:

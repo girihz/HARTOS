@@ -956,3 +956,31 @@ class TestProcessVerifierResponse:
         action = _make_action_obj(current_action=1)
         result = lifecycle_hook_process_verifier_response(UP, None, action)
         assert result["action"] == "allow"
+
+
+# lifecycle_hook_publish_narration was deleted — it was a parallel
+# publisher on the same Crossbar topic as the thinking-prompts
+# publisher (publish_intermediate_thoughts_to_user / publish_agent_thought
+# in create_recipe). The thinking-prompts publisher is the single
+# canonical path for streaming agent-to-agent thoughts to the Nunba
+# UI. If you need per-turn narration from a new call site, call
+# create_recipe.publish_agent_thought(last_speaker, messages, user_id)
+# directly — don't resurrect the hook.
+
+
+class TestPublishNarrationRemoved:
+    """Guard that the deleted publisher + its helper state cannot
+    sneak back into lifecycle_hooks."""
+
+    def test_hook_symbol_is_gone(self):
+        import lifecycle_hooks as lh
+        assert not hasattr(lh, 'lifecycle_hook_publish_narration'), (
+            'Deleted: the narration hook was a parallel publisher on the '
+            'same Crossbar topic as publish_intermediate_thoughts_to_user. '
+            'Use create_recipe.publish_agent_thought instead.'
+        )
+
+    def test_dedupe_cache_is_gone(self):
+        import lifecycle_hooks as lh
+        assert not hasattr(lh, '_last_narrations')
+        assert not hasattr(lh, '_json_dump')
