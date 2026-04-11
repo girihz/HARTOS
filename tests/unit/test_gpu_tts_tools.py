@@ -212,7 +212,6 @@ class TestF5Unload:
 class TestKokoroSynthesize:
 
     def test_empty_text_returns_error(self):
-        import json
         from integrations.service_tools.kokoro_tool import kokoro_synthesize
         result = json.loads(kokoro_synthesize(""))
         assert "error" in result
@@ -273,6 +272,7 @@ class TestToolConsistency:
         from integrations.service_tools.cosyvoice_tool import cosyvoice_synthesize
         from integrations.service_tools.indic_parler_tool import indic_parler_synthesize
         from integrations.service_tools.f5_tts_tool import f5_synthesize
+        from integrations.service_tools.kokoro_tool import kokoro_synthesize
 
         fns = [
             chatterbox_synthesize,
@@ -280,6 +280,7 @@ class TestToolConsistency:
             cosyvoice_synthesize,
             indic_parler_synthesize,
             f5_synthesize,
+            kokoro_synthesize,
         ]
         for fn in fns:
             result = fn("")
@@ -295,12 +296,14 @@ class TestToolConsistency:
         from integrations.service_tools.cosyvoice_tool import _tool as _cosy_tool
         from integrations.service_tools.indic_parler_tool import _tool as _parler_tool
         from integrations.service_tools.f5_tts_tool import _tool as _f5_tool
+        from integrations.service_tools.kokoro_tool import _tool as _kokoro_tool
 
         assert _turbo.worker_module.endswith('chatterbox_tool')
         assert _ml.worker_module.endswith('chatterbox_tool')
         assert _cosy_tool.worker_module.endswith('cosyvoice_tool')
         assert _parler_tool.worker_module.endswith('indic_parler_tool')
         assert _f5_tool.worker_module.endswith('f5_tts_tool')
+        assert _kokoro_tool.worker_module.endswith('kokoro_tool')
 
     def test_none_alive_before_first_call(self):
         """Importing a tool module must NOT spawn any subprocesses —
@@ -310,9 +313,10 @@ class TestToolConsistency:
         from integrations.service_tools.cosyvoice_tool import _tool as _cosy_tool
         from integrations.service_tools.indic_parler_tool import _tool as _parler_tool
         from integrations.service_tools.f5_tts_tool import _tool as _f5_tool
+        from integrations.service_tools.kokoro_tool import _tool as _kokoro_tool
 
         # Ensure teardown from other tests didn't leave workers alive
-        for t in (_turbo, _ml, _cosy_tool, _parler_tool, _f5_tool):
+        for t in (_turbo, _ml, _cosy_tool, _parler_tool, _f5_tool, _kokoro_tool):
             t.stop()
 
         assert not _turbo.is_alive()
@@ -320,3 +324,4 @@ class TestToolConsistency:
         assert not _cosy_tool.is_alive()
         assert not _parler_tool.is_alive()
         assert not _f5_tool.is_alive()
+        assert not _kokoro_tool.is_alive()
