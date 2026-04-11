@@ -8,7 +8,7 @@
       "description": "This agent is good at coding and can execute commands"
     }
   ],
-  "tools": ["execute_windows_command"],
+  "tools": ["execute_windows_or_android_command"],
   "flows": [
     {
       "flow_name": "Simple code task",

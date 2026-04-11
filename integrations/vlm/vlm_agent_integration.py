@@ -222,86 +222,22 @@ class VLMAgentContext:
                 "action": action
             }
 
-    def execute_windows_command(
-        self,
-        command: str,
-        user_id: str = "agent",
-        prompt_id: str = "task"
-    ) -> Dict[str, Any]:
-        """
-        Execute a Windows command through VLM agent's computer tool.
-
-        This uses the hotkey action to open Run dialog (Win+R) and execute commands.
-
-        Args:
-            command: Windows command to execute (e.g., "notepad", "calc", "cmd /c dir")
-            user_id: User identifier
-            prompt_id: Prompt/task identifier
-
-        Returns:
-            Result dictionary with status and output
-        """
-        try:
-            # Strategy: Use Win+R to open Run dialog, then type command
-            steps = [
-                {
-                    "action": "hotkey",
-                    "parameters": {"text": "Win+R"},
-                    "description": "Open Run dialog"
-                },
-                {
-                    "action": "wait",
-                    "parameters": {},
-                    "description": "Wait for Run dialog"
-                },
-                {
-                    "action": "type",
-                    "parameters": {"text": command},
-                    "description": f"Type command: {command}"
-                },
-                {
-                    "action": "hotkey",
-                    "parameters": {"text": "Return"},
-                    "description": "Execute command"
-                }
-            ]
-
-            results = []
-            for step in steps:
-                result = self.execute_vlm_action(
-                    action=step["action"],
-                    parameters=step["parameters"],
-                    user_id=user_id,
-                    prompt_id=prompt_id
-                )
-                results.append({
-                    "step": step["description"],
-                    "result": result
-                })
-
-                # Check if step failed
-                if result.get("status") == "error":
-                    return {
-                        "status": "error",
-                        "message": f"Failed at step: {step['description']}",
-                        "command": command,
-                        "results": results
-                    }
-
-            return {
-                "status": "success",
-                "message": f"Command executed: {command}",
-                "command": command,
-                "results": results
-            }
-
-        except Exception as e:
-            logger.error(f"Error executing Windows command '{command}': {e}")
-            return {
-                "status": "error",
-                "message": str(e),
-                "command": command
-            }
+    # execute_windows_command REMOVED — it was a Windows-specific parallel
+    # path that simulated Win+R → type → Enter against the old OmniParser
+    # HTTP server with no denylist, no NFKC normalization, no timeout, and
+    # no audit log. The unified cross-OS replacement is
+    # `execute_windows_or_android_command` in create_recipe.py, which:
+    #
+    #   - supports windows / linux / macos / android via vlm_adapter →
+    #     run_local_agentic_loop → shared shell/open_file_gui actions
+    #   - runs every command through _handle_shell_command_tool's denylist
+    #   - works in frozen builds (no pyautogui HTTP dependency)
+    #
+    # Callers that used `VLMAgentContext.execute_windows_command(cmd)` should
+    # use the autogen-registered `execute_windows_or_android_command(
+    # instructions=cmd, os_to_control='windows')` instead. See commit
+    # history dce4b31..HEAD for the subprocess isolation + unified shell
+    # handler context.
 
     def get_visual_feedback_for_task(self, task_description: str) -> str:
         """
@@ -372,10 +308,6 @@ class VLMAgentContext:
                         "parameters": {
                             "type": "object",
                             "description": "Parameters for the action (e.g., {'text': 'Hello'}, {'coordinate': [100, 200]})"
-                        },
-                        "windows_command": {
-                            "type": "string",
-                            "description": "Optional Windows command to execute (e.g., 'notepad', 'calc')"
                         }
                     },
                     "required": ["action"]
