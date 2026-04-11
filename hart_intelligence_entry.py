@@ -5247,6 +5247,19 @@ def chat():
         draft_first = bool(data['draft_first'])
     else:
         draft_first = True
+    # Confidence floor for routing decisions driven by the draft
+    # classifier's intent flags (is_create_agent). Below this the draft's
+    # classification is treated as uncertain and we stay on the safer
+    # path — returning the draft's standby reply instead of force-
+    # switching into autogen CREATE. Keeps the draft in charge but
+    # refuses to make an irreversible routing change on a coin flip.
+    _DRAFT_INTENT_CONFIDENCE = 0.75
+    # Persona block forwarded to the draft-first dispatcher so a system
+    # agent's voice comes back on the standby reply. Only populated on
+    # the system-agent path below; initialised here so the draft-first
+    # branch (which runs BEFORE that path for non-system-agent requests)
+    # can reference it safely.
+    custom_prompt = None
     model_config = data.get('model_config', None)
     task_source = data.get('task_source', 'own')
     thread_local_data.set_task_source(task_source)
@@ -5455,17 +5468,44 @@ def chat():
             # no_draft_model / circuit breaker / guardrail block all leave
             # result['response'] empty — fall through to the normal path.
             if result.get('response'):
-                return jsonify({
-                    'response': result['response'],
-                    'Agent_status': 'Draft-First Mode',
-                    'speculation_id': result.get('speculation_id'),
-                    'expert_pending': result.get('expert_pending', False),
-                    'delegate': result.get('delegate'),
-                    'draft_model': result.get('draft_model'),
-                    'draft_confidence': result.get('draft_confidence'),
-                    'is_correction': bool(result.get('is_correction', False)),
-                    'latency_ms': result.get('latency_ms'),
-                })
+                # If the draft classifier flagged a NEW agent creation intent
+                # with high confidence, fall through to the autogen CREATE
+                # flow below instead of returning the draft's standby reply.
+                # This is the SINGLE source of truth for create_agent
+                # routing — callers no longer need to keyword-match user
+                # text before calling /chat, the 0.8B draft handles it.
+                _draft_conf = float(result.get('draft_confidence') or 0.0)
+                if (result.get('is_create_agent')
+                        and _draft_conf >= _DRAFT_INTENT_CONFIDENCE):
+                    app.logger.info(
+                        'draft classifier: is_create_agent=true '
+                        f'(conf={_draft_conf:.2f}) — routing to autogen CREATE'
+                    )
+                    create_agent = True
+                    _is_agentic_orchestration = True
+                    # Fall through — do NOT return the draft reply; the
+                    # create_agent branch below runs in this same request.
+                else:
+                    return jsonify({
+                        'response': result['response'],
+                        'Agent_status': 'Draft-First Mode',
+                        'speculation_id': result.get('speculation_id'),
+                        'expert_pending': result.get('expert_pending', False),
+                        'delegate': result.get('delegate'),
+                        'draft_model': result.get('draft_model'),
+                        'draft_confidence': result.get('draft_confidence'),
+                        # Intent classification surfaced by the draft so the
+                        # caller can route downstream (correction → learner,
+                        # casual → draft-only fast path, channel_connect →
+                        # Connect_Channel tool). Keyword-based classifiers
+                        # in callers are anti-pattern; the draft model is
+                        # the single source of truth.
+                        'is_correction': bool(result.get('is_correction', False)),
+                        'is_casual': bool(result.get('is_casual', False)),
+                        'is_create_agent': bool(result.get('is_create_agent', False)),
+                        'channel_connect': result.get('channel_connect', ''),
+                        'latency_ms': result.get('latency_ms'),
+                    })
         except ImportError:
             pass
 

@@ -279,6 +279,12 @@ class SpeculativeDispatcher:
                 delegate=delegate,
             )
 
+        # Channel name defensively coerced: draft model sometimes emits None,
+        # null, or a capitalised string. Normalise to a lowercased str so
+        # callers can treat an empty string as "no channel connect intent".
+        _channel = parsed.get('channel_connect') or ''
+        if not isinstance(_channel, str):
+            _channel = ''
         return {
             'response': draft_reply,
             'speculation_id': speculation_id,
@@ -286,6 +292,9 @@ class SpeculativeDispatcher:
             'delegate': delegate,
             'draft_confidence': confidence,
             'is_correction': bool(parsed.get('is_correction', False)),
+            'is_casual': bool(parsed.get('is_casual', False)),
+            'is_create_agent': bool(parsed.get('is_create_agent', False)),
+            'channel_connect': _channel.strip().lower(),
             'expert_pending': expert_pending,
             'latency_ms': round(draft_latency_ms, 1),
             'energy_kwh': round(
@@ -339,29 +348,54 @@ class SpeculativeDispatcher:
             )
         return (
             persona_block
-            + "You are a fast local first-responder. Reply to the user in a "
-            "short helpful way, AND decide whether a bigger model should "
-            "take over, AND classify whether the user is correcting a "
-            "previous assistant response.\n\n"
+            + "You are a fast local first-responder. Produce a short reply AND "
+            "classify the user's intent on several independent axes. The "
+            "classification flags are what route the message downstream — "
+            "be accurate.\n\n"
             f"User: {user_prompt}\n\n"
             "Respond with ONE JSON object on a single line and NOTHING else:\n"
             '{"reply": "<your short reply to the user, 1-3 sentences>", '
             '"delegate": "none" OR "local" OR "hive", '
             '"confidence": <float 0-1>, '
             '"is_correction": true OR false, '
+            '"is_casual": true OR false, '
+            '"is_create_agent": true OR false, '
+            '"channel_connect": "<channel name or empty string>", '
             '"reason": "<why you chose this delegate value>"}\n\n'
-            "Use delegate=\"none\" for greetings, small-talk, or anything you "
-            "can fully answer yourself. Use \"local\" if the request needs "
-            "tools, code, reasoning, or multi-step work the 4B model can "
-            "handle. Use \"hive\" if it needs large-model expertise, "
-            "long-context research, or specialized skill distribution.\n\n"
-            "Set is_correction=true when the user is telling you something "
-            "in the previous assistant turn was wrong, incorrect, or "
-            "inaccurate, or when they're restating what they actually meant "
-            "(e.g. 'no that's wrong', 'actually, I meant X', 'not quite', "
-            "'you got it wrong'). Otherwise set is_correction=false. This "
-            "flag routes the message into the hive's real-time learning "
-            "pipeline, so be accurate — prefer false when unsure."
+            # ── delegate ────────────────────────────────────────────────
+            "delegate: Use \"none\" for greetings, small-talk, factual "
+            "questions you can fully answer yourself, or anything that needs "
+            "no external tools. Use \"local\" if the request needs tools, "
+            "code, reasoning, or multi-step work the 4B model can handle. "
+            "Use \"hive\" if it needs large-model expertise, long-context "
+            "research, or specialized skill distribution.\n\n"
+            # ── is_correction ────────────────────────────────────────────
+            "is_correction: true when the user is telling you something "
+            "in the previous assistant turn was wrong, inaccurate, or "
+            "they're restating what they actually meant (e.g. 'no that's "
+            "wrong', 'actually, I meant X', 'not quite', 'you got it "
+            "wrong'). Otherwise false. Routes the turn into the hive's "
+            "real-time learning pipeline, so prefer false when unsure.\n\n"
+            # ── is_casual ────────────────────────────────────────────────
+            "is_casual: true when the message is pure chit-chat, a "
+            "greeting, an acknowledgement, or anything that clearly "
+            "doesn't need any tools, search, computer control, agent "
+            "creation, or multi-step reasoning. Used to skip the heavy "
+            "tool-resolution pipeline. If in doubt (looks substantive), "
+            "prefer false.\n\n"
+            # ── is_create_agent ─────────────────────────────────────────
+            "is_create_agent: true when the user is explicitly asking to "
+            "create, build, train, or set up a NEW AI agent / bot / "
+            "assistant / automated workflow. Not true for questions "
+            "ABOUT agents, or for using an existing agent. Routes the "
+            "turn into the autogen CREATE flow.\n\n"
+            # ── channel_connect ─────────────────────────────────────────
+            "channel_connect: if the user is asking to connect, add, "
+            "link, or set up a messaging channel (WhatsApp, Telegram, "
+            "Slack, Discord, Gmail, SMS, Teams, Messenger, etc.) put "
+            "the lowercased channel name here (e.g. \"whatsapp\"). "
+            "Otherwise use an empty string \"\". This routes the turn "
+            "to the Connect_Channel tool."
         )
 
     def _track_call_telemetry(
