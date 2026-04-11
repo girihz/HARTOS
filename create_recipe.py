@@ -572,64 +572,20 @@ def get_visual_context(user_id, minutes=2):
         current_app.logger.error(f'Error getting visual context: {e}')
         return None
 
-def get_action_user_details(user_id):
-    '''
-        This function helps to extract actions that the user has performed till now.
-    '''
-    unwanted_actions = ['Topic Cofirmation', 'Langchain', 'Assessment Ended', 'Casual Conversation',
-                        'Topic confirmation',
-                        'Topic not found', 'Topic Confirmation', 'Topic Listing', 'Probe', 'Question Answering',
-                        'Fallback']
-    action_url = f"{ACTION_API}?user_id={user_id}"
-    time_zone = "Asia/Kolkata"
-    try:
-        india_tz = pytz.timezone(time_zone)
-    except Exception:
-        india_tz = None
-    payload = {}
-    headers = {}
-    try:
-        response = pooled_request("GET", action_url, headers=headers, data=payload)
-        if response.status_code == 200:
-            data = response.json()
-            filtered_data = [obj for obj in data if obj["action"] not in unwanted_actions and obj["zeroshot_label"] not in ['Video Reasoning']]
-            action_texts = []
-            for obj in filtered_data:
-                action = obj["action"]
-                try:
-                    date = parse_date(obj["created_date"])
-                    if india_tz:
-                        first_action_text = f"{action} on {date.astimezone(india_tz).strftime('%Y-%m-%dT%H:%M:%S')}"
-                    else:
-                        first_action_text = f"{action} on {date.strftime('%Y-%m-%dT%H:%M:%S')}"
-                    action_texts.append(first_action_text)
-                except Exception:
-                    action_texts.append(f"{action}")
-                if len(action_texts) == 0:
-                    action_texts = ['user has not performed any actions yet.']
-                actions = ", ".join(action_texts)
-        else:
-            actions = "Could not retrieve user actions"
-    except Exception as e:
-        current_app.logger.error(f"Error getting action details: {e}")
-        actions = "No user action data available"
-    try:
-        url = STUDENT_API
-        payload = json.dumps({"user_id": user_id})
-        headers = {'Content-Type': 'application/json'}
-        response = pooled_request("POST", url, headers=headers, data=payload)
-        if response.status_code == 200:
-            user_data = response.json()
-            user_details = f'''Below are the information about the user.
-            user_name: {user_data.get("name", "Unknown")}, gender: {user_data.get("gender", "Unknown")}, 
-            preferred_language: {user_data.get("preferred_language", "Unknown")}, 
-            date_of_birth: {user_data.get("dob", "Unknown")}'''
-        else:
-            user_details = "Could not retrieve user details"
-    except Exception as e:
-        current_app.logger.error(f"Error getting user details: {e}")
-        user_details = "No user details available"
-    return user_details, actions
+def get_action_user_details(user_id, query: str = ''):
+    """Thin delegate to the canonical ``core.user_context`` resolver.
+
+    The create_recipe flow runs during INITIAL agent training where
+    the prompt uses a simpler action format (no video/screen context
+    windows, no dedup) — that's what ``mode='create'`` selects inside
+    the canonical resolver. Three inline copies of this function
+    (here, in reuse_recipe, in hart_intelligence_entry) previously
+    drifted; consolidating to ``core.user_context.get_user_context``
+    gives one source of truth plus greeting short-circuit + TTL
+    cache + 1.5s hot-path budget for free.
+    """
+    from core.user_context import get_user_context
+    return get_user_context(user_id=user_id, mode='create', query=query)
 
 #called from api when visual task is auto triggered via scheduler
 def visual_execution(task_description: str, user_id: int, prompt_id: int):

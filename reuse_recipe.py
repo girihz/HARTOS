@@ -592,151 +592,22 @@ def get_message_hash(content, request_id):
     hash_input = f"{request_id}:{content}"
     return hashlib.md5(hash_input.encode()).hexdigest()[:10]
 
-def get_action_user_details(user_id):
-    '''
-        This function helps to extract actions that the user has performed till now.
-    '''
-    unwanted_actions = ['Topic Cofirmation', 'Langchain', 'Assessment Ended', 'Casual Conversation',
-                        'Topic confirmation',
-                        'Topic not found', 'Topic Confirmation', 'Topic Listing', 'Probe', 'Question Answering',
-                        'Fallback']
-    action_url = f"{ACTION_API}?user_id={user_id}"
+def get_action_user_details(user_id, query: str = ''):
+    """Thin delegate to the canonical ``core.user_context`` resolver.
 
-    # Todo: get, and populate timezone from client
-    time_zone = "Asia/Kolkata"
-
-    india_tz = pytz.timezone(time_zone)
-
-    payload = {}
-    headers = {}
-
-    response = pooled_request(
-        "GET", action_url, headers=headers, data=payload)
-
-    if response.status_code == 200:
-
-        data = response.json()
-
-        # Filter out unwanted actions
-        filtered_data = [obj for obj in data if obj["action"]
-                         not in unwanted_actions and obj["zeroshot_label"]
-                         not in ['Video Reasoning', 'Screen Reasoning']]
-
-        filtered_data_video = [
-            obj for obj in data if obj["zeroshot_label"] == 'Video Reasoning']
-        filtered_data_screen = [
-            obj for obj in data if obj["zeroshot_label"] == 'Screen Reasoning']
-        # Dictionary to store the first and last occurrence dates for each action
-        action_occurrences = {}
-
-        # Iterate over the filtered data
-        for obj in filtered_data:
-            action = obj["action"]
-            date = parse_date(obj["created_date"])
-            gpt3_label = obj["gpt3_label"]
-
-            if action not in action_occurrences:
-                action_occurrences[action] = [date, date]
-            else:
-                first_date, last_date = action_occurrences[action]
-                first_date = min(first_date, date)
-                last_date = max(last_date, date)
-                action_occurrences[action] = [first_date, last_date]
-
-        # Construct the final list of actions with first and last occurrences
-        action_texts = []
-        for action, dates in action_occurrences.items():
-            first_date, last_date = dates
-            first_action_text = f"{action} on {first_date.astimezone(india_tz).strftime('%Y-%m-%dT%H:%M:%S')}"
-            action_texts.append(first_action_text)
-            if first_date != last_date:
-                last_action_text = f"{action} on {last_date.astimezone(india_tz).strftime('%Y-%m-%dT%H:%M:%S')}"
-                action_texts.append(last_action_text)
-
-        # Process video data
-        video_context_texts = []
-        for obj in filtered_data_video:
-            action = obj["action"]
-            date = parse_date(obj["created_date"])
-            gpt3_label = obj["gpt3_label"]
-
-            if gpt3_label == 'Visual Context':
-                now = datetime.now()
-                # Check if the action is older than 5 minutes
-                if (now - date) > timedelta(minutes=5):
-                    continue
-            first_action_text = f"{action} on {date.astimezone(india_tz).strftime('%Y-%m-%dT%H:%M:%S')}"
-
-            video_context_texts.append(first_action_text)
-
-        if video_context_texts:
-            action_texts.append('<Last_5_Minutes_Visual_Context_Start>')
-            action_texts.extend(video_context_texts)
-            action_texts.append('<Last_5_Minutes_Visual_Context_End>')
-            action_texts.append(
-                'If a person is identified in Visual_Context section that\'s most probably the user (me) & most likely not taking any selfie.')
-
-        # Process screen context data (shorter window — 2 minutes)
-        screen_context_texts = []
-        for obj in filtered_data_screen:
-            action = obj["action"]
-            date = parse_date(obj["created_date"])
-            now = datetime.now()
-            if (now - date) > timedelta(minutes=2):
-                continue
-            screen_text = f"{action} on {date.astimezone(india_tz).strftime('%Y-%m-%dT%H:%M:%S')}"
-            screen_context_texts.append(screen_text)
-
-        if screen_context_texts:
-            action_texts.append('<Last_2_Minutes_Screen_Context_Start>')
-            action_texts.extend(screen_context_texts)
-            action_texts.append('<Last_2_Minutes_Screen_Context_End>')
-            action_texts.append(
-                'Screen_Context shows what is currently displayed on the user\'s computer screen.')
-
-        if len(action_texts) == 0:
-            action_texts = ['user has not performed any actions yet.']
-
-        actions = ", ".join(action_texts)
-        # Get the current time
-
-        # Format the time in the desired format
-        formatted_time = datetime.now(pytz.utc).astimezone(
-            india_tz).strftime('%Y-%m-%d %H:%M:%S')
-
-        actions = actions + ". List of actions ends. <PREVIOUS_USER_ACTION_END> \n " + "Today's datetime in " + time_zone + "is: " + formatted_time + \
-                  " in this format:'%Y-%m-%dT%H:%M:%S' \n Whenever user is asking about current date or current time at particular location then use this datetime format by asking what user's location is. Use the previous sentence datetime info to answer current time based questions coupled with google_search for current time or full_history for historical conversation based answers. Take a deep breath and think step by step.\n"
-        # user detail api
-    else:
-        post_dict = {'user_id': user_id, 'status': ActionExecutionStatus.ERROR.value,
-                     'task_name': TaskNames.GET_ACTION_USER_DETAILS.value, 'uid': thread_local_data.get_request_id(
-            ), 'task_id': f"{TaskNames.GET_ACTION_USER_DETAILS.value}_{str(thread_local_data.get_request_id())}",
-                     'request_id': thread_local_data.get_request_id(),
-                     'failure_reason': 'Exception happend at get action api end'}
-        publish_async('com.hertzai.longrunning.log', post_dict)
-
-    url = STUDENT_API
-    payload = json.dumps({
-        "user_id": user_id
-    })
-    headers = {
-        'Content-Type': 'application/json'
-    }
-    response = pooled_request("POST", url, headers=headers, data=payload)
-    if response.status_code == 200:
-        user_data = response.json()
-
-        user_details = f'''Below are the information about the user.
-        user_name: {user_data["name"]} (Call the user by this name only when required and not always),gender: {user_data["gender"]}, who_pays_for_course: {user_data["who_pays_for_course"]}(Entity Responsible for Paying the Course Fees), preferred_language: {user_data["preferred_language"]}(User's Preferred Language), date_of_birth: {user_data["dob"]}, english_proficiency: {user_data["english_proficiency"]}(User's English Proficiency Level), created_date: {user_data["created_date"]}(user creation date), standard: {user_data["standard"]}(User's Standard in which user studying)
-        '''
-    else:
-        post_dict = {'user_id': user_id, 'status': ActionExecutionStatus.ERROR.value,
-                     'task_name': TaskNames.GET_ACTION_USER_DETAILS.value, 'uid': thread_local_data.get_request_id(
-            ), 'task_id': f"{TaskNames.GET_ACTION_USER_DETAILS.value}_{str(thread_local_data.get_request_id())}",
-                     'request_id': thread_local_data.get_request_id(),
-                     'failure_reason': 'Exception happend at get user detail api end'}
-        publish_async('com.hertzai.longrunning.log', post_dict)
-    return user_details, actions
+    The reuse_recipe flow runs during PRODUCTION chat where the prompt
+    needs the full rich output (deduplicated actions, 5-min visual
+    context window, 2-min screen context window, current-time hint).
+    ``mode='reuse'`` selects the rich formatter inside the canonical
+    resolver. Three inline copies of this function previously drifted
+    across hart_intelligence_entry, create_recipe, and reuse_recipe —
+    consolidation into ``core.user_context.get_user_context`` gives
+    one source of truth plus greeting short-circuit + TTL cache +
+    1.5s hot-path budget for free. See the 2026-04-11 "hi took 33.8s"
+    post-mortem for the motivation.
+    """
+    from core.user_context import get_user_context
+    return get_user_context(user_id=user_id, mode='reuse', query=query)
 
 
 def visual_based_execution(task_description: str, user_id: int, prompt_id: int):
