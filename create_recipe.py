@@ -66,6 +66,61 @@ def _push_thinking(user_id, text):
     """
     publish_to_crossbar_new_action_start(text, user_id)
 
+
+def publish_agent_thought(last_speaker, messages, user_id):
+    """Module-level version of the nested ``publish_intermediate_thoughts_to_user``
+    closure inside create_agents().
+
+    Every autogen speaker switch flows through ``state_transition`` /
+    ``state_transition1`` which call this with (last_speaker, messages,
+    user_id). It publishes the latest message to the per-user chat
+    topic as a "Thinking" bubble — that's the ONE mechanism that
+    streams agent-to-agent chats to the Nunba UI. Don't add parallel
+    narration publishers; add callers to this function instead.
+
+    Lives at module level so the Timer-flow ``state_transition1``
+    (which is defined in a separate ``create_time_agents`` scope and
+    therefore can't see the nested closure) can call the SAME
+    publisher without duplicating the logic or creating a second
+    thinking-stream on the same Crossbar topic.
+    """
+    try:
+        if not messages:
+            return
+        last = messages[-1]
+        content = last.get('content') if isinstance(last, dict) else ''
+        if not content:
+            return
+        if last_speaker.name in ('UserProxy', 'User'):
+            return
+        # Skip our own delivery-ack messages to avoid echo loops.
+        if ('Message already sent successfully to user with request_id' in content
+                or 'Message sent successfully to user with request_id' in content):
+            return
+        crossbar_message = {
+            "text": [f'{content}'], "priority": 49,
+            "action": 'Thinking', "historical_request_id": [],
+            "preffered_language": 'en-US',
+            "options": [], "newoptions": [], "bot_type": 'Agent',
+            "page_image_url": "", "analogy_image_url": '',
+            "request_id": "123456",
+            "zoom_bounding_box": {
+                'top_left': {'x': 0, 'y': 0},
+                'top_right': {'x': 0, 'y': 0},
+                'bottom_right': {'x': 0, 'y': 0},
+                'bottom_left': {'x': 0, 'y': 0},
+            },
+        }
+        publish_async(
+            f"com.hertzai.hevolve.chat.{user_id}",
+            json.dumps(crossbar_message),
+        )
+    except Exception as e:
+        try:
+            current_app.logger.error(f"publish_agent_thought error: {e}")
+        except Exception:
+            pass
+
 # Add Smart Ledger for persistent task tracking - using agent_ledger package (from gpt4.1)
 try:
     from agent_ledger import (
@@ -88,6 +143,7 @@ from lifecycle_hooks import (
     lifecycle_hook_track_fallback_request,
     lifecycle_hook_track_recipe_request,
     lifecycle_hook_track_termination,
+    lifecycle_hook_publish_narration,
     lifecycle_hook_process_verifier_response,
     lifecycle_hook_track_recipe_completion,
     lifecycle_hook_check_all_actions_terminated, StateTransitionError, lifecycle_hook_validate_final_agent_creation,
@@ -1866,6 +1922,7 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             lifecycle_hook_track_user_fallback(user_prompt, user_tasks, group_chat)  # 8. Track user fallback
             lifecycle_hook_track_recipe_request(user_prompt, user_tasks, group_chat)  # 9. Track recipe request
             lifecycle_hook_track_termination(user_prompt, user_tasks, group_chat)  # 11. Track termination
+            lifecycle_hook_publish_narration(user_prompt, user_id, group_chat)  # 13. Publish user-facing narration (dedupe)
 
             # Enhanced agent selection with state awareness
             if user_prompt and user_tasks[user_prompt]:
@@ -2178,18 +2235,12 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
         return current_action_id
 
     def publish_intermediate_thoughts_to_user(last_speaker, messages):
-        try:
-            if last_speaker.name not in ['UserProxy', 'User'] and messages[-1]["content"] != '' and messages[-1]["content"] is not None and 'Message already sent successfully to user with request_id' not in messages[-1]["content"] and 'Message sent successfully to user with request_id' not in messages[-1]["content"]:
-                crossbar_message = {"text": [f'{messages[-1]["content"]}'], "priority": 49,
-                                    "action": 'Thinking', "historical_request_id": [], "preffered_language": 'en-US',
-                                    "options": [], "newoptions": [], "bot_type": 'Agent', "page_image_url": "",
-                                    "analogy_image_url": '', "request_id": "123456", "zoom_bounding_box": {
-                        'top_left': {'x': 0, 'y': 0}, 'top_right': {'x': 0, 'y': 0}, 'bottom_right': {'x': 0, 'y': 0},
-                        'bottom_left': {'x': 0, 'y': 0}}}
-                publish_async(
-                    f"com.hertzai.hevolve.chat.{user_id}", json.dumps(crossbar_message))
-        except Exception as e:
-            current_app.logger.error(f"Error publishing crossbar message: {e}")
+        # Delegates to the module-level publish_agent_thought so the
+        # Timer flow's state_transition1 (which lives in create_time_agents
+        # and can't see this closure) can publish via the same single
+        # mechanism. Keeps the closure's original signature so every
+        # existing call site inside create_agents continues to work.
+        publish_agent_thought(last_speaker, messages, user_id)
 
     def update_entire_actions(json_obj, user_prompt):
         current_app.logger.info('GOT UPDATED WITH entire actions')
@@ -2865,6 +2916,11 @@ def create_time_agents(user_id, prompt_id,role,goal,actions):
         if not messages:
             current_app.logger.warning("state_transition1 called with empty messages list")
             return time_agent
+        # Publish agent-to-agent thought via the shared module-level
+        # publisher so Timer-flow runs stream to the Nunba UI with the
+        # exact same "Thinking" bubble format the main create flow
+        # uses. Single publisher, single topic, no parallel paths.
+        publish_agent_thought(last_speaker, messages, user_id)
         # visual_context = helper_fun.get_visual_context(user_id)
         # if visual_context:
         #     groupchat.messages.insert(-1,{'content':visual_context,'role':'user','name':'helper'})
