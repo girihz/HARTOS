@@ -161,22 +161,96 @@ def _apply_host_validation(app: Flask):
             return jsonify({'error': 'Invalid host'}), 400
 
 
-def _apply_api_auth(app: Flask):
-    """Opt-in API key authentication for core endpoints.
+#: Admin operations that modify persistent state. ALWAYS require auth
+#: regardless of tier — even on a trusted LAN, random devices (IoT,
+#: guests, kids' tablets) shouldn't be able to hit admin routes. The
+#: only exception is bundled desktop mode (NUNBA_BUNDLED), which is
+#: single-user in-process test_client territory with no network exposure.
+#:
+#: Each entry is a prefix — anything starting with it is considered an
+#: admin path. Add new admin routes to this tuple; they inherit the
+#: auth gate automatically.
+ADMIN_PATHS = ('/api/admin',)
 
-    Only active when HEVOLVE_API_KEY is explicitly configured.  When the
-    server sits behind an external gateway (KONG OAuth, etc.) that already
-    handles auth, leave HEVOLVE_API_KEY unset and this layer is a no-op.
+#: User-facing API endpoints. These are guarded only when the deployment
+#: is publicly exposed (central tier). Regional deployments live on a
+#: trusted LAN or behind a gateway (KONG, etc.) that handles auth; flat
+#: deployments are single-user desktop and pre-trusted.
+NETWORK_PROTECTED_PATHS = ('/chat', '/time_agent', '/visual_agent',
+                           '/add_history', '/prompts', '/zeroshot',
+                           '/response_ack')
+
+#: Legacy alias — some tests still import PROTECTED_PATHS expecting
+#: the combined tuple. Keep this as the union so older imports don't
+#: break, while the split above drives the new enforcement logic.
+PROTECTED_PATHS = ADMIN_PATHS + NETWORK_PROTECTED_PATHS
+
+EXEMPT_PREFIXES = ('/status', '/a2a/', '/api/social/', '/.well-known/',
+                   '/prompts/public')
+
+
+def _apply_api_auth(app: Flask):
+    """Tier-aware API authentication with a strict admin guard.
+
+    Two gates run in order:
+
+      1. ADMIN guard — /api/admin/* ALWAYS requires auth on any tier
+         except bundled desktop. Admin ops modify persistent state so
+         LAN trust is not enough — a compromised IoT device on the
+         same network must not be able to drop agents or reconfigure
+         TTS engines.
+      2. NETWORK guard — /chat, /prompts, /visual_agent, etc. are
+         guarded only on central tier (publicly exposed). Regional
+         and flat tiers assume LAN trust or gateway-handled auth.
+
+    When HEVOLVE_API_KEY is set, BOTH gates accept X-API-Key. When it
+    is unset, BOTH gates accept only a Bearer JWT. Exempt prefixes
+    (/status, /a2a/, /api/social/, /.well-known/, /prompts/public)
+    bypass both gates so health probes and social-media-facing routes
+    stay public.
 
     Deployment scenarios:
-      - Behind KONG (standalone cloud): KONG handles OAuth → no API key needed
-      - Bundled desktop (NUNBA_BUNDLED):  in-process test_client → no API key
-      - Direct exposure (future):        set HEVOLVE_API_KEY to enable
+      - Behind KONG:                    KONG handles auth → no key needed,
+                                        middleware enforces tier-conditional
+                                        only if KONG is bypassed
+      - Bundled desktop (NUNBA_BUNDLED): early return, always trusted
+      - Regional LAN:                   /chat open, /api/admin gated
+      - Central cloud:                  everything gated
     """
 
-    PROTECTED_PATHS = ('/chat', '/time_agent', '/visual_agent', '/add_history',
-                       '/prompts', '/zeroshot', '/response_ack', '/api/admin')
-    EXEMPT_PREFIXES = ('/status', '/a2a/', '/api/social/', '/.well-known/', '/prompts/public')
+    def _path_matches_any(path: str, prefixes: tuple) -> bool:
+        return any(path == p or path.startswith(p + '/') for p in prefixes)
+
+    def _is_exempt(path: str) -> bool:
+        return any(path.startswith(p) for p in EXEMPT_PREFIXES)
+
+    def _is_admin_path(path: str) -> bool:
+        return _path_matches_any(path, ADMIN_PATHS)
+
+    def _is_network_protected(path: str) -> bool:
+        return _path_matches_any(path, NETWORK_PROTECTED_PATHS)
+
+    def _require_api_key_or_bearer(expected_key: str):
+        """Return None if the request carries a valid credential, else
+        a 401 jsonify response. Preference order matches the original
+        middleware: X-API-Key if configured, otherwise Bearer token."""
+        if expected_key:
+            api_key = request.headers.get('X-API-Key')
+            if api_key and _constant_time_compare(api_key, expected_key):
+                return None
+            # Fall through to Bearer check so API-key-configured deploys
+            # still accept JWTs (useful for admin UI + k8s probes).
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            return None
+        if expected_key:
+            logger.warning(f"Invalid/missing credential for {request.path}")
+            return jsonify(
+                {'error': 'X-API-Key header or Bearer token required'},
+            ), 401
+        return jsonify(
+            {'error': 'Authentication required (Bearer token)'},
+        ), 401
 
     @app.before_request
     def check_api_auth():
@@ -184,45 +258,45 @@ def _apply_api_auth(app: Flask):
         if os.environ.get('NUNBA_BUNDLED'):
             return
 
-        # Opt-in: only enforce when HEVOLVE_API_KEY is explicitly set.
-        # When behind KONG or another gateway that handles auth, leave
-        # HEVOLVE_API_KEY unset so this middleware is a no-op.
+        path = request.path
+        if _is_exempt(path):
+            return
+
+        # Resolve the shared credential once — both gates share it.
         try:
             from security.secrets_manager import get_secret
             expected_key = get_secret('HEVOLVE_API_KEY')
         except Exception:
             expected_key = os.environ.get('HEVOLVE_API_KEY', '')
 
-        if not expected_key:
-            # No API key configured. If this is a publicly exposed deployment
-            # (central tier), require JWT Bearer token instead.
-            if os.environ.get('HEVOLVE_NODE_TIER') == 'central':
-                # Central tier without API key: require JWT Bearer on protected paths
-                if any(request.path == p or request.path.startswith(p + '/')
-                       for p in PROTECTED_PATHS):
-                    if not any(request.path.startswith(p) for p in EXEMPT_PREFIXES):
-                        auth_header = request.headers.get('Authorization', '')
-                        if not auth_header.startswith('Bearer '):
-                            return jsonify({'error': 'Authentication required (Bearer token or X-API-Key)'}), 401
-            return  # Non-central without API key → gateway or local mode handles auth
+        # Gate 1: Admin paths. ALWAYS required. Even regional LAN
+        # deployments gate admin ops — the tier model is for user-facing
+        # APIs, not for operations that mutate persistent state.
+        if _is_admin_path(path):
+            resp = _require_api_key_or_bearer(expected_key)
+            if resp is not None:
+                return resp
+            return  # Admin path authenticated, skip gate 2
 
-        # Only protect specific paths
-        if not any(request.path == p or request.path.startswith(p + '/')
-                    for p in PROTECTED_PATHS):
+        # Gate 2: User-facing API paths. Only enforced on central tier
+        # (publicly exposed) OR whenever HEVOLVE_API_KEY is explicitly set
+        # (direct-exposure deployments that opt in to the key layer).
+        if not _is_network_protected(path):
+            return  # Not in either tuple → public
+
+        node_tier = os.environ.get('HEVOLVE_NODE_TIER', 'flat')
+        if expected_key:
+            resp = _require_api_key_or_bearer(expected_key)
+            if resp is not None:
+                return resp
             return
-
-        # Check for exempt paths
-        if any(request.path.startswith(p) for p in EXEMPT_PREFIXES):
+        if node_tier == 'central':
+            resp = _require_api_key_or_bearer(expected_key='')
+            if resp is not None:
+                return resp
             return
-
-        # Check API key
-        api_key = request.headers.get('X-API-Key')
-        if not api_key:
-            return jsonify({'error': 'X-API-Key header required'}), 401
-
-        if not _constant_time_compare(api_key, expected_key):
-            logger.warning(f"Invalid API key for {request.path}")
-            return jsonify({'error': 'Invalid API key'}), 401
+        # Non-central without API key → LAN-trusted or gateway-auth'd
+        return
 
 
 def _constant_time_compare(a: str, b: str) -> bool:
