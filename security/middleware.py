@@ -174,7 +174,8 @@ def _apply_api_auth(app: Flask):
       - Direct exposure (future):        set HEVOLVE_API_KEY to enable
     """
 
-    PROTECTED_PATHS = ('/chat', '/time_agent', '/visual_agent', '/add_history', '/prompts', '/zeroshot', '/response_ack')
+    PROTECTED_PATHS = ('/chat', '/time_agent', '/visual_agent', '/add_history',
+                       '/prompts', '/zeroshot', '/response_ack', '/api/admin')
     EXEMPT_PREFIXES = ('/status', '/a2a/', '/api/social/', '/.well-known/', '/prompts/public')
 
     @app.before_request

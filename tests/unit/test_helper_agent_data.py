@@ -139,3 +139,22 @@ class TestGetAgentDataInfo:
         assert info['saved_at'] == '2026-04-10T18:00:00'
         assert set(info['data_keys']) == {'history', 'persona', 'tools'}
         assert 'modified_at' in info
+
+
+class TestAdminEndpointAuthGate:
+    """The new /api/admin/agent-data/<id>/info endpoint MUST require auth
+    on a publicly-exposed central node — the previous commit shipped it
+    with no guard and the reviewer caught it. /api/admin is now in
+    PROTECTED_PATHS in security/middleware.py so all admin routes
+    require a Bearer token (or X-API-Key) when HEVOLVE_NODE_TIER=central
+    and HEVOLVE_API_KEY is not set. This test locks that contract."""
+
+    def test_admin_path_is_in_protected_paths(self):
+        """Regression guard: /api/admin must stay in PROTECTED_PATHS so
+        future admin routes inherit the auth gate automatically."""
+        import inspect
+        from security import middleware
+        src = inspect.getsource(middleware._apply_api_auth)
+        assert "'/api/admin'" in src or '"/api/admin"' in src, \
+            "/api/admin removed from PROTECTED_PATHS — new admin routes " \
+            "will ship unguarded. See tests/unit/test_helper_agent_data.py"
