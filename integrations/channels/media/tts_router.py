@@ -206,6 +206,25 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_module=None,  # Special cloud path in model_bus_service
         tool_function=None,
     ),
+    # Piper — bundled CPU engine, multilingual via downloadable voice
+    # files. Uses ('*',) wildcard (same convention as espeak) so one
+    # spec covers every language Piper has voices for — no parallel
+    # per-language list. Runtime synth attempt raises on missing voice
+    # files and the router falls through to a neural engine.
+    'piper': TTSEngineSpec(
+        engine_id='piper',
+        device=TTSDevice.CPU_ONLY,
+        vram_key='',
+        languages=('*',),
+        quality=0.70,
+        voice_clone=False,
+        latency_gpu_ms=0,
+        latency_cpu_ms=200,
+        latency_cloud_ms=0,
+        tool_module=None,  # In-process via Nunba tts/piper_tts.py —
+                           # no subprocess worker, no required_package.
+        tool_function=None,
+    ),
 }
 
 
