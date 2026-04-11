@@ -2889,21 +2889,20 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
         return "auto"
 
     def publish_intermediate_thoughts_to_user(last_speaker, messages):
+        # Delegates to the module-level publisher in create_recipe so
+        # the whole codebase has ONE thinking-prompts publisher — no
+        # parallel Crossbar streams for the same agent-to-agent chats.
+        # reuse_recipe's nested version used to also drop '@user'
+        # messages; the shared publisher doesn't need that because
+        # state_transition routes '@user' messages to the user path
+        # before this function is called.
         try:
-            if (last_speaker.name not in ['UserProxy', 'User'] and messages[-1]["content"] != '' and messages[-1]["content"] is not None
-                    and 'Message already sent successfully to user with request_id' not in messages[-1]["content"]
-                    and 'Message sent successfully to user with request_id' not in messages[-1]["content"]
-                    and '@user' not in messages[-1]["content"]):
-                crossbar_message = {"text": [f'{messages[-1]["content"]}'], "priority": 49,
-                                    "action": 'Thinking', "historical_request_id": [], "preferred_language": 'en-US',
-                                    "options": [], "newoptions": [], "bot_type": 'Agent', "page_image_url": "",
-                                    "analogy_image_url": '', "request_id": "123456", "zoom_bounding_box": {
-                        'top_left': {'x': 0, 'y': 0}, 'top_right': {'x': 0, 'y': 0}, 'bottom_right': {'x': 0, 'y': 0},
-                        'bottom_left': {'x': 0, 'y': 0}}}
-                publish_async(
-                    f"com.hertzai.hevolve.chat.{user_id}", json.dumps(crossbar_message))
-        except Exception as e:
-            current_app.logger.error(f"Error publishing crossbar message: {e}")
+            if messages and '@user' in (messages[-1].get('content') or '').lower():
+                return
+        except Exception:
+            pass
+        from create_recipe import publish_agent_thought
+        publish_agent_thought(last_speaker, messages, user_id)
 
     select_speaker_transforms = transform_messages.TransformMessages(
         transforms=[
