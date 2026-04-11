@@ -545,6 +545,7 @@ class ModelOrchestrator:
         'tts-indic-parler':     'tts_indic_parler',
         'tts-cosyvoice3':       'tts_cosyvoice3',
         'tts-chatterbox-ml':    'tts_chatterbox_ml',
+        'tts-kokoro':           'tts_kokoro',
         # VLM
         'vlm-minicpm-v2': 'minicpm',
         'vlm-qwen3vl':    'qwen3vl',

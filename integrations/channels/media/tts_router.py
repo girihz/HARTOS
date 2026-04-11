@@ -180,6 +180,35 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_module='integrations.service_tools.pocket_tts_tool',
         tool_function='pocket_tts_synthesize',
     ),
+    # Kokoro 82M — tiny neural English TTS. Runs on CPU (≈1× real-time,
+    # 200MB RAM) or GPU (≈0.1× real-time, 200MB VRAM). Quality sits
+    # above Piper and below the big voice-clone engines, so it's the
+    # right second rung on the English ladder — tried when the GPU
+    # engines can't run (no CUDA, VRAM full, package missing) but
+    # BEFORE we fall all the way down to Piper.
+    #
+    # Benchmark context (vs piper, on English):
+    #   - quality:     kokoro 0.88   vs  piper 0.70   (subjective MOS gap)
+    #   - cpu latency: kokoro 400ms  vs  piper 200ms  (per ~10 words)
+    #   - disk:        kokoro 160MB  vs  piper 60MB   (per voice)
+    #   - voices:      kokoro ~25    vs  piper ~15    (per-language catalog)
+    # Piper still wins on raw CPU speed and disk, which is why it
+    # stays the absolute last-resort fallback.
+    'kokoro': TTSEngineSpec(
+        engine_id='kokoro',
+        device=TTSDevice.GPU_PREFERRED,
+        vram_key='tts_kokoro',
+        languages=('en',),
+        quality=0.88,
+        voice_clone=False,
+        latency_gpu_ms=120,
+        latency_cpu_ms=400,
+        latency_cloud_ms=0,
+        tool_module='integrations.service_tools.kokoro_tool',
+        tool_function='kokoro_synthesize',
+        tool_worker_attr='_tool',
+        required_package='kokoro',
+    ),
     'espeak': TTSEngineSpec(
         engine_id='espeak',
         device=TTSDevice.CPU_ONLY,
@@ -234,7 +263,15 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
 
 # Ordered by quality for each language — first available wins
 LANG_ENGINE_PREFERENCE: Dict[str, List[str]] = {
-    'en': ['chatterbox_turbo', 'luxtts', 'pocket_tts', 'cosyvoice3', 'espeak'],
+    # English ladder (quality-then-speed):
+    #   1. chatterbox_turbo — big GPU voice-clone, highest quality
+    #   2. luxtts           — CPU voice-clone at decent quality
+    #   3. kokoro           — 82M neural, CPU-friendly, beats Piper
+    #   4. pocket_tts       — small cloneable fallback
+    #   5. cosyvoice3       — big multilingual GPU, usable for EN
+    #   6. piper            — bundled CPU fallback, always ships
+    #   7. espeak           — absolute last-resort phoneme synth
+    'en': ['chatterbox_turbo', 'luxtts', 'kokoro', 'pocket_tts', 'cosyvoice3', 'piper', 'espeak'],
     # Indic languages
     'hi': ['indic_parler', 'chatterbox_ml', 'cosyvoice3', 'espeak'],
     'ta': ['indic_parler', 'chatterbox_ml', 'espeak'],
@@ -443,6 +480,9 @@ def _is_engine_installed(engine_id: str) -> bool:
             available = True
         elif engine_id == 'f5_tts':
             from integrations.service_tools.f5_tts_tool import f5_synthesize  # noqa: F401
+            available = True
+        elif engine_id == 'kokoro':
+            from integrations.service_tools.kokoro_tool import kokoro_synthesize  # noqa: F401
             available = True
         elif engine_id == 'makeittalk':
             import os
@@ -862,6 +902,12 @@ class TTSRouter:
                 'f5_synthesize',
                 text, language, voice, output_path,
             )
+        elif engine_id == 'kokoro':
+            return self._call_gpu_engine(
+                'integrations.service_tools.kokoro_tool',
+                'kokoro_synthesize',
+                text, language, voice, output_path,
+            )
         return {'error': f'Unknown engine: {engine_id}'}
 
     def _call_luxtts(self, text, voice, output_path, device):
@@ -1034,6 +1080,7 @@ _ENGINE_DISPLAY_NAMES: Dict[str, str] = {
     'indic_parler':     'Indic Parler-TTS (GPU, 22 Indic languages)',
     'chatterbox_ml':    'Chatterbox Multilingual (GPU, 23 languages, voice-clone)',
     'pocket_tts':       'Pocket TTS (CPU, English, voice-clone)',
+    'kokoro':           'Kokoro 82M (CPU/GPU, English, neural)',
     'espeak':           'eSpeak-NG (CPU, 100+ languages, instant fallback)',
     'makeittalk':       'MakeItTalk (Cloud, English)',
 }
@@ -1072,6 +1119,11 @@ _ENGINE_EXTRA_CAPS: Dict[str, Dict[str, Any]] = {
         'emotion_tags': True,
     },
     'pocket_tts': {
+        'streaming': False,
+        'paralinguistic': [],
+        'emotion_tags': False,
+    },
+    'kokoro': {
         'streaming': False,
         'paralinguistic': [],
         'emotion_tags': False,
