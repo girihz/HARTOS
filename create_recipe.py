@@ -981,7 +981,10 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
     #     agents_object[i['name']] = name
 
     # --- Core tools (defined once in core/agent_tools.py) ---
-    from core.agent_tools import build_core_tool_closures, register_core_tools, register_memory_graph_tools
+    from core.agent_tools import (
+        build_core_tool_closures, register_core_tools, register_memory_graph_tools,
+        register_dual,
+    )
     _tool_ctx = {
         'user_id': user_id, 'prompt_id': prompt_id,
         'agent_data': agent_data, 'helper_fun': helper_fun,
@@ -1018,8 +1021,8 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
     def get_user_details()->str:
         tool_logger.info('INSIDE get user details')
         return helper_fun.parse_user_id(int(user_id))
-    helper.register_for_llm(name="get_user_details", description="Get User details like name, dob, gender")(get_user_details)
-    assistant.register_for_execution(name="get_user_details")(get_user_details)
+    register_dual(helper, assistant, get_user_details,
+                  "get_user_details", "Get User details like name, dob, gender")
 
     @log_tool_execution
     def validate_json_response(response: Annotated[str, "The response from a tool that should be JSON"]) -> str:
@@ -1048,8 +1051,9 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
                 # If repair filas, return the original with a warning
                 tool_logger.info("JSON repair has failed")
                 return f"{response}"
-    helper.register_for_llm(name="validate_json_response", description="Checks and corrects if the tool response is not JSON but expected to be.")(validate_json_response)
-    assistant.register_for_execution(name="validate_json_response")(validate_json_response)
+    register_dual(helper, assistant, validate_json_response,
+                  "validate_json_response",
+                  "Checks and corrects if the tool response is not JSON but expected to be.")
 
     # Expert agent consultation tool — domain-specific guidance on demand
     @log_tool_execution
@@ -1067,9 +1071,9 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             return f"Expert guidance from {match['name']}:\n{match['prompt_block']}"
         except Exception as e:
             return f"Expert consultation unavailable: {str(e)}"
-    helper.register_for_llm(name="consult_expert",
-        description="Consult a specialized domain expert for the current task")(consult_expert)
-    assistant.register_for_execution(name="consult_expert")(consult_expert)
+    register_dual(helper, assistant, consult_expert,
+                  "consult_expert",
+                  "Consult a specialized domain expert for the current task")
 
     @log_tool_execution
     async def execute_windows_or_android_command(
@@ -1490,9 +1494,9 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
 
 
     # Register the enhanced function
-    helper.register_for_llm(name="execute_windows_or_android_command",
-                            description="Processes user-defined commands on a personal Windows or Android system and returns detailed computer/mobile use agent execution context.")(execute_windows_or_android_command)
-    assistant.register_for_execution(name="execute_windows_or_android_command")(execute_windows_or_android_command)
+    register_dual(helper, assistant, execute_windows_or_android_command,
+                  "execute_windows_or_android_command",
+                  "Processes user-defined commands on a personal Windows or Android system and returns detailed computer/mobile use agent execution context.")
 
     # Coding Agent Aggregator: Route coding tasks to best CLI tool
     # This is a LEAF tool — calls external subprocess (kilocode/claude/opencode),
@@ -1525,11 +1529,9 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
         except Exception as e:
             return f"Coding task execution error: {e}"
 
-    helper.register_for_llm(
-        name="execute_coding_task",
-        description="Execute a coding task (write, review, refactor, debug code) using the best available coding agent tool. Routes to KiloCode, Claude Code, OpenCode, AiderNative, or ClawNative (Rust) based on benchmarks. Pass working_dir for the target repo path."
-    )(execute_coding_task)
-    assistant.register_for_execution(name="execute_coding_task")(execute_coding_task)
+    register_dual(helper, assistant, execute_coding_task,
+                  "execute_coding_task",
+                  "Execute a coding task (write, review, refactor, debug code) using the best available coding agent tool. Routes to KiloCode, Claude Code, OpenCode, AiderNative, or ClawNative (Rust) based on benchmarks. Pass working_dir for the target repo path.")
 
     # Repository map tool — tree-sitter based code understanding
     try:
@@ -1546,11 +1548,9 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             """
             return CodingRecipeBridge.get_repository_map(working_dir, max_tokens)
 
-        helper.register_for_llm(
-            name="get_repository_map",
-            description="Generate a tree-sitter repository map showing key functions, classes, and structure. Use before coding tasks to understand the codebase."
-        )(get_repository_map)
-        assistant.register_for_execution(name="get_repository_map")(get_repository_map)
+        register_dual(helper, assistant, get_repository_map,
+                      "get_repository_map",
+                      "Generate a tree-sitter repository map showing key functions, classes, and structure. Use before coding tasks to understand the codebase.")
         tool_logger.info("Registered get_repository_map tool")
     except ImportError:
         tool_logger.debug("Repository map tool not available (aider_core not installed)")
@@ -1594,11 +1594,9 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
                                'classes': s.classes} for s in shard.interface_specs],
             }, indent=2, default=str)
 
-        helper.register_for_llm(
-            name="create_code_shard",
-            description="Create a code shard with call-chain context: target function + upstream callers + downstream callees (FULL source), everything else interfaces only."
-        )(create_code_shard)
-        assistant.register_for_execution(name="create_code_shard")(create_code_shard)
+        register_dual(helper, assistant, create_code_shard,
+                      "create_code_shard",
+                      "Create a code shard with call-chain context: target function + upstream callers + downstream callees (FULL source), everything else interfaces only.")
         tool_logger.info("Registered shard engine tool (create_code_shard)")
     except Exception:
         tool_logger.debug("Shard engine tool not available")
@@ -1636,11 +1634,9 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
                     }
             return json.dumps(result, indent=2, default=str)
 
-        helper.register_for_llm(
-            name="get_coding_benchmarks",
-            description="Query coding tool benchmarks — which tool performs best per task type. Includes local and hive-aggregated data."
-        )(get_coding_benchmarks)
-        assistant.register_for_execution(name="get_coding_benchmarks")(get_coding_benchmarks)
+        register_dual(helper, assistant, get_coding_benchmarks,
+                      "get_coding_benchmarks",
+                      "Query coding tool benchmarks — which tool performs best per task type. Includes local and hive-aggregated data.")
         tool_logger.info("Registered get_coding_benchmarks tool")
     except Exception:
         tool_logger.debug("Benchmark tracker tool not available")
@@ -1665,13 +1661,7 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
 
                 if tool_def:
                     description = tool_def.get('description', f'MCP tool: {tool_name}')
-
-                    # Register for LLM (helper agent suggests tool use)
-                    helper.register_for_llm(name=tool_name, description=description)(tool_func)
-
-                    # Register for execution (assistant agent executes tool)
-                    assistant.register_for_execution(name=tool_name)(tool_func)
-
+                    register_dual(helper, assistant, tool_func, tool_name, description)
                     tool_logger.info(f"Registered MCP tool: {tool_name}")
         else:
             tool_logger.info("No MCP servers configured - continuing with default tools")
@@ -1759,9 +1749,9 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             delegation_func = create_delegation_function('assistant')
             return delegation_func(task, required_skills, context)
 
-        helper.register_for_llm(name="delegate_to_specialist",
-                               description="Delegate complex tasks to specialist agents based on required skills")(delegate_to_specialist)
-        assistant.register_for_execution(name="delegate_to_specialist")(delegate_to_specialist)
+        register_dual(helper, assistant, delegate_to_specialist,
+                      "delegate_to_specialist",
+                      "Delegate complex tasks to specialist agents based on required skills")
 
         # Add context sharing tool
         @log_tool_execution
@@ -1771,9 +1761,9 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             sharing_func = create_context_sharing_function('assistant')
             return sharing_func(context_key, context_value)
 
-        helper.register_for_llm(name="share_context_with_agents",
-                               description="Share context information with other agents in the system")(share_context_with_agents)
-        assistant.register_for_execution(name="share_context_with_agents")(share_context_with_agents)
+        register_dual(helper, assistant, share_context_with_agents,
+                      "share_context_with_agents",
+                      "Share context information with other agents in the system")
 
         # Add context retrieval tool
         @log_tool_execution
@@ -1782,9 +1772,9 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             retrieval_func = create_context_retrieval_function()
             return retrieval_func(context_key)
 
-        helper.register_for_llm(name="get_shared_context",
-                               description="Retrieve context information shared by other agents")(get_shared_context)
-        assistant.register_for_execution(name="get_shared_context")(get_shared_context)
+        register_dual(helper, assistant, get_shared_context,
+                      "get_shared_context",
+                      "Retrieve context information shared by other agents")
 
         tool_logger.info("Internal Agent Communication complete - agents can now delegate tasks and share context")
 
@@ -1804,13 +1794,7 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             tool_func = tool_def['function']
             tool_name = tool_def['name']
             tool_desc = tool_def['description']
-
-            # Register for LLM (helper agent suggests payment tools)
-            helper.register_for_llm(name=tool_name, description=tool_desc)(tool_func)
-
-            # Register for execution (assistant agent executes payment operations)
-            assistant.register_for_execution(name=tool_name)(tool_func)
-
+            register_dual(helper, assistant, tool_func, tool_name, tool_desc)
             tool_logger.info(f"Registered AP2 payment tool: {tool_name}")
 
         tool_logger.info("AP2 Agentic Commerce integration complete - agents can now handle payment workflows")

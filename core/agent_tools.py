@@ -32,6 +32,24 @@ tool_logger = logging.getLogger('tool_execution')
 # Generic registration helper
 # ---------------------------------------------------------------------------
 
+def register_dual(helper, executor, func, name: str, description: str):
+    """Register a single tool on both the LLM-calling and executing agents.
+
+    AutoGen's tool pattern pairs ``helper.register_for_llm`` with
+    ``executor.register_for_execution`` — create_recipe.py and
+    reuse_recipe.py repeat this pair 40+ times inline. Call sites
+    that define a closure and register it immediately use this
+    helper; batches that already have a ``(name, desc, func)`` list
+    should use :func:`register_core_tools` instead.
+
+    Returns ``func`` unchanged so the call can be inlined after a
+    closure definition without shadowing the name.
+    """
+    helper.register_for_llm(name=name, description=description)(func)
+    executor.register_for_execution(name=name)(func)
+    return func
+
+
 def register_core_tools(tools, helper, executor):
     """Register (name, desc, func) tuples on an AutoGen helper/executor pair.
 
@@ -41,8 +59,7 @@ def register_core_tools(tools, helper, executor):
         executor: AutoGen agent that executes tools (register_for_execution)
     """
     for name, desc, func in tools:
-        helper.register_for_llm(name=name, description=desc)(func)
-        executor.register_for_execution(name=name)(func)
+        register_dual(helper, executor, func, name, desc)
 
 
 # ---------------------------------------------------------------------------
