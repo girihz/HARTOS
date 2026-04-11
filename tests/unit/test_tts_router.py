@@ -508,10 +508,30 @@ class TestTTSResult:
 class TestEngineRegistry:
 
     def test_all_engines_present(self):
+        """Every subprocess-isolated TTS engine plus the CPU fallback
+        ladder must be registered. The set grows every time we add a
+        new engine — additions are explicit to catch accidental removals.
+
+        Canonical list as of commit 1ffbebb (Piper registered) + 790c321
+        (Kokoro 82M added):
+
+          GPU / voice-clone tier:  chatterbox_turbo, chatterbox_ml,
+                                    cosyvoice3, f5_tts, indic_parler
+          CPU / neural tier:        kokoro
+          CPU / deterministic:      piper
+          Legacy / cloud fallbacks: luxtts, pocket_tts, espeak, makeittalk
+        """
         from integrations.channels.media.tts_router import ENGINE_REGISTRY
         expected = {
-            'chatterbox_turbo', 'luxtts', 'cosyvoice3', 'f5_tts',
-            'indic_parler', 'chatterbox_ml', 'pocket_tts', 'espeak', 'makeittalk',
+            # GPU voice-clone
+            'chatterbox_turbo', 'chatterbox_ml', 'cosyvoice3', 'f5_tts',
+            'indic_parler',
+            # CPU neural (between voice-clone and Piper on the fallback ladder)
+            'kokoro',
+            # CPU deterministic (Piper, the final English fallback)
+            'piper',
+            # Cloud / legacy fallbacks
+            'luxtts', 'pocket_tts', 'espeak', 'makeittalk',
         }
         assert set(ENGINE_REGISTRY.keys()) == expected
 
