@@ -465,6 +465,104 @@ class TestPersonaInjection:
         assert 'persona' not in built_none.lower()
 
 
+class TestCorrectionIntentClassification:
+    """The draft classifier must tag every chat turn with an
+    ``is_correction`` bool. This replaces a hardcoded phrase list in
+    the Nunba chat handler — the 0.8B model owns the classification so
+    it generalises to paraphrases ('not quite what I had in mind',
+    'hmm, not really') that a static list would miss.
+
+    The tests lock: (a) the classifier prompt asks for is_correction
+    in its JSON schema, (b) dispatch_draft_first parses it and exposes
+    it in the result dict, (c) the field defaults to False on parse
+    failure so we fail safe (no spurious corrections pushed into the
+    continual learner)."""
+
+    def test_prompt_requests_is_correction_field(self, dispatcher):
+        built = dispatcher._build_draft_classifier_prompt('hi there')
+        # The schema line in the prompt must mention the field so the
+        # draft model knows to emit it.
+        assert 'is_correction' in built
+        # And there must be a guidance paragraph telling the model when
+        # to set it, otherwise the 0.8B gets no semantic anchor.
+        assert 'correction' in built.lower()
+
+    def test_dispatch_parses_is_correction_true(
+            self, dispatcher, monkeypatch):
+        _mock_guardrails(monkeypatch)
+
+        def fake_dispatch(model, prompt, *a, **kw):
+            return (
+                '{"reply": "Sorry, you\'re right — Python 3.11.", '
+                '"delegate": "none", "confidence": 0.9, '
+                '"is_correction": true}'
+            )
+
+        with patch.object(dispatcher, '_dispatch_to_model',
+                          side_effect=fake_dispatch), \
+             patch.object(dispatcher, '_record_interaction_safely'):
+            result = dispatcher.dispatch_draft_first(
+                "no that's wrong, i meant python 3.11",
+                user_id='u1', prompt_id='p1',
+            )
+        assert result['is_correction'] is True
+
+    def test_dispatch_parses_is_correction_false(
+            self, dispatcher, monkeypatch):
+        _mock_guardrails(monkeypatch)
+
+        def fake_dispatch(model, prompt, *a, **kw):
+            return (
+                '{"reply": "Hi!", "delegate": "none", '
+                '"confidence": 0.95, "is_correction": false}'
+            )
+
+        with patch.object(dispatcher, '_dispatch_to_model',
+                          side_effect=fake_dispatch), \
+             patch.object(dispatcher, '_record_interaction_safely'):
+            result = dispatcher.dispatch_draft_first(
+                'hello', user_id='u1', prompt_id='p1',
+            )
+        assert result['is_correction'] is False
+
+    def test_dispatch_defaults_to_false_on_missing_field(
+            self, dispatcher, monkeypatch):
+        """Fail safe: if the draft model forgets the field (older build
+        or JSON parse miss), is_correction must default to False so we
+        don't flood WorldModelBridge with spurious corrections."""
+        _mock_guardrails(monkeypatch)
+
+        def fake_dispatch(model, prompt, *a, **kw):
+            return (
+                '{"reply": "ok", "delegate": "none", "confidence": 0.9}'
+            )
+
+        with patch.object(dispatcher, '_dispatch_to_model',
+                          side_effect=fake_dispatch), \
+             patch.object(dispatcher, '_record_interaction_safely'):
+            result = dispatcher.dispatch_draft_first(
+                'ok', user_id='u1', prompt_id='p1',
+            )
+        assert result['is_correction'] is False
+
+    def test_dispatch_defaults_to_false_on_unparseable_envelope(
+            self, dispatcher, monkeypatch):
+        """If the draft emits prose instead of JSON, is_correction must
+        still come back as False."""
+        _mock_guardrails(monkeypatch)
+
+        def fake_dispatch(model, prompt, *a, **kw):
+            return 'sorry I cannot comply with JSON'
+
+        with patch.object(dispatcher, '_dispatch_to_model',
+                          side_effect=fake_dispatch), \
+             patch.object(dispatcher, '_record_interaction_safely'):
+            result = dispatcher.dispatch_draft_first(
+                'x', user_id='u1', prompt_id='p1',
+            )
+        assert result['is_correction'] is False
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Reasoning-quality guard: low-confidence "none" must escalate
 # ═══════════════════════════════════════════════════════════════════════════
