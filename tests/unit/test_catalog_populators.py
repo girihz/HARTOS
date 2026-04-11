@@ -42,7 +42,7 @@ class TestPopulateTtsCatalog:
     # ENGINE_REGISTRY currently has 10 engines:
     #   chatterbox_turbo, luxtts, cosyvoice3, f5_tts, indic_parler,
     #   chatterbox_ml, pocket_tts, espeak, makeittalk, piper
-    EXPECTED_COUNT = 10
+    EXPECTED_COUNT = 11
 
     # Every catalog ID produced by populate_tts_catalog
     # (engine_id.replace("_", "-") prefixed with "tts-")
@@ -54,19 +54,22 @@ class TestPopulateTtsCatalog:
         'tts-indic-parler',
         'tts-chatterbox-ml',
         'tts-pocket-tts',
+        'tts-kokoro',
         'tts-espeak',
         'tts-makeittalk',
         'tts-piper',
     }
 
     # These IDs must also appear as keys in ModelOrchestrator._CATALOG_TO_VRAM_KEY
-    # (the subset that have GPU VRAM > 0)
+    # (the subset that have GPU VRAM > 0). Kokoro is GPU_PREFERRED with
+    # vram_key='tts_kokoro', so it registers a VRAM budget entry too.
     GPU_IDS_IN_VRAM_KEY = {
         'tts-chatterbox-turbo',
         'tts-f5-tts',
         'tts-indic-parler',
         'tts-cosyvoice3',
         'tts-chatterbox-ml',
+        'tts-kokoro',
     }
 
     @pytest.fixture
@@ -512,17 +515,17 @@ class TestPopulateFromSubsystems:
 
     Expected totals from the built-in _populate_* methods (no extra
     application-registered populators):
-        TTS      : 10  (ENGINE_REGISTRY — chatterbox_turbo/ml, luxtts,
+        TTS      : 11  (ENGINE_REGISTRY — chatterbox_turbo/ml, luxtts,
                        cosyvoice3, f5_tts, indic_parler, pocket_tts,
-                       espeak, makeittalk, piper)
+                       kokoro, espeak, makeittalk, piper)
         STT      : 11  (5 faster-whisper + 6 sherpa-onnx)
         VLM      :  5  (qwen3vl, qwen08b caption, minicpm-v2, mobilevlm, clip)
         VideoGen :  2  (wan2gp, ltx2)
         AudioGen :  2  (acestep, diffrhythm)
-        Total    : 30
+        Total    : 31
     """
 
-    EXPECTED_TTS_COUNT = 10
+    EXPECTED_TTS_COUNT = 11
     EXPECTED_STT_COUNT = 11
     EXPECTED_VLM_COUNT = 5  # +1 for qwen08b caption model
     EXPECTED_VIDEOGEN_COUNT = 2
