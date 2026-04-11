@@ -582,7 +582,19 @@ class TestFederationDeltaSigning(unittest.TestCase):
         self.assertFalse(_verify_delta_signature(delta))
 
     def test_verify_delta_rejects_wrong_key(self):
-        """Verification should fail when key doesn't match."""
+        """Verification should fail when the HMAC secret doesn't match.
+
+        Updated for the G8 security migration: _sign_delta and
+        _verify_delta_signature now read from _get_hmac_secret()
+        (persistent per-node secret in agent_data/.hmac_secret) — NOT
+        from the legacy HART_NODE_KEY env var. The old form of this
+        test patched HART_NODE_KEY and silently passed because both
+        sign and verify fell back to the same _get_hmac_secret() value.
+
+        Correct test: patch _get_hmac_secret directly so sign sees
+        one secret and verify sees a different one, and assert the
+        verification fails.
+        """
         from integrations.agent_engine.federated_aggregator import (
             _sign_delta, _verify_delta_signature,
         )
@@ -593,12 +605,25 @@ class TestFederationDeltaSigning(unittest.TestCase):
             'data': 'secret',
         }
 
-        # Sign with one key
-        with patch.dict(os.environ, {'HART_NODE_KEY': 'key-A'}):
+        # Sign with one secret
+        with patch(
+            'integrations.agent_engine.federated_aggregator._get_hmac_secret',
+            return_value='key-A' * 8,  # 40 chars ~ HMAC-ready length
+        ):
             _sign_delta(delta)
 
-        # Verify with a different key
-        with patch.dict(os.environ, {'HART_NODE_KEY': 'key-B'}):
+        # Verify with a DIFFERENT secret. Also disable the peer-HMAC
+        # cache + the Ed25519 legacy fallback so only our primary
+        # secret path is exercised — otherwise the function could
+        # accept a peer-cached verification that the test can't
+        # anticipate.
+        with patch(
+            'integrations.agent_engine.federated_aggregator._get_hmac_secret',
+            return_value='key-B' * 8,
+        ), patch(
+            'integrations.agent_engine.federated_aggregator._get_peer_hmac_secret',
+            return_value=None,
+        ):
             self.assertFalse(_verify_delta_signature(delta))
 
     def test_sign_delta_falls_back_to_ed25519_when_no_key(self):
