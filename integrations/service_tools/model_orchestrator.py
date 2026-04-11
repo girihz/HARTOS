@@ -598,6 +598,30 @@ class ModelOrchestrator:
 
         Every model that loads on GPU MUST register here so the lifecycle
         manager can evict/offload/restore models when VRAM is needed.
+
+        Two LLM-specific eviction policies are applied here based on the
+        catalog entry id:
+
+          * **Draft 0.8B classifier** (``llm-qwen3.5-0.8b*``) →
+            ``pinned=True``. The 0.8B is first-contact for EVERY chat
+            message (speculative_dispatcher.dispatch_draft_first) so
+            evicting it on idle means every message cold-starts the
+            classifier → full LangChain pipeline fallthrough. Pinning
+            costs ~550 MB + mmproj permanently, which is cheaper than
+            paying cold-start cost per request.
+
+          * **Main chat LLMs** (``llm-qwen*-2b*``, ``llm-qwen*-4b*``) →
+            ``pressure_evict_only=True``. Can still evict when VRAM
+            pressure is detected (phase 3), but won't evict on
+            passive idle timeout (phase 7). Before this policy, the
+            2026-04-11 incident showed the 4B being killed every 5
+            minutes mid-session because its 340s idle exceeded the
+            300s timeout, even though nothing else needed the VRAM.
+
+          * All other models (STT, TTS, vision) keep the default
+            passive idle eviction — their cold start is cheap and
+            the VRAM is better spent on the model the user's about
+            to use next.
         """
         try:
             from integrations.service_tools.model_lifecycle import (
@@ -612,17 +636,38 @@ class ModelOrchestrator:
             from integrations.service_tools.model_lifecycle import CPU_OFFLOAD_TABLE
             if offload_name not in CPU_OFFLOAD_TABLE:
                 offload_name = entry.id
-            # LLM is ACTIVE (never evict) — it's a separate process (llama-server)
-            # that the lifecycle can't actually free. All others are WARM.
+
+            # Eviction-policy flags. See the ModelState docstring for the
+            # full rationale and the 2026-04-12 incident context.
+            _pinned = False
+            _pressure_evict_only = False
+            if entry.model_type == 'llm':
+                _eid = entry.id.lower()
+                # Draft tier — always first-contact, always pinned.
+                if '0.8b' in _eid or 'draft' in _eid or 'caption' in _eid:
+                    _pinned = True
+                else:
+                    # Main chat tier — 2B / 4B / larger. Survive idle
+                    # sweeps but yield under real VRAM pressure.
+                    _pressure_evict_only = True
+
             _priority = ModelPriority.ACTIVE if entry.model_type == 'llm' else ModelPriority.WARM
             mlm._models[offload_name] = ModelState(
                 name=offload_name,
                 device=device,
                 priority=_priority,
+                pinned=_pinned,
+                pressure_evict_only=_pressure_evict_only,
             )
             if hasattr(mlm, 'notify_access'):
                 mlm.notify_access(offload_name)
-            logger.info(f"Lifecycle: registered {offload_name} (device={device})")
+            _policy = ('pinned' if _pinned
+                       else 'pressure_evict_only' if _pressure_evict_only
+                       else 'default_idle_evict')
+            logger.info(
+                f"Lifecycle: registered {offload_name} "
+                f"(device={device}, policy={_policy})"
+            )
         except ImportError:
             pass
         except Exception as e:
