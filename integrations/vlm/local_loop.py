@@ -20,18 +20,44 @@ logger = logging.getLogger('hevolve.vlm.local_loop')
 # Max iterations to prevent infinite loops (same safeguard as OmniParser)
 MAX_ITERATIONS = 30
 
+# Action list — single source of truth for both the legacy SYSTEM_PROMPT
+# and the unified-mode combined_prompt. Keeping one string means the
+# legacy OmniParser path and the unified Qwen3-VL path can never drift
+# on which actions the model is allowed to emit.
+_VLM_ACTION_LIST = (
+    "Available actions:\n"
+    "- GUI: left_click, right_click, double_click, type, key, hotkey, hover, "
+    "mouse_move, wait, scroll_up, scroll_down\n"
+    "- Deterministic (PREFER these when the task is expressible as a "
+    "command — they're 100x faster than GUI grounding):\n"
+    "    * shell: run any shell/PowerShell/bash command. Use for launching "
+    "apps (command='notepad'), opening files in specific apps "
+    "(command='notepad hello.txt'), running git/npm/python, file ops, etc. "
+    "Put the full command in the 'command' field.\n"
+    "    * open_file_gui: open a file or app in the OS default handler. "
+    "Put the target in the 'path' field (e.g. path='notepad' or "
+    "path='C:\\\\Users\\\\foo\\\\doc.pdf').\n"
+    "- File: list_folders_and_files, Open_file_and_copy_paste, write_file, "
+    "read_file_and_understand\n"
+)
+
 # System prompt matching OmniParser vlm_agent.py _get_system_prompt()
 _os_name = platform.system()  # 'Windows', 'Linux', 'Darwin', etc.
 SYSTEM_PROMPT = (
     "You are using a " + _os_name + " device.\n"
-    "You are able to use a mouse and keyboard to interact with the computer based on the given task and screenshot.\n"
-    "You have access to every app running in the device via the mouse and keyboard interfaces mentioned above for GUI actions.\n"
+    "You are able to use a mouse and keyboard to interact with the computer "
+    "based on the given task and screenshot.\n"
+    "You have access to every app running in the device via the mouse and "
+    "keyboard interfaces mentioned above for GUI actions.\n"
     "\n"
-    "Available actions:\n"
-    "- GUI: left_click, right_click, double_click, type, key, hotkey, hover, mouse_move, wait, scroll_up, scroll_down\n"
-    "- File: list_folders_and_files, open_file_gui, Open_file_and_copy_paste, write_file, read_file_and_understand\n"
+    + _VLM_ACTION_LIST +
     "\n"
-    "IMPORTANT: After the first action, verify if the expected outcome of previous actions is visible on the screen before taking any new action.\n"
+    "IMPORTANT: Prefer deterministic actions (shell, open_file_gui) over "
+    "clicking when the task is expressible as a command. Only fall back to "
+    "clicks for things that MUST be done visually (e.g. clicking a specific "
+    "button inside an already-running app's UI that has no keyboard "
+    "shortcut). After the first action, verify the expected outcome on screen "
+    "before taking any new action.\n"
     "\n"
     "Output your response in JSON format:\n"
     '{\n'
@@ -40,6 +66,8 @@ SYSTEM_PROMPT = (
     '    "Box ID": <element_id if clicking an element>,\n'
     '    "coordinate": [x, y],\n'
     '    "value": "text for type/hotkey actions",\n'
+    '    "command": "shell command string when Next Action is shell",\n'
+    '    "path": "file or app name when Next Action is open_file_gui",\n'
     '    "Status": "IN_PROGRESS or DONE"\n'
     '}\n'
     "\n"
@@ -113,87 +141,6 @@ def run_local_agentic_loop(
     extracted_responses = []
     start_time = time.time()
 
-    # ── Fast path: "open [app]" on Windows → Win+R → type → Enter ──
-    # The VLM consistently mis-grounds Start menu tiles (it hallucinates the
-    # taskbar position and clicks the wrong thing). Win+R is deterministic:
-    # no grounding needed, works for any installed app by name. We only try
-    # this if the task looks like a plain "open X" with no qualifiers that
-    # require Start menu semantics (e.g. "pin to taskbar").
-    _os_lower = _os_name.lower()
-    if _os_lower == 'windows':
-        import re as _re_open
-        open_match = _re_open.match(
-            r'^\s*(?:open|launch|start|run)\s+(?:the\s+)?'
-            r'(?:notepad|calculator|calc|paint|mspaint|explorer|file\s*explorer|'
-            r'cmd|command\s*prompt|powershell|terminal|control\s*panel|'
-            r'task\s*manager|notepad\+\+|wordpad|winword|excel|outlook|'
-            r'chrome|firefox|edge|msedge|brave|opera|safari|'
-            r'vs\s*code|vscode|code|pycharm|intellij|sublime)'
-            r'(?:\s+(?:on|in|from)\s+my\s+(?:computer|pc|desktop|system))?\s*\.?$',
-            enhanced.lower()
-        )
-        if open_match:
-            _app_map = {
-                'notepad': 'notepad', 'calc': 'calc', 'calculator': 'calc',
-                'paint': 'mspaint', 'mspaint': 'mspaint',
-                'explorer': 'explorer', 'file explorer': 'explorer',
-                'fileexplorer': 'explorer',
-                'cmd': 'cmd', 'command prompt': 'cmd', 'commandprompt': 'cmd',
-                'powershell': 'powershell', 'terminal': 'wt',
-                'control panel': 'control', 'controlpanel': 'control',
-                'task manager': 'taskmgr', 'taskmanager': 'taskmgr',
-                'notepad++': 'notepad++', 'wordpad': 'write',
-                'winword': 'winword', 'excel': 'excel', 'outlook': 'outlook',
-                'chrome': 'chrome', 'firefox': 'firefox',
-                'edge': 'msedge', 'msedge': 'msedge',
-                'brave': 'brave', 'opera': 'opera', 'safari': 'safari',
-                'vs code': 'code', 'vscode': 'code', 'code': 'code',
-                'pycharm': 'pycharm64', 'intellij': 'idea64',
-                'sublime': 'sublime_text',
-            }
-            # Re-extract the target app keyword from the original task
-            for key, exe in _app_map.items():
-                if key in enhanced.lower():
-                    app_exe = exe
-                    break
-            else:
-                app_exe = None
-
-            if app_exe:
-                logger.info(f"Fast path: Win+R → {app_exe} for task '{enhanced[:60]}'")
-                try:
-                    # Win+R opens Run dialog, type executable name, Enter
-                    execute_action({'action': 'hotkey', 'value': 'win+r'}, tier)
-                    time.sleep(0.4)  # let Run dialog appear
-                    execute_action({'action': 'type', 'value': app_exe}, tier)
-                    time.sleep(0.15)
-                    execute_action({'action': 'key', 'value': 'enter'}, tier)
-                    time.sleep(0.8)  # let app launch
-
-                    extracted_responses.append({
-                        'type': 'action',
-                        'content': {
-                            'action': 'win_r_shortcut',
-                            'reasoning': f'Fast path: opened {app_exe} via Win+R',
-                            'result': 'ok',
-                            'ok': True,
-                        },
-                        'iteration': 1,
-                    })
-                    extracted_responses.append({
-                        'type': 'completion',
-                        'content': f'Opened {app_exe} via Win+R',
-                        'iteration': 1,
-                    })
-                    return {
-                        'status': 'success',
-                        'exit_reason': 'done',
-                        'extracted_responses': extracted_responses,
-                        'execution_time_seconds': time.time() - start_time,
-                    }
-                except Exception as e:
-                    logger.warning(f"Win+R fast path failed: {e} — falling through to VLM loop")
-
     for iteration in range(max_iterations):
         elapsed = time.time() - start_time
         if elapsed > max_eta:
@@ -226,16 +173,26 @@ def run_local_agentic_loop(
                             f"Check the screenshot: did it succeed?\n\n"
                         )
                 combined_prompt += (
+                    _VLM_ACTION_LIST +
+                    "\n"
                     "What is the SINGLE next action? Respond in JSON ONLY:\n"
                     "{\n"
                     '  "Reasoning": "What you see and why this action",\n'
-                    '  "Next Action": "left_click|right_click|double_click|type|key|hotkey|scroll_up|scroll_down|wait|None",\n'
+                    '  "Next Action": "left_click|right_click|double_click|'
+                    'type|key|hotkey|scroll_up|scroll_down|wait|shell|'
+                    'open_file_gui|None",\n'
                     '  "coordinate": [x, y],\n'
                     '  "value": "text to type or key name",\n'
+                    '  "command": "shell command when Next Action is shell",\n'
+                    '  "path": "file or app name when Next Action is open_file_gui",\n'
                     '  "Status": "IN_PROGRESS|DONE"\n'
                     "}\n\n"
-                    "For click actions: provide <point>x,y</point> normalized 0-1000 coordinates.\n"
+                    "For click actions: provide <point>x,y</point> normalized "
+                    "0-1000 coordinates.\n"
                     "For type/key/hotkey: set coordinate to null, put text in value.\n"
+                    "Only fall back to clicks when the task requires interacting "
+                    "with something already visible on screen that cannot be "
+                    "done via a command.\n"
                     'When task is complete: "Next Action": "None", "Status": "DONE".'
                 )
 
@@ -560,8 +517,11 @@ def _build_action_payload(action_json: dict, parsed_screen: dict) -> dict:
     if text:
         payload['text'] = text
 
-    # Pass through extra keys for file operations
-    for key in ('path', 'source_path', 'destination_path', 'content', 'duration'):
+    # Pass through extra keys for file/shell operations. 'command' is for
+    # the 'shell' action and 'path' covers 'open_file_gui' — both already
+    # live in SUPPORTED_ACTIONS so _execute_inprocess handles them natively.
+    for key in ('path', 'source_path', 'destination_path', 'content',
+                'duration', 'command'):
         if key in action_json:
             payload[key] = action_json[key]
 
