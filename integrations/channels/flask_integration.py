@@ -32,11 +32,16 @@ class FlaskChannelIntegration:
     def __init__(
         self,
         agent_api_url: str = None,
-        default_user_id: int = 10077,
-        default_prompt_id: int = 8888,
+        default_user_id: int = None,
+        default_prompt_id: int = None,
         create_mode: bool = False,
         device_id: str = None,
     ):
+        from core.constants import DEFAULT_USER_ID, DEFAULT_PROMPT_ID
+        if default_user_id is None:
+            default_user_id = DEFAULT_USER_ID
+        if default_prompt_id is None:
+            default_prompt_id = DEFAULT_PROMPT_ID
         if agent_api_url is None:
             from core.port_registry import get_port
             agent_api_url = f"http://localhost:{get_port('backend')}/chat"
@@ -335,11 +340,12 @@ def init_channels(app=None, config: Dict[str, Any] = None) -> FlaskChannelIntegr
         FlaskChannelIntegration instance
     """
     config = config or {}
+    from core.constants import DEFAULT_USER_ID, DEFAULT_PROMPT_ID
 
     integration = FlaskChannelIntegration(
         agent_api_url=config.get("agent_api_url", "http://localhost:6777/chat"),
-        default_user_id=config.get("default_user_id", 10077),
-        default_prompt_id=config.get("default_prompt_id", 8888),
+        default_user_id=config.get("default_user_id", DEFAULT_USER_ID),
+        default_prompt_id=config.get("default_prompt_id", DEFAULT_PROMPT_ID),
         create_mode=config.get("create_mode", False),
         device_id=config.get("device_id"),
     )
