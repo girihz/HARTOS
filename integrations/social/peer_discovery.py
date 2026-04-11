@@ -1387,15 +1387,50 @@ class AutoDiscovery:
         return payload
 
     def _send_loop(self) -> None:
-        """Periodically broadcast beacon on LAN."""
-        import socket as _socket
+        """Periodically broadcast beacon on LAN.
+
+        Sleeps via ``NodeWatchdog.sleep_with_heartbeat`` so an interval
+        longer than the watchdog's frozen threshold (30s × 10 = 300s by
+        default) can't age the heartbeat out mid-sleep. The default
+        beacon interval is well below the threshold, but running with
+        HEVOLVE_BEACON_INTERVAL=600 (or similar operator overrides) used
+        to trigger the restart cascade documented in the 2026-04-11
+        incident.
+        """
         while self._running:
             try:
                 beacon = self._build_beacon()
                 self._sock.sendto(beacon, ('<broadcast>', self._port))
             except Exception as e:
                 logger.debug(f"AutoDiscovery send error: {e}")
-            # Heartbeat to watchdog
+            try:
+                from security.node_watchdog import get_watchdog
+                wd = get_watchdog()
+                if wd is not None:
+                    wd.sleep_with_heartbeat(
+                        'auto_discovery', self._beacon_interval,
+                        stop_check=lambda: not self._running,
+                    )
+                    continue
+            except Exception:
+                pass
+            # Fallback path if watchdog is unavailable: plain sleep +
+            # best-effort heartbeat. Preserves original behavior.
+            time.sleep(self._beacon_interval)
+
+    def _recv_loop(self) -> None:
+        """Listen for beacons from other nodes on the network.
+
+        The socket has a 2s timeout (set in start()) so recvfrom wakes
+        regularly and we can heartbeat between calls. The heartbeat is
+        now emitted on BOTH timeout and successful receipt — the
+        previous code only heartbeated on timeout, so a node that kept
+        receiving packets every 2s could still let the heartbeat age
+        if the recv path itself blocked past the frozen threshold.
+        """
+        import socket as _socket
+
+        def _wd_heartbeat_safe():
             try:
                 from security.node_watchdog import get_watchdog
                 wd = get_watchdog()
@@ -1403,28 +1438,21 @@ class AutoDiscovery:
                     wd.heartbeat('auto_discovery')
             except Exception:
                 pass
-            time.sleep(self._beacon_interval)
 
-    def _recv_loop(self) -> None:
-        """Listen for beacons from other nodes on the network."""
-        import socket as _socket
         while self._running:
             try:
                 data, addr = self._sock.recvfrom(self.MAX_PACKET_SIZE)
             except _socket.timeout:
-                # Heartbeat on timeout so watchdog knows we're alive
-                try:
-                    from security.node_watchdog import get_watchdog
-                    wd = get_watchdog()
-                    if wd:
-                        wd.heartbeat('auto_discovery')
-                except Exception:
-                    pass
+                _wd_heartbeat_safe()
                 continue
             except OSError:
                 if not self._running:
                     break
                 continue
+            # Successful receipt — refresh heartbeat before processing
+            # the payload, which involves JSON parsing + gossip handoff
+            # and could itself block for a noticeable fraction of a second.
+            _wd_heartbeat_safe()
 
             payload = self._parse_beacon(data)
             if not payload:

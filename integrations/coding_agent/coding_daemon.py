@@ -53,9 +53,31 @@ class CodingAgentDaemon:
         except Exception:
             pass
 
+    def _wd_sleep(self, seconds: float) -> None:
+        """Sleep while keeping the coding_daemon heartbeat fresh.
+
+        Delegates to ``NodeWatchdog.sleep_with_heartbeat`` — same
+        single primitive the agent_daemon uses, so a long sleep
+        (e.g. during platform-affordability back-off) can't age the
+        heartbeat past the 300s frozen threshold. See the helper
+        docstring for the 2026-04-11 incident context.
+        """
+        try:
+            from security.node_watchdog import get_watchdog
+            wd = get_watchdog()
+            if wd is not None:
+                wd.sleep_with_heartbeat(
+                    'coding_daemon', seconds,
+                    stop_check=lambda: not self._running,
+                )
+                return
+        except Exception:
+            pass
+        time.sleep(seconds)
+
     def _loop(self):
         while self._running:
-            time.sleep(self._interval)
+            self._wd_sleep(self._interval)
             if not self._running:
                 break
             self._wd_heartbeat()
