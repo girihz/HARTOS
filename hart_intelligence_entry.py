@@ -6632,6 +6632,22 @@ def get_public_prompts():
     return jsonify(prompts)
 
 
+@app.route('/api/admin/agent-data/<int:prompt_id>/info', methods=['GET'])
+def admin_agent_data_info(prompt_id):
+    """Diagnostic info for an agent's persisted data file.
+
+    Returns size, last-modified, saved_at metadata, and the top-level
+    data keys so the admin UI can show disk footprint per agent and
+    decide when to prune stale agents. Wraps helper.get_agent_data_info
+    — the info-gathering stays in helper where the file-layout logic
+    lives; this route is a thin JSON facade."""
+    try:
+        from helper import get_agent_data_info as _info
+    except ImportError:
+        return jsonify({'error': 'helper.get_agent_data_info unavailable'}), 500
+    return jsonify(_info(int(prompt_id)))
+
+
 _prompt_id_lock = threading.Lock()
 
 def _next_prompt_id():

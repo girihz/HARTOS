@@ -159,27 +159,6 @@ def safe_prompt_path(*parts, ext='.json'):
 
 
 
-def crawl4ai_fetch(url: str, timeout: int = 30) -> str:
-    """Fetch content from URL using native in-process crawler."""
-    try:
-        from security.sanitize import validate_url
-        url = validate_url(url)
-    except (ImportError, ValueError) as e:
-        current_app.logger.warning(f"URL blocked by SSRF filter: {url} — {e}")
-        return ""
-    try:
-        from integrations.web_crawler import crawl_url
-        result = crawl_url(url, timeout)
-        if result['success']:
-            current_app.logger.info(f"Crawl success: {result['word_count']} words from {url}")
-            return result['markdown']
-        current_app.logger.warning(f"Crawl failed for {url}: {result.get('error')}")
-        return ""
-    except Exception as e:
-        current_app.logger.error(f"Crawl error for {url}: {e}")
-        return ""
-
-
 def crawl4ai_batch_fetch(urls: List[str], max_concurrent: int = 2) -> List[str]:
     """Fetch multiple URLs using native in-process crawler."""
     try:
@@ -453,45 +432,6 @@ def fix_actions(array_of_actions,cyclic_ids):
     except Exception as e:
         print(f'GOT ERROR WHILE JSON FIX:{e}')
         return None
-
-
-def gpt_call(prompt):
-    url = "http://aws_rasa.hertzai.com:5459/gpt3"
-    text = prompt
-    payload = json.dumps({
-    "text": text,
-    "model": "3",
-    "temperature": 0,
-    "max_tokens": 3000,
-    "top_p": 1,
-    "frequency_penalty": 0
-    })
-    headers = {
-    'Content-Type': 'application/json'
-    }
-    try:
-        response = pooled_post(url, headers=headers, data=payload)
-        response = response.json()
-        print(response)
-        return response['text']
-    except Exception as e:
-        print(f'GOT ERROR WHILE JSON FIX:{e}')
-        return None
-
-def gpt_mini(prompt,request_id,history):
-    url = "http://aws_rasa.hertzai.com:5459/gpt-json"
-    prompt = f'{prompt} conside below as history {history}'
-    response = pooled_post(
-        url,
-        json={
-            "model": "gpt-4o",
-            "data": [{"role": "user", "content": prompt}],
-            "max_token": 1000,
-            "request_id": request_id
-        })
-    print(f"gpt 4o-mini response is {response}")
-    print(f"gpt 4o-mini response is {response.json()}")
-    return response.json()["text"]
 
 
 def strip_json_values(obj: Any) -> Any:
@@ -2221,15 +2161,25 @@ def initialize_persistent_storage(agent_data: Dict):
         return False
 
 
-def backup_agent_data_file(prompt_id: int) -> bool:
-    """
-    Create a backup of the current agent data file
+def backup_agent_data_file(prompt_id: int, keep_count: int = 5) -> bool:
+    """Create a timestamped backup of the agent data file and prune old ones.
+
+    Two responsibilities bundled because a "maintain the backup set for
+    prompt_id" operation is conceptually one thing — every caller that
+    wants a new backup also wants the backup directory bounded, otherwise
+    copies accumulate forever (the exact bug that left `cleanup_old_backups`
+    orphaned for months).
 
     Args:
-        prompt_id: The prompt ID to backup data for
+        prompt_id: The prompt ID to backup data for.
+        keep_count: How many most-recent backups to retain. Older ones
+            are deleted by cleanup_old_backups() after the new backup
+            is written. Defaults to 5.
 
     Returns:
-        bool: True if backup created successfully, False otherwise
+        bool: True if the NEW backup was written successfully. Cleanup
+        failures are non-fatal (logged inside cleanup_old_backups) so
+        a failing prune doesn't mask a successful backup.
     """
     try:
         file_path = get_agent_data_file_path(prompt_id)
@@ -2246,6 +2196,11 @@ def backup_agent_data_file(prompt_id: int) -> bool:
         shutil.copy2(file_path, backup_path)
 
         current_app.logger.info(f" Created backup: {backup_path}")
+
+        # Rotation: prune older backups beyond keep_count. Non-fatal —
+        # cleanup_old_backups swallows its own exceptions and returns 0
+        # on failure so this call can't undo the successful backup above.
+        cleanup_old_backups(prompt_id, keep_count=keep_count)
         return True
 
     except Exception as e:
