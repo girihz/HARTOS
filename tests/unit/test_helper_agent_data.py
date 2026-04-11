@@ -142,19 +142,117 @@ class TestGetAgentDataInfo:
 
 
 class TestAdminEndpointAuthGate:
-    """The new /api/admin/agent-data/<id>/info endpoint MUST require auth
-    on a publicly-exposed central node — the previous commit shipped it
-    with no guard and the reviewer caught it. /api/admin is now in
-    PROTECTED_PATHS in security/middleware.py so all admin routes
-    require a Bearer token (or X-API-Key) when HEVOLVE_NODE_TIER=central
-    and HEVOLVE_API_KEY is not set. This test locks that contract."""
+    """Every /api/admin/* route MUST require authentication on every
+    tier except bundled desktop — admin ops modify persistent state so
+    LAN trust is NOT sufficient. Two distinct regressions have to be
+    blocked here:
 
-    def test_admin_path_is_in_protected_paths(self):
-        """Regression guard: /api/admin must stay in PROTECTED_PATHS so
-        future admin routes inherit the auth gate automatically."""
-        import inspect
+      (a) The ADMIN_PATHS tuple must contain '/api/admin' so new
+          admin routes inherit the gate automatically (the 'forgot
+          to decorate' failure mode).
+
+      (b) The regional-tier enforcement branch must actually fire.
+          The previous iteration of this test only checked tuple
+          membership in the source, so a middleware change that
+          *had* the tuple but bypassed regional (the exact bug the
+          reviewer caught) still passed. This version uses a real
+          Flask test client to hit the route on each tier and
+          assert the response status.
+    """
+
+    def test_admin_path_in_ADMIN_PATHS_tuple(self):
+        """Regression guard (cheap, source-level): '/api/admin' must
+        stay in security.middleware.ADMIN_PATHS so any new route with
+        that prefix inherits the auth gate without the author having
+        to remember a decorator."""
         from security import middleware
-        src = inspect.getsource(middleware._apply_api_auth)
-        assert "'/api/admin'" in src or '"/api/admin"' in src, \
-            "/api/admin removed from PROTECTED_PATHS — new admin routes " \
-            "will ship unguarded. See tests/unit/test_helper_agent_data.py"
+        assert '/api/admin' in middleware.ADMIN_PATHS, (
+            "'/api/admin' was removed from ADMIN_PATHS — new admin "
+            "routes will ship unguarded. See tests/unit/test_helper_"
+            "agent_data.py::TestAdminEndpointAuthGate."
+        )
+
+    @pytest.mark.parametrize('tier', ['central', 'regional', 'flat'])
+    def test_admin_route_requires_auth_on_every_tier(self, tier, monkeypatch):
+        """Behavior-level guard: whether the tier is central, regional,
+        or flat, hitting /api/admin/agent-data/<id>/info without a
+        Bearer token must return 401. Bundled/desktop mode is a
+        separate path that stays trusted."""
+        from flask import Flask
+        from security.middleware import _apply_api_auth
+        monkeypatch.setenv('HEVOLVE_NODE_TIER', tier)
+        monkeypatch.delenv('HEVOLVE_API_KEY', raising=False)
+        monkeypatch.delenv('NUNBA_BUNDLED', raising=False)
+
+        app = Flask('test_admin_auth')
+        _apply_api_auth(app)
+
+        @app.route('/api/admin/ping')
+        def _admin_ping():
+            return {'ok': True}
+
+        client = app.test_client()
+        unauth = client.get('/api/admin/ping')
+        assert unauth.status_code == 401, (
+            f"Tier={tier}: /api/admin/ping returned "
+            f"{unauth.status_code} without Bearer token — admin routes "
+            f"MUST be auth-gated on every tier, not just central."
+        )
+        # A Bearer token (any shape) should get past the middleware.
+        ok = client.get('/api/admin/ping',
+                        headers={'Authorization': 'Bearer dummy'})
+        assert ok.status_code == 200, (
+            f"Tier={tier}: Bearer token was rejected by the gate "
+            f"({ok.status_code}). Gate is supposed to accept any "
+            f"Bearer header shape at the middleware layer — deeper "
+            f"JWT validation happens inside the route."
+        )
+
+    def test_bundled_desktop_mode_skips_gate(self, monkeypatch):
+        """Nunba desktop (NUNBA_BUNDLED=1) runs an in-process Flask
+        test client with no network exposure — the gate must NOT fire
+        or every desktop chat breaks."""
+        from flask import Flask
+        from security.middleware import _apply_api_auth
+        monkeypatch.setenv('NUNBA_BUNDLED', '1')
+        monkeypatch.setenv('HEVOLVE_NODE_TIER', 'flat')
+
+        app = Flask('test_bundled_mode')
+        _apply_api_auth(app)
+
+        @app.route('/api/admin/ping')
+        def _admin_ping():
+            return {'ok': True}
+
+        client = app.test_client()
+        response = client.get('/api/admin/ping')
+        assert response.status_code == 200
+
+    def test_regional_tier_user_facing_paths_stay_open(self, monkeypatch):
+        """Regional tier's USER-FACING paths (/chat, /prompts) must
+        stay open so LAN-only deployments keep working. Only admin
+        paths are unconditionally gated — this lock stops a future
+        'protect everything on regional' change that would break
+        every small-office deployment."""
+        from flask import Flask
+        from security.middleware import _apply_api_auth
+        monkeypatch.setenv('HEVOLVE_NODE_TIER', 'regional')
+        monkeypatch.delenv('HEVOLVE_API_KEY', raising=False)
+        monkeypatch.delenv('NUNBA_BUNDLED', raising=False)
+
+        app = Flask('test_regional_user_paths')
+        _apply_api_auth(app)
+
+        @app.route('/chat', methods=['POST'])
+        def _chat():
+            return {'ok': True}
+
+        @app.route('/prompts/mine')
+        def _prompts():
+            return {'ok': True}
+
+        client = app.test_client()
+        # Both user-facing routes must be reachable without auth on
+        # regional tier (LAN trust model).
+        assert client.post('/chat').status_code == 200
+        assert client.get('/prompts/mine').status_code == 200
