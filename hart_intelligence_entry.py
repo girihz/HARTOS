@@ -2846,7 +2846,15 @@ def get_tools(req_tool, is_first: bool = False):
                     "for any of the 31 supported channels. Input: the channel name "
                     "alone (e.g. 'whatsapp') to start setup and get the list of "
                     "required credentials, OR 'channel_name <json_config>' to register "
-                    "with credentials (e.g. 'telegram {\"bot_token\":\"123:ABC\"}'). "
+                    # The doubled braces {{...}} are REQUIRED — LangChain's ReAct
+                    # prompt template passes every tool description through
+                    # str.format(), which treats literal { and } as placeholder
+                    # markers. A single `{"bot_token":"..."}` in this string
+                    # raises ValueError: Missing some input keys: {'"bot_token"'}
+                    # at prompt-construction time and crashes /chat before any
+                    # LLM call. Doubling escapes them to literals. See
+                    # langchain.log 2026-04-11 22:46:01 for the crash.
+                    "with credentials (e.g. 'telegram {{\"bot_token\":\"123:ABC\"}}'). "
                     "For WhatsApp specifically, passing just 'whatsapp' starts a QR "
                     "authentication flow. Do NOT ask the user for credentials first — "
                     "call this tool with just the channel name and it will tell you "
