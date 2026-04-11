@@ -206,6 +206,48 @@ class TestF5Unload:
 
 
 # ═══════════════════════════════════════════════════════════════
+# Kokoro 82M (English, CPU/GPU, ~200MB)
+# ═══════════════════════════════════════════════════════════════
+
+class TestKokoroSynthesize:
+
+    def test_empty_text_returns_error(self):
+        import json
+        from integrations.service_tools.kokoro_tool import kokoro_synthesize
+        result = json.loads(kokoro_synthesize(""))
+        assert "error" in result
+
+    def test_registration(self):
+        from integrations.service_tools.kokoro_tool import KokoroTool
+        from integrations.service_tools.registry import service_tool_registry
+        result = KokoroTool.register_functions()
+        assert result is True
+        assert 'kokoro' in service_tool_registry._tools
+        tool = service_tool_registry._tools['kokoro']
+        assert 'synthesize' in tool.endpoints
+        assert 'kokoro' in tool.tags
+
+    def test_tool_worker_is_present(self):
+        from integrations.service_tools.kokoro_tool import _tool
+        assert _tool.tool_name == 'kokoro'
+        assert _tool.worker_module == 'integrations.service_tools.kokoro_tool'
+        assert _tool.vram_budget == 'tts_kokoro'
+
+
+class TestKokoroUnload:
+
+    def test_unload_is_idempotent(self):
+        """unload_kokoro() must be safe to call when no worker has ever
+        started — matches the idempotency guarantee of the other four
+        engines so the admin Model Management unload path treats them
+        uniformly. Regression guard: before this commit there was no
+        test for Kokoro's unload path while every other engine had one."""
+        from integrations.service_tools.kokoro_tool import unload_kokoro
+        unload_kokoro()
+        unload_kokoro()
+
+
+# ═══════════════════════════════════════════════════════════════
 # Cross-tool consistency
 # ═══════════════════════════════════════════════════════════════
 
@@ -215,10 +257,12 @@ class TestToolConsistency:
     def test_all_have_unload(self):
         from integrations.service_tools import chatterbox_tool, cosyvoice_tool
         from integrations.service_tools import indic_parler_tool, f5_tts_tool
+        from integrations.service_tools import kokoro_tool
         assert callable(chatterbox_tool.unload_chatterbox)
         assert callable(cosyvoice_tool.unload_cosyvoice)
         assert callable(indic_parler_tool.unload_indic_parler)
         assert callable(f5_tts_tool.unload_f5_tts)
+        assert callable(kokoro_tool.unload_kokoro)
 
     def test_all_return_json_strings_on_empty_input(self):
         """Empty text must be rejected synchronously (no subprocess spawn)
