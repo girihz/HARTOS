@@ -302,17 +302,18 @@ class DynamicAgentExecutor:
             logger.info(f"Executing task for agent {agent_id} (persona: {agent.persona})")
 
             # Determine execution mode based on agent status
+            from core.constants import DEFAULT_USER_ID
             if agent.status == "done" or agent.status == "completed":
                 # Use reuse mode (agent has trained recipe)
                 result = chat_agent(
                     message,
-                    user_id=agent.metadata.get("user_id", 10077),
+                    user_id=agent.metadata.get("user_id", DEFAULT_USER_ID),
                     prompt_id=agent.prompt_id
                 )
             else:
                 # Use create mode (agent still learning)
                 result = recipe(
-                    user_id=agent.metadata.get("user_id", 10077),
+                    user_id=agent.metadata.get("user_id", DEFAULT_USER_ID),
                     message=message,
                     prompt_id=agent.prompt_id
                 )

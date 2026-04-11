@@ -26,9 +26,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ChannelRegistryConfig:
     """Configuration for channel registry."""
+    from core.constants import DEFAULT_USER_ID, DEFAULT_PROMPT_ID
     agent_callback_url: str = None
-    default_user_id: int = 10077
-    default_prompt_id: int = 8888
+    default_user_id: int = DEFAULT_USER_ID
+    default_prompt_id: int = DEFAULT_PROMPT_ID
     enable_create_mode: bool = False
 
     def __post_init__(self):

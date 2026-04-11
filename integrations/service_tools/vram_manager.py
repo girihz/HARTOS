@@ -33,6 +33,7 @@ VRAM_BUDGETS: Dict[str, Tuple[float, float]] = {
     "tts_indic_parler":     (2.0,  1.8),    # 21 Indic languages + English
     "tts_cosyvoice3":       (4.0,  3.5),    # zh/ja/ko/de/es/fr/it/ru, zero-shot
     "tts_chatterbox_ml":    (14.0, 12.0),   # 23 languages, needs 16GB+
+    "tts_kokoro":           (0.5,  0.2),    # 82M neural English, CPU or GPU
 }
 
 
