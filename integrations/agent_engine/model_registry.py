@@ -272,8 +272,16 @@ def _register_defaults():
     #    WorldModelBridge.record_interaction so HevolveAI's continual
     #    learner can distill expert→draft over time (the draft gets
     #    better at knowing when to delegate vs answer directly).
-    from core.port_registry import get_local_llm_url
+    #
+    #    The draft runs on port 8081 (vlm_caption) — NOT the main LLM
+    #    port 8080 where the 4B lives. Both servers stay resident so
+    #    draft-first pays real draft latency (~300ms) and normal chat
+    #    pays 4B latency (~700ms) without swapping. Nunba's
+    #    LlamaConfig.start_caption_server owns the 0.8B process and
+    #    main.py kicks it off during _deferred_platform_init.
+    from core.port_registry import get_local_llm_url, get_local_draft_url
     _local_url = get_local_llm_url()
+    _draft_url = get_local_draft_url()
 
     model_registry.register(ModelBackend(
         model_id='qwen3.5-0.8b-draft',
@@ -282,7 +290,7 @@ def _register_defaults():
         config_list_entry={
             'model': 'Qwen3.5-0.8B-Instruct',
             'api_key': 'dummy',
-            'base_url': _local_url,
+            'base_url': _draft_url,
             'price': [0, 0],
         },
         avg_latency_ms=300.0,

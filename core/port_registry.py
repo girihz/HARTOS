@@ -189,6 +189,35 @@ def get_mode_label() -> str:
 _llm_url_cache: str = ''
 
 
+def get_local_draft_url() -> str:
+    """Single source of truth for the local DRAFT LLM endpoint URL.
+
+    The draft model is the Qwen3.5-0.8B instance that answers
+    dispatch_draft_first calls and generates continuous video captions.
+    It runs on a DIFFERENT port than the main 4B so both can stay
+    resident at once — otherwise draft-first hits the main server and
+    pays main-model latency for every greeting.
+
+    Resolution order:
+      1. HEVOLVE_DRAFT_LLM_URL   — full URL override
+      2. HEVOLVE_VLM_CAPTION_PORT — port override (same env var
+         LlamaConfig.start_caption_server honours)
+      3. port_registry default    — get_port('vlm_caption') = 8081
+
+    Returns full URL with /v1 suffix (OpenAI-compatible).
+    """
+    url = os.environ.get('HEVOLVE_DRAFT_LLM_URL', '').strip()
+    if not url:
+        port = os.environ.get('HEVOLVE_VLM_CAPTION_PORT', '').strip()
+        if not port:
+            port = str(get_port('vlm_caption'))
+        url = f'http://127.0.0.1:{port}/v1'
+    url = url.rstrip('/')
+    if not url.endswith('/v1'):
+        url += '/v1'
+    return url
+
+
 def get_local_llm_url() -> str:
     """Single source of truth for the local LLM endpoint URL.
 

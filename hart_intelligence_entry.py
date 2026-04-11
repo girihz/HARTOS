@@ -2332,6 +2332,72 @@ def _handle_computer_action_tool(input_text: str) -> str:
         return f"Computer use error: {str(e)[:200]}"
 
 
+def _handle_list_pending_actions_tool(input_text: str) -> str:
+    """List the user's pending scheduled messages / reminders / jobs.
+
+    Answers questions like "what's next for me?", "what reminders do I
+    have today?", "show my upcoming tasks". Pulls from
+    ScheduledMessageManager (now durable via JSON persistence) and
+    apscheduler jobs if the scheduler service is running. The LLM gets
+    a plain-text summary with ISO timestamps so it can re-format for
+    the user in whatever style fits.
+
+    Input: optional filter hint like 'today', 'this week', 'tomorrow',
+    or '' for all pending. The filter is lexical — the tool lists
+    every pending message and lets the LLM narrow if it wants.
+    """
+    try:
+        hint = (input_text or '').strip().lower()
+        lines: list[str] = []
+        # ── ScheduledMessageManager (durable JSON) ───────────────────
+        try:
+            from integrations.channels.automation.scheduled_messages import (
+                ScheduledMessageManager,
+            )
+            mgr = ScheduledMessageManager()
+            pending = mgr.list_pending()
+            if pending:
+                lines.append(f"Scheduled messages ({len(pending)} pending):")
+                for m in pending[:20]:
+                    when = m.scheduled_time.isoformat() if m.scheduled_time else '?'
+                    chan = m.channel_id or 'default'
+                    snip = (m.content or '')[:120]
+                    lines.append(f"  • {when}  [{chan}]  {snip}")
+                if len(pending) > 20:
+                    lines.append(f"  … and {len(pending) - 20} more")
+            else:
+                lines.append("No scheduled messages pending.")
+        except ImportError:
+            pass
+        except Exception as e:
+            lines.append(f"(scheduled messages unavailable: {str(e)[:80]})")
+
+        # ── APScheduler jobs (if active) ─────────────────────────────
+        try:
+            from integrations.channels.scheduler import get_scheduler
+            sched = get_scheduler()
+            if sched is not None:
+                jobs = list(sched.get_jobs())
+                if jobs:
+                    lines.append(f"\nBackground jobs ({len(jobs)} active):")
+                    for j in jobs[:20]:
+                        next_run = getattr(j, 'next_run_time', None)
+                        when = next_run.isoformat() if next_run else 'no next run'
+                        lines.append(f"  • {when}  {j.id}  {j.name or ''}")
+        except ImportError:
+            pass
+        except Exception as e:
+            lines.append(f"(scheduler jobs unavailable: {str(e)[:80]})")
+
+        if not lines:
+            return "Nothing scheduled. Your action queue is empty."
+        if hint:
+            lines.insert(0, f"Filter hint: {hint}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"List_Pending_Actions error: {str(e)[:200]}"
+
+
 def _handle_connect_channel_tool(input_text: str) -> str:
     """Register / connect a messaging channel (WhatsApp, Telegram, Discord,
     Slack, etc.) from natural-language chat. Delegates to the existing
@@ -2804,6 +2870,22 @@ def get_tools(req_tool, is_first: bool = False):
                     "registry and makes the frontend open that route — you don't "
                     "need to give a URL, just say the page. After calling this tool, "
                     "tell the user you're opening that page in a single short sentence."
+                ),
+            ),
+            Tool(
+                name="List_Pending_Actions",
+                func=_handle_list_pending_actions_tool,
+                description=(
+                    "List the user's upcoming scheduled messages, reminders, and "
+                    "background jobs. Use when the user asks 'what's next', "
+                    "'what do I have scheduled', 'any reminders for today', "
+                    "'what's coming up', 'show my upcoming tasks', etc. "
+                    "Input: optional filter hint ('today', 'this week', "
+                    "'tomorrow') or empty string for all pending. Returns a "
+                    "plain-text list with ISO timestamps — reformat for the "
+                    "user in a natural style. Pulls from both the durable "
+                    "ScheduledMessageManager (reminders, channel messages) "
+                    "and the live apscheduler job store (periodic tasks)."
                 ),
             ),
         ]
@@ -3686,17 +3768,109 @@ def get_action_user_details(user_id):
 
 def get_time_based_history(prompt: str, session_id: str, start_date: str, end_date: str):
     '''
-        Semantic search through conversation history using SimpleMem.
-        inputs:
-            prompt: text from user from which we need to extract similar messages
-            session_id: user_{user_id}
-            start_date: time of search start (kept for API compat, not used by SimpleMem)
-            end_date: time till search (kept for API compat, not used by SimpleMem)
+    Time-filtered + semantic conversation history retrieval.
+
+    If either ``start_date`` or ``end_date`` is provided (and parseable as
+    ISO-8601), we query ConversationEntry directly with a created_at
+    BETWEEN range — this is the "what did I do yesterday between 3pm
+    and 5pm" path. Otherwise we fall back to SimpleMem semantic search
+    for the "find messages about X" path.
+
+    The caller (parsing_string) passes BOTH params every time — the old
+    implementation accepted them and discarded them, which meant every
+    temporal query silently degraded to semantic match and returned
+    messages from the wrong day. Now the date filter actually fires.
+
+    inputs:
+        prompt: text from user from which we need to extract similar messages
+        session_id: user_{user_id}
+        start_date: ISO-8601 start (or empty / sentinel to mean "no lower bound")
+        end_date:   ISO-8601 end   (or empty / sentinel to mean "no upper bound")
     '''
     start_time = time.time()
 
     try:
         user_id = int(session_id.replace("user_", ""))
+    except Exception as e:
+        app.logger.warning(f"get_time_based_history: bad session_id {session_id}: {e}")
+        return json.dumps({'res': []})
+
+    # Parse ISO-8601 dates loosely. Empty / sentinel strings skip the
+    # bound so a single date still works ("everything since 2026-04-10").
+    def _parse_iso(s):
+        if not s or not isinstance(s, str):
+            return None
+        s2 = s.strip().rstrip('Z').rstrip('z')
+        if not s2 or s2.lower() in ('none', 'null', 'na'):
+            return None
+        for fmt in (
+            '%Y-%m-%dT%H:%M:%S.%f',
+            '%Y-%m-%dT%H:%M:%S',
+            '%Y-%m-%d %H:%M:%S',
+            '%Y-%m-%d',
+        ):
+            try:
+                return datetime.strptime(s2, fmt)
+            except ValueError:
+                continue
+        return None
+
+    dt_start = _parse_iso(start_date)
+    dt_end = _parse_iso(end_date)
+    has_time_range = dt_start is not None or dt_end is not None
+    # Reject the "both bounds equal and coerced from now()" sentinel the
+    # fallback parser used to emit — that was a no-op range that still
+    # produced a misleading "filtered" log line.
+    if dt_start is not None and dt_end is not None and dt_start == dt_end:
+        has_time_range = False
+
+    if has_time_range:
+        try:
+            from integrations.social._models_local import ConversationEntry
+            from integrations.social.models import get_db
+            results = []
+            db = get_db()
+            try:
+                q = db.query(ConversationEntry).filter(
+                    ConversationEntry.user_id == str(user_id),
+                )
+                if dt_start is not None:
+                    q = q.filter(ConversationEntry.created_at >= dt_start)
+                if dt_end is not None:
+                    q = q.filter(ConversationEntry.created_at <= dt_end)
+                # Cap at 50 rows so a wide range doesn't flood the LLM.
+                rows = q.order_by(
+                    ConversationEntry.created_at.desc()
+                ).limit(50).all()
+                for r in rows:
+                    results.append({
+                        'message': {
+                            'content': getattr(r, 'content', '') or '',
+                            'role': getattr(r, 'role', 'assistant'),
+                        },
+                        'created_at': (r.created_at.isoformat()
+                                       if r.created_at else ''),
+                        'channel_type': getattr(r, 'channel_type', ''),
+                    })
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+            elapsed = time.time() - start_time
+            app.logger.info(
+                f"Time-filtered history: {len(results)} rows in {elapsed:.3f}s "
+                f"(range={dt_start}..{dt_end})"
+            )
+            return json.dumps({'res_in_filter': results})
+        except Exception as e:
+            app.logger.warning(
+                f"Time-filtered ConversationEntry query failed, "
+                f"falling back to semantic: {e}"
+            )
+            # Fall through to the semantic path below
+
+    try:
         memory = get_memory(user_id=user_id)
         results = memory.semantic_search(prompt)
 
@@ -4214,6 +4388,44 @@ def parse_visual_context(inp: str):
     request_id = thread_local_data.get_request_id()
     app.logger.info('Using Vision to answer question')
     frame = get_frame(str(user_id))
+    # No frame yet? The VisionService might simply be off. Start it once,
+    # give frames a moment to arrive, retry. If still nothing the tool
+    # returns an honest message instead of pretending there was no
+    # visual context. Single start/stop path — reuses the same
+    # get_vision_service() singleton the admin toggle and approval
+    # handler use, so we never end up with two VisionService instances
+    # fighting over the WebSocket port.
+    if frame is None:
+        try:
+            from integrations.vision import get_vision_service
+            vs = get_vision_service()
+            if not vs.is_running():
+                app.logger.info(
+                    'parse_visual_context: VisionService idle — starting for tool call'
+                )
+                vs.start(mode='full')
+                # Brief poll for the first frame to land in FrameStore.
+                # Description loop runs every ~4s so we give it a short
+                # window before giving up.
+                import time as _t
+                for _ in range(20):  # 20 × 0.25s = 5s total
+                    _t.sleep(0.25)
+                    frame = get_frame(str(user_id))
+                    if frame is not None:
+                        break
+        except ImportError:
+            pass
+        except Exception as _e:
+            app.logger.debug(f'parse_visual_context auto-start failed: {_e}')
+    if frame is None:
+        # Still nothing — tell the caller the truth instead of silently
+        # returning None, which the LangChain agent would interpret as
+        # "no visual info" and confabulate an answer from memory.
+        return (
+            "No camera frames available yet. I just started the vision "
+            "service — give it a couple of seconds and ask again, or "
+            "check that your camera is on."
+        )
     if frame is not None:
         image_path = f"output_images/{user_id}_{request_id}_call.jpg"
         # Ensure the directory exists
@@ -6173,6 +6385,79 @@ def response_ack():
     thread_local_data.set_request_id(request_id=request_id)
     prompt_id = data.get('prompt_id',None)
     return jsonify({'status': 'acknowledged'}), 200
+
+
+@app.route('/api/agent/approval', methods=['POST'])
+def agent_approval():
+    """Process a user's approval decision on an agent capability request.
+
+    The frontend LiquidUI overlay (see liquid_ui_service.py:3452) POSTs
+    `{agent_id, action, decision}` when the user clicks Approve / Deny
+    on a consent card the agent raised via _request_capability_consent
+    or _request_screen_consent. Actions we honour:
+
+        enable_camera  → VisionService.start('full')  (camera+screen feed)
+        enable_screen  → VisionService.start('lite')  (screen only)
+
+    Both route through _apply_embodied_toggle in the channels admin API
+    so the manual settings toggle and the agentic approval path share
+    ONE start/stop implementation — no parallel lifecycle.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        agent_id = data.get('agent_id', '')
+        action = str(data.get('action', '')).strip().lower()
+        decision = str(data.get('decision', '')).strip().lower()
+        if decision not in ('approve', 'approved', 'allow', 'yes', 'deny', 'denied', 'no'):
+            return jsonify({'status': 'error', 'reason': 'invalid decision'}), 400
+        approved = decision in ('approve', 'approved', 'allow', 'yes')
+        if not approved:
+            app.logger.info(f'agent_approval: agent={agent_id} action={action} DENIED')
+            return jsonify({'status': 'denied', 'action': action}), 200
+
+        # Map the approval to a feed toggle and reuse the single
+        # _apply_embodied_toggle codepath admin settings use.
+        feed = None
+        if action in ('enable_camera', 'camera', 'vision'):
+            feed = 'camera'
+        elif action in ('enable_screen', 'screen', 'computer_use'):
+            feed = 'screen'
+        elif action in ('enable_audio', 'audio', 'mic'):
+            feed = 'audio'
+        else:
+            # Unknown actions are accepted but do nothing — the agent
+            # may be asking for a capability we don't manage here.
+            app.logger.info(f'agent_approval: agent={agent_id} action={action} '
+                            f'approved but no feed mapping — noop')
+            return jsonify({'status': 'approved', 'action': action, 'applied': False}), 200
+
+        try:
+            from integrations.channels.admin.api import (
+                get_api, _apply_embodied_toggle,
+            )
+            api = get_api()
+            cfg = api._global_config.embodied_ai
+            # Flip the persisted flag so the next restart sees it and so
+            # get_embodied_status reports the right state.
+            if feed == 'camera':
+                cfg.camera_enabled = True
+            elif feed == 'screen':
+                cfg.screen_capture_enabled = True
+            elif feed == 'audio':
+                cfg.audio_enabled = True
+            api._save_config()
+            _apply_embodied_toggle(feed, True, cfg)
+            app.logger.info(f'agent_approval: agent={agent_id} action={action} '
+                            f'APPROVED → feed={feed} started')
+            return jsonify({'status': 'approved', 'action': action,
+                            'feed': feed, 'applied': True}), 200
+        except Exception as inner:
+            app.logger.warning(f'agent_approval: applied failed: {inner}')
+            return jsonify({'status': 'approved', 'action': action,
+                            'applied': False, 'error': str(inner)[:200]}), 200
+    except Exception as e:
+        app.logger.error(f'agent_approval error: {e}')
+        return jsonify({'status': 'error', 'error': str(e)[:200]}), 500
 
 @app.route('/add_history', methods=['POST'])
 def history():

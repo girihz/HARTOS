@@ -364,6 +364,23 @@ class WorldModelBridge:
         with self._lock:
             self._stats['total_recorded'] += 1
 
+        # Durable local write: append the user↔assistant pair to
+        # ConversationEntry so FULL_HISTORY and the channel unified
+        # inbox can query it by time range. Previously record_interaction
+        # only batched to the in-memory _experience_queue + async flush
+        # to HevolveAI, so if HevolveAI was offline the row was lost on
+        # process exit. Now chat history survives restarts even without
+        # a hive connection. Failures here must not break the learning
+        # path — wrap in try/except and log at debug level.
+        try:
+            self._persist_to_conversation_entry(
+                user_id=str(user_id), prompt_id=str(prompt_id),
+                prompt=prompt, response=response,
+                model_id=model_id or 'unknown',
+            )
+        except Exception as e:
+            logger.debug(f"ConversationEntry durable write skipped: {e}")
+
         if len(self._experience_queue) >= self._flush_batch_size:
             batch = []
             while self._experience_queue and len(batch) < self._flush_batch_size:
@@ -373,6 +390,55 @@ class WorldModelBridge:
                     break
             if batch:
                 self._flush_executor.submit(self._flush_to_world_model, batch)
+
+    def _persist_to_conversation_entry(
+        self, user_id: str, prompt_id: str,
+        prompt: str, response: str, model_id: str,
+    ) -> None:
+        """Write the user prompt + assistant response to ConversationEntry
+        as two rows so FULL_HISTORY can BETWEEN-query them by created_at.
+
+        Keeps the single write-path that integrations.channels.response.router
+        uses (same model, same field contract), so existing tooling that
+        already reads ConversationEntry (unified inbox, time-based history)
+        sees chat-route interactions too. agent_id is left empty — that
+        maps to the default chat flow; channel-inbound flows still set it.
+        """
+        try:
+            from integrations.social.models import get_db, ConversationEntry
+        except ImportError:
+            return
+        db = None
+        try:
+            db = get_db()
+            for role, content in (('user', prompt), ('assistant', response)):
+                if not content:
+                    continue
+                entry = ConversationEntry(
+                    user_id=user_id,
+                    channel_type='chat',
+                    role=role,
+                    content=content[:10000],
+                    agent_id=None,
+                    prompt_id=prompt_id or None,
+                )
+                db.add(entry)
+            db.commit()
+        except Exception:
+            # Swallow — the caller's try/except already downgrades to
+            # debug. We must not raise here under any circumstances.
+            if db is not None:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            raise
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
     def _flush_to_world_model(self, batch: list):
         """Flush experience batch to HevolveAI's learning provider.

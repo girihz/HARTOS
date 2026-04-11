@@ -275,33 +275,52 @@ class MemoryGraph:
         query: str,
         mode: str = "hybrid",
         top_k: int = 5,
+        since: Optional[float] = None,
+        until: Optional[float] = None,
     ) -> List[MemoryNode]:
         """
-        Search memories by text, semantic, or hybrid search.
+        Search memories by text, semantic, or hybrid search, optionally
+        filtered to a time window.
 
         Args:
             query: Search query.
             mode: 'text', 'semantic', or 'hybrid'.
             top_k: Max results.
+            since: Optional lower bound (UNIX epoch seconds). Memories
+                with created_at < since are dropped from the result.
+            until: Optional upper bound (UNIX epoch seconds). Memories
+                with created_at > until are dropped from the result.
 
         Returns:
             List of MemoryNode results.
         """
+        # When a time range is specified, pull more candidates from the
+        # store so post-filtering can still return top_k. SQLite FTS5
+        # returns them in relevance order, which is what we want inside
+        # the window — we just need a bigger buffer than top_k to not
+        # run out after filtering.
+        fetch_k = top_k if since is None and until is None else top_k * 6
         if mode == "text":
-            results = self._store.search(query, max_results=top_k)
+            results = self._store.search(query, max_results=fetch_k)
         elif mode == "semantic":
-            results = self._store.search_semantic(query, max_results=top_k)
+            results = self._store.search_semantic(query, max_results=fetch_k)
         else:
-            results = self._store.search_hybrid(query, max_results=top_k)
+            results = self._store.search_hybrid(query, max_results=fetch_k)
 
         nodes = []
         for sr in results:
             node = MemoryNode.from_memory_item(sr.item)
+            if since is not None and (node.created_at or 0) < since:
+                continue
+            if until is not None and (node.created_at or 0) > until:
+                continue
             # Update access tracking
             self._update_access(node.id)
             node.access_count += 1
             node.accessed_at = time.time()
             nodes.append(node)
+            if len(nodes) >= top_k:
+                break
 
         return nodes
 

@@ -60,9 +60,18 @@ def fresh_registry():
 
 @pytest.fixture
 def dispatcher(fresh_registry):
-    """SpeculativeDispatcher bound to the fresh registry."""
+    """SpeculativeDispatcher bound to the fresh registry.
+
+    Tests stub _dispatch_to_model directly, so the production health
+    probe against the draft server (port 8081 TCP connect) must be
+    disabled — otherwise the gate short-circuits before the mock runs
+    and dispatch_draft_first returns a gate-error envelope missing
+    is_correction / is_casual / etc.
+    """
     from integrations.agent_engine.speculative_dispatcher import SpeculativeDispatcher
-    return SpeculativeDispatcher(model_registry=fresh_registry)
+    d = SpeculativeDispatcher(model_registry=fresh_registry)
+    d._health_probe_enabled = False
+    return d
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -248,6 +257,7 @@ class TestDispatchDraftFirstDelegation:
             avg_latency_ms=700.0, accuracy_score=0.6, is_local=True,
         ))
         d = SpeculativeDispatcher(model_registry=reg)
+        d._health_probe_enabled = False
         _mock_guardrails(monkeypatch)
         draft_raw = '{"reply": "trying", "delegate": "hive", "confidence": 0.2}'
         with patch.object(d, '_dispatch_to_model', return_value=draft_raw), \

@@ -2056,7 +2056,39 @@ def toggle_embodied_feed():
 
     api._save_config()
     _propagate_embodied_config(cfg)
+    _apply_embodied_toggle(feed, enabled, cfg)
     return {"feed": feed, "enabled": enabled, "config": cfg.to_dict()}
+
+
+def _apply_embodied_toggle(feed: str, enabled: bool, cfg) -> None:
+    """Start or stop VisionService based on the camera/screen toggle so
+    the flag actually controls hardware, not just a config file. Called
+    from both the /config/embodied/toggle endpoint AND the agentic
+    /api/agent/approval flow so the single start/stop path is shared.
+
+    'camera' and 'screen' both route to VisionService (the service
+    handles both channels via the same WebSocket on :5460). 'audio'
+    routes to the diarization sidecar if present. 'all' cascades.
+    """
+    try:
+        if feed in ('camera', 'screen', 'all'):
+            from integrations.vision import get_vision_service
+            vs = get_vision_service()
+            want_running = (
+                enabled and
+                (cfg.camera_enabled or cfg.screen_capture_enabled or cfg.enabled)
+            )
+            if want_running and not vs.is_running():
+                mode = 'full' if cfg.enabled else 'lite'
+                vs.start(mode=mode)
+                logger.info(f"VisionService started (mode={mode}) via {feed} toggle")
+            elif not want_running and vs.is_running():
+                vs.stop()
+                logger.info(f"VisionService stopped via {feed} toggle")
+    except ImportError:
+        logger.debug("VisionService not installed — skipping toggle side effect")
+    except Exception as e:
+        logger.warning(f"VisionService toggle side effect failed: {e}")
 
 
 @admin_bp.route("/config/embodied/status", methods=["GET"])

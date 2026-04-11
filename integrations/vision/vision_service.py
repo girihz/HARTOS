@@ -307,6 +307,15 @@ class VisionService:
             cooldown_seconds=cooldown_seconds,
         )
 
+    def is_running(self) -> bool:
+        """True when the service has been started and hasn't stopped.
+
+        Exposed so callers (admin toggles, agent tools, approval handlers)
+        can check state without reaching into `_running` directly — keeps
+        the flag private to the class and gives tests a single mock target.
+        """
+        return bool(self._running)
+
     def get_status(self) -> Dict:
         """Return service status for health dashboards."""
         backend_name = self._vision_backend.name if self._vision_backend else 'minicpm'
