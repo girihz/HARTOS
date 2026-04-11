@@ -1647,13 +1647,11 @@ def _get_dynamic_capability_prompt() -> str:
 
 # create prompt
 def create_prompt(tools):
-    # We don't have the user's actual query at prompt-template build time
-    # (LangChain will substitute {input} later), so no greeting short-
-    # circuit is possible here. The 30s cache + 1.5s budget inside
-    # get_user_context still applies, so repeat constructions within
-    # the window never re-hit the backend.
+    # No per-query classification here — the 30s cache + 1.5s hot-path
+    # budget inside get_user_context are the only speed wins. Repeat
+    # constructions within the TTL window never re-hit the backend.
     user_details, actions = get_action_user_details(
-        user_id=thread_local_data.get_user_id(), query='')
+        user_id=thread_local_data.get_user_id())
     # Build dynamic identity based on active agent config
     _active_agent_config = thread_local_data.get_agent_config() if hasattr(thread_local_data, 'get_agent_config') else None
     _owner_name = ''
@@ -3601,29 +3599,33 @@ def get_memory(user_id: int):
     return SimpleMemChatMemory.load_or_create(user_id)
 
 
-def get_action_user_details(user_id, query: str = ''):
+def get_action_user_details(user_id):
     """Thin delegate to the canonical user-context resolver.
 
     The full action-history + profile fetch lives in
     ``core.user_context.get_user_context`` which layers:
 
-      1. Greeting short-circuit — "hi", "hello" etc. skip the HTTP
-         call entirely (33.8s → ~0s on the hot path).
-      2. 30-second per-user TTL cache — subsequent /chat messages
-         within the window reuse the last fetch.
-      3. 1.5-second total hot-path budget — a stalled backend can't
+      1. 30-second per-user TTL cache — subsequent /chat messages
+         within the window reuse the last fetch in microseconds.
+      2. 1.5-second total hot-path budget — a stalled backend can't
          block chat more than 1.5s; background refresh populates the
          cache for the next request.
-      4. Unified format — the same rich output that was previously
+      3. Unified format — the same rich output that was previously
          duplicated across hart_intelligence_entry, create_recipe,
          and reuse_recipe with subtle drift.
+
+    There is no message-content classifier here. Chat intent is
+    classified by the draft 0.8B model in dispatch_draft_first with
+    the augmented classifier prompt; callers that want to skip this
+    fetch for a casual message should consult that envelope upstream,
+    not re-classify in Python.
 
     This shim is retained (rather than removing the symbol) so any
     dynamic caller via ``getattr(hart_intelligence_entry, 'get_action_user_details')``
     keeps working. New code should import ``get_user_context`` directly.
     """
     from core.user_context import get_user_context
-    return get_user_context(user_id=user_id, mode='reuse', query=query)
+    return get_user_context(user_id=user_id, mode='reuse')
 
 
 def get_time_based_history(prompt: str, session_id: str, start_date: str, end_date: str):
@@ -4669,18 +4671,17 @@ else:
 # main function
 def get_ans(casual_conv, req_tool, user_id, query, custom_prompt, preferred_lang):
     start_time = time.time()
-    # Skip action history fetch for casual conversations — they don't use it
-    # in the prompt, and the HTTP call to ACTION_API adds 5+ seconds latency.
+    # casual_conv is the draft classifier's `is_casual` flag propagated
+    # from the /chat handler — when True we skip the action+profile
+    # fetch entirely because a casual acknowledgement doesn't consult
+    # either. No Python-side classification of `query` happens anywhere
+    # in the user_context module; the draft 0.8B is the only classifier.
     if casual_conv:
         user_details = "Casual conversation mode."
         actions = ""
         app.logger.info("Skipped get_action_user_details (casual_conv=True)")
     else:
-        # Pass the raw user query so the greeting short-circuit inside
-        # core.user_context.get_user_context fires for short "hi" /
-        # "hello" / "hey" messages. Longer substantive queries still go
-        # through the HTTP fetch (budget-bounded + cached).
-        user_details, actions = get_action_user_details(user_id=user_id, query=query)
+        user_details, actions = get_action_user_details(user_id=user_id)
         app.logger.info(
             "time taken by get_action_user_details %s seconds", time.time() - start_time)
     app.logger.info(casual_conv)

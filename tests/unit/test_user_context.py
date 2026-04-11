@@ -2,11 +2,19 @@
 replaced three drifted copies of get_action_user_details.
 
 Covers:
-  - Greeting short-circuit (the 33.8s → 0s fix)
   - TTL cache hit path
   - Hard budget timeout → cheap defaults + background refresh
   - Mode-specific formatting (create vs reuse)
   - Profile .get() safety for guest / local users
+  - Regression guard: NO Python-side message classification
+
+Explicitly does NOT cover any chat-intent classifier inside
+core/user_context — that responsibility lives in the draft 0.8B
+model (speculative_dispatcher.dispatch_draft_first) with its
+augmented classifier prompt. An earlier draft of this module had
+a `_is_casual_greeting` regex short-circuit; it was reverted on
+operator directive because keyword regex hacks are parallel-path
+shadow code. The module now has zero classification logic.
 """
 import time
 import unittest
@@ -20,7 +28,6 @@ from core.user_context import (
     _format_action_rich,
     _format_action_simple,
     _format_profile,
-    _is_casual_greeting,
     get_user_context,
     get_user_context_cache,
     invalidate_user_context,
@@ -28,73 +35,59 @@ from core.user_context import (
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Classification layer
+# Regression guard: no Python-side classifier
 # ═══════════════════════════════════════════════════════════════════
 
 
-class TestGreetingClassifier(unittest.TestCase):
-    """_is_casual_greeting is the speed-critical gate for the short-circuit.
+class TestNoPythonSideClassifier(unittest.TestCase):
+    """core/user_context must not contain any message-content
+    classifier — regex, keyword list, or otherwise. Chat intent
+    classification is owned by the draft 0.8B model in
+    speculative_dispatcher.dispatch_draft_first with its augmented
+    classifier prompt.
 
-    Regression guard: the 2026-04-11 incident was a plain "hi" blocking
-    chat for 33.8s while the backend fetched 117 unrelated actions.
-    Every message that would plausibly be typed as an opener must
-    short-circuit, and every message that needs real context must NOT.
+    If a future change re-adds ``_is_casual_greeting`` / ``_GREETING_RE``
+    / ``_GREETING_MAX_LEN`` (or any other per-message Python-side
+    classifier), these tests fail and the reviewer catches the
+    regression before it ships.
     """
 
-    def test_plain_greetings_match(self):
-        for q in ('hi', 'hello', 'hey', 'yo', 'sup'):
-            self.assertTrue(
-                _is_casual_greeting(q),
-                f"expected {q!r} to be classified as a casual greeting",
-            )
-
-    def test_greetings_with_punctuation(self):
-        for q in ('hi!', 'hello.', 'hey!!!', 'yo   '):
-            self.assertTrue(_is_casual_greeting(q))
-
-    def test_time_of_day_greetings(self):
-        for q in ('good morning', 'good afternoon!', 'good evening.',
-                  'good night'):
-            self.assertTrue(_is_casual_greeting(q))
-
-    def test_greeting_there_variants(self):
-        for q in ('hi there', 'hello there', 'hey there!'):
-            self.assertTrue(_is_casual_greeting(q))
-
-    def test_case_insensitive(self):
-        for q in ('HI', 'HELLO', 'Hey There', 'Good Morning'):
-            self.assertTrue(_is_casual_greeting(q))
-
-    def test_substantive_messages_do_not_match(self):
-        substantive = [
-            'hi, can you help me debug this?',
-            'hello, what is the weather?',
-            'how do I write a Python script?',
-            'explain quantum entanglement',
-            'good morning, how are the test results?',
-            'can you schedule a meeting',
-        ]
-        for q in substantive:
+    def test_module_has_no_greeting_classifier_symbols(self):
+        import core.user_context as uc
+        forbidden = (
+            '_is_casual_greeting',
+            '_GREETING_RE',
+            '_GREETING_MAX_LEN',
+            '_classify_query',
+            '_classify_message',
+        )
+        for name in forbidden:
             self.assertFalse(
-                _is_casual_greeting(q),
-                f"expected {q!r} to NOT short-circuit — it's a real query",
+                hasattr(uc, name),
+                f"core.user_context.{name} exists — Python-side "
+                f"classification is forbidden here. Use the draft "
+                f"0.8B envelope from dispatch_draft_first instead.",
             )
 
-    def test_empty_and_none(self):
-        self.assertFalse(_is_casual_greeting(''))
-        self.assertFalse(_is_casual_greeting(None))
-        self.assertFalse(_is_casual_greeting('   '))
-
-    def test_length_guard_beyond_regex(self):
-        """Even if a pathologically long string happens to start with
-        a greeting word, the 20-char guard blocks it."""
-        q = 'hi ' + 'x' * 100
-        self.assertFalse(_is_casual_greeting(q))
-
-    def test_non_string_inputs_rejected(self):
-        self.assertFalse(_is_casual_greeting(123))
-        self.assertFalse(_is_casual_greeting(['hi']))
-        self.assertFalse(_is_casual_greeting({'query': 'hi'}))
+    def test_get_user_context_signature_has_no_query_param(self):
+        import inspect
+        from core.user_context import get_user_context
+        sig = inspect.signature(get_user_context)
+        self.assertNotIn(
+            'query', sig.parameters,
+            "get_user_context must not accept `query` — the presence "
+            "of a query parameter implies per-message classification "
+            "inside this module, which is exactly the anti-pattern "
+            "being blocked.",
+        )
+        # The allowed parameters are user_id, mode, timeout_budget_s,
+        # ttl_s — anything else is a sign of classifier creep.
+        allowed = {'user_id', 'mode', 'timeout_budget_s', 'ttl_s'}
+        self.assertTrue(
+            set(sig.parameters.keys()).issubset(allowed),
+            f"get_user_context has unexpected params: "
+            f"{set(sig.parameters.keys()) - allowed}",
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -259,12 +252,15 @@ class TestProfileFormatter(unittest.TestCase):
 
 class TestGetUserContextOrchestration(unittest.TestCase):
     """get_user_context is the only function external callers touch.
-    Its contract:
+    Its contract (post Python-classifier removal):
 
-      1. Greeting short-circuit → cheap defaults, ZERO HTTP.
-      2. Cache hit → cached tuple, ZERO HTTP.
-      3. Cache miss + fast backend → fresh fetch + cache populated.
-      4. Cache miss + slow backend → cheap defaults within budget.
+      1. Cache hit → cached tuple, ZERO HTTP.
+      2. Cache miss + fast backend → fresh fetch + cache populated.
+      3. Cache miss + slow backend → cheap defaults within budget.
+
+    No message-content branching. Every call path above is identical
+    regardless of the user's query — the speed wins are cache + budget,
+    not classification.
     """
 
     def setUp(self):
@@ -273,28 +269,16 @@ class TestGetUserContextOrchestration(unittest.TestCase):
         cache._cache._data.clear()
         cache._cache._timestamps.clear()
 
-    def test_greeting_short_circuit_skips_http_entirely(self):
-        """The whole point of this module: "hi" should never hit
-        _fetch_actions_raw or _fetch_profile_raw."""
-        with patch('core.user_context._fetch_actions_raw') as mock_actions, \
-             patch('core.user_context._fetch_profile_raw') as mock_profile:
-            details, actions = get_user_context(
-                user_id=12345, mode='reuse', query='hi',
-            )
-        mock_actions.assert_not_called()
-        mock_profile.assert_not_called()
-        self.assertIn('No user details', details)
-        self.assertIn('user has not performed any actions', actions)
-
-    def test_non_greeting_does_fetch(self):
-        """A real query calls the fetchers inside the budget."""
+    def test_fresh_fetch_calls_both_http_functions(self):
+        """With an empty cache and a healthy backend, BOTH
+        _fetch_actions_raw and _fetch_profile_raw fire exactly once
+        and the formatted profile surfaces to the caller."""
         with patch('core.user_context._fetch_actions_raw',
                    return_value=[]) as mock_actions, \
              patch('core.user_context._fetch_profile_raw',
                    return_value={'name': 'Ada'}) as mock_profile:
             details, actions = get_user_context(
                 user_id=54321, mode='reuse',
-                query='How do I write a Python script?',
             )
         mock_actions.assert_called()
         mock_profile.assert_called()
@@ -306,15 +290,13 @@ class TestGetUserContextOrchestration(unittest.TestCase):
                    return_value=[]) as mock_actions, \
              patch('core.user_context._fetch_profile_raw',
                    return_value={'name': 'Cached'}) as mock_profile:
-            get_user_context(user_id=77, mode='reuse', query='write code')
+            get_user_context(user_id=77, mode='reuse')
             # Small sleep to let the future return.
             time.sleep(0.1)
             mock_actions.reset_mock()
             mock_profile.reset_mock()
             # Second call — should hit cache.
-            details2, _ = get_user_context(
-                user_id=77, mode='reuse', query='another question',
-            )
+            details2, _ = get_user_context(user_id=77, mode='reuse')
         self.assertIn('Cached', details2)
         mock_actions.assert_not_called()
         mock_profile.assert_not_called()
@@ -332,7 +314,7 @@ class TestGetUserContextOrchestration(unittest.TestCase):
              patch('core.user_context._fetch_profile_raw',
                    side_effect=_slow_fetch):
             details, actions = get_user_context(
-                user_id=999, mode='reuse', query='real query',
+                user_id=999, mode='reuse',
                 timeout_budget_s=0.5,  # Tight budget for the test
             )
         elapsed = time.monotonic() - start
@@ -349,38 +331,32 @@ class TestGetUserContextOrchestration(unittest.TestCase):
                    return_value=[]), \
              patch('core.user_context._fetch_profile_raw',
                    return_value={'name': 'Same'}):
-            _, create_actions = get_user_context(
-                user_id=1, mode='create', query='do something',
-            )
-            _, reuse_actions = get_user_context(
-                user_id=2, mode='reuse', query='do something',
-            )
+            _, create_actions = get_user_context(user_id=1, mode='create')
+            _, reuse_actions = get_user_context(user_id=2, mode='reuse')
         self.assertNotIn('<PREVIOUS_USER_ACTION_END>', create_actions)
         self.assertIn('<PREVIOUS_USER_ACTION_END>', reuse_actions)
 
     def test_invalidate_forces_refetch(self):
         """invalidate_user_context drops cache so the next call re-fetches."""
         with patch('core.user_context._fetch_actions_raw',
-                   return_value=[]) as mock_actions, \
+                   return_value=[]), \
              patch('core.user_context._fetch_profile_raw',
                    return_value={'name': 'First'}):
-            get_user_context(user_id=7, mode='reuse', query='real query')
+            get_user_context(user_id=7, mode='reuse')
             time.sleep(0.1)
         invalidate_user_context(7)
         with patch('core.user_context._fetch_actions_raw',
                    return_value=[]) as mock_actions2, \
              patch('core.user_context._fetch_profile_raw',
                    return_value={'name': 'Second'}):
-            details, _ = get_user_context(
-                user_id=7, mode='reuse', query='another real query',
-            )
+            details, _ = get_user_context(user_id=7, mode='reuse')
             time.sleep(0.1)
         mock_actions2.assert_called()
 
 
 class TestCheapDefaults(unittest.TestCase):
-    """_cheap_defaults is the zero-HTTP safety net for greetings and
-    budget-blown fetches."""
+    """_cheap_defaults is the zero-HTTP safety net for budget-blown
+    fetches with an empty cache. No relation to classification."""
 
     def test_reuse_defaults_include_datetime(self):
         details, actions = _cheap_defaults('reuse')

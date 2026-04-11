@@ -572,7 +572,7 @@ def get_visual_context(user_id, minutes=2):
         current_app.logger.error(f'Error getting visual context: {e}')
         return None
 
-def get_action_user_details(user_id, query: str = ''):
+def get_action_user_details(user_id):
     """Thin delegate to the canonical ``core.user_context`` resolver.
 
     The create_recipe flow runs during INITIAL agent training where
@@ -581,11 +581,12 @@ def get_action_user_details(user_id, query: str = ''):
     the canonical resolver. Three inline copies of this function
     (here, in reuse_recipe, in hart_intelligence_entry) previously
     drifted; consolidating to ``core.user_context.get_user_context``
-    gives one source of truth plus greeting short-circuit + TTL
-    cache + 1.5s hot-path budget for free.
+    gives one source of truth plus TTL cache + 1.5s hot-path budget
+    for free. There is no Python-side classification of the user's
+    message — the draft 0.8B model owns that responsibility.
     """
     from core.user_context import get_user_context
-    return get_user_context(user_id=user_id, mode='create', query=query)
+    return get_user_context(user_id=user_id, mode='create')
 
 #called from api when visual task is auto triggered via scheduler
 def visual_execution(task_description: str, user_id: int, prompt_id: int):

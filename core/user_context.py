@@ -3,52 +3,62 @@
 Single source of truth for the ``(user_details, actions)`` tuple that
 was previously implemented THREE times — in ``hart_intelligence_entry``,
 ``create_recipe``, and ``reuse_recipe`` — with subtle drift. Consolidating
-here fixes the five problems the reviewer flagged in the 2026-04-11
-"hi took 33.8s" post-mortem:
+here fixes the four non-classification problems the reviewer flagged
+in the 2026-04-11 "hi took 33.8s" post-mortem:
 
-1. **Greeting short-circuit.** A one-word ``hi`` does not need 117
-   historical actions + full user profile. Short casual greetings
-   (≤ 20 chars, matching the greeting regex) return empty defaults
-   immediately — zero HTTP, zero blocking.
-2. **Hard time budget.** Every HTTP fetch is bounded by a total budget
+1. **Hard time budget.** Every HTTP fetch is bounded by a total budget
    (default 1.5s). If the budget blows, we return cached-or-default
    instantly and spawn a background refresh so the NEXT request has
-   fresh data — the hot path never blocks more than the budget.
-3. **30-second TTL cache per user_id.** Fetching the same action
+   fresh data — the hot path never blocks more than the budget
+   regardless of how slow the backend gets. This alone collapses the
+   33.8s worst case to 1.5s.
+2. **30-second TTL cache per user_id.** Fetching the same action
    history + profile on every chat message was pure waste. The cache
-   collapses that to one fetch per 30s of activity.
-4. **Deduplication / SRP.** The three copies lived in three modules
+   collapses that to one fetch per 30s of activity — the second "hi"
+   within 30s is microseconds.
+3. **Deduplication / SRP.** The three copies lived in three modules
    with different filter lists (some skipped ``Screen Reasoning``,
    some didn't), different crash behavior on missing profile fields,
    and different use of ``pooled_request`` vs raw ``requests``. One
    canonical resolver with a ``mode`` parameter gives callers the
    create/reuse behavior they need without duplicating HTTP plumbing.
-5. **Thread-safety.** Background refresh uses a bounded
+4. **Thread-safety.** Background refresh uses a bounded
    ``ThreadPoolExecutor`` and the cache is a ``TTLCache`` — the same
    primitives ``core/session_cache.py`` already uses for other per-
    user state. No new concurrency primitives, no new parallel paths.
 
+**No Python-side classification.** An earlier draft of this module
+had a ``_is_casual_greeting(query)`` regex short-circuit ("hi" /
+"hello" / "hey" → skip HTTP entirely). That was reverted on operator
+directive: keyword regex hacks for chat classification are exactly
+the kind of drifting, locale-brittle shadow-code the "no parallel
+paths" sweep is trying to eliminate. Chat intent classification is
+owned by the draft 0.8B model (``speculative_dispatcher.
+dispatch_draft_first``) which emits a structured envelope with
+``is_casual`` / ``is_correction`` / ``is_create_agent`` flags. If a
+future caller wants to skip the action-history fetch based on that
+classification, it should pass the draft's already-computed
+``is_casual`` flag down — not re-classify in Python with a regex.
+
 Architecture (layered, SRP):
 
-    get_user_context(user_id, mode, query, ...)     ← public entry
+    get_user_context(user_id, mode, ...)            ← public entry
         │
-        ├── _is_casual_greeting(query)              ← classification layer
         ├── UserContextCache.get / set              ← caching layer
-        ├── _fetch_actions(user_id, budget)         ← HTTP layer
-        ├── _fetch_profile(user_id, budget)         ← HTTP layer
-        ├── _format_actions_rich(...)               ← formatting layer
-        ├── _format_actions_simple(...)             ← formatting layer
+        ├── _fetch_actions_raw(user_id, budget)     ← HTTP layer
+        ├── _fetch_profile_raw(user_id, budget)     ← HTTP layer
+        ├── _format_action_rich(...)                ← formatting layer
+        ├── _format_action_simple(...)              ← formatting layer
         └── _schedule_background_refresh(...)       ← async refresh layer
 
 Callers (``hart_intelligence_entry``, ``create_recipe``, ``reuse_recipe``)
-pass ``mode='reuse'`` or ``mode='create'`` and their local user query.
-They no longer own any of the HTTP, caching, or formatting logic.
+pass ``mode='reuse'`` or ``mode='create'``. They no longer own any of
+the HTTP, caching, or formatting logic.
 """
 from __future__ import annotations
 
 import json
 import logging
-import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -83,22 +93,6 @@ DEFAULT_BUDGET_SECONDS = 1.5
 #: sized with headroom so a stampede of channel messages doesn't evict
 #: the session that's driving the UI.
 MAX_CACHED_USERS = 256
-
-#: Greeting regex. Matches "hi", "hello", "hey", "yo", "sup", the three
-#: time-of-day greetings, and their "<greeting> there" variants ("hi
-#: there", "hey there"). Case-insensitive. Deliberately narrow —
-#: anything substantive should take the full context path so the agent
-#: has the information it needs to answer accurately.
-_GREETING_RE = re.compile(
-    r'^(hi|hello|hey|yo|sup|good\s+(morning|afternoon|evening|night))'
-    r'(\s+there)?[!.\s]*$',
-    re.IGNORECASE,
-)
-
-#: Max length a query can be before we stop treating it as a casual
-#: greeting regardless of regex match. Pure paranoia guard — the regex
-#: already anchors ^ and $ so this is mostly defensive.
-_GREETING_MAX_LEN = 20
 
 #: Actions the agent system produces as noise during training and
 #: should not be echoed back to the LLM as "past user actions".
@@ -230,23 +224,7 @@ def _schedule_background_refresh(user_id, mode: str, timeout_budget_s: float) ->
             _refresh_inflight.pop(key, None)
 
 
-# ─── Layer 3: classification ──────────────────────────────────────────────
-
-def _is_casual_greeting(query: str) -> bool:
-    """Return True if ``query`` is a short greeting that doesn't need context.
-
-    "hi", "hello there", "good morning!", "hey" → True.
-    "hi, can you help me with Python?" → False (too long, has a real question).
-    """
-    if not query or not isinstance(query, str):
-        return False
-    stripped = query.strip()
-    if not stripped or len(stripped) > _GREETING_MAX_LEN:
-        return False
-    return bool(_GREETING_RE.match(stripped))
-
-
-# ─── Layer 4: HTTP fetchers ───────────────────────────────────────────────
+# ─── Layer 3: HTTP fetchers ───────────────────────────────────────────────
 
 def _action_api_url(user_id) -> str:
     """Resolve the action-history URL. Defers import to avoid circulars
@@ -489,27 +467,33 @@ def _format_profile(user_data: Optional[dict], verbose: bool = True) -> str:
     )
 
 
-# ─── Layer 6: cheap-defaults (used on greeting short-circuit and
-#              on total HTTP failure with an empty cache) ────────────────
+# ─── Layer 5: cheap-defaults (used on budget-blown fetch with empty cache) ───
 
-_GREETING_DEFAULT_ACTIONS = 'user has not performed any actions yet.'
-_GREETING_DEFAULT_DETAILS = 'No user details available.'
+#: Fallback strings used when the backend is unreachable AND nothing is
+#: in the cache. These are intentionally generic — the LLM sees them
+#: and understands "no profile / no action history available". They
+#: used to be named with a "GREETING" prefix from the now-removed
+#: regex short-circuit path; the module no longer has any classifier.
+_DEFAULT_ACTIONS_EMPTY = 'user has not performed any actions yet.'
+_DEFAULT_DETAILS_EMPTY = 'No user details available.'
 
 
 def _cheap_defaults(mode: str) -> tuple[str, str]:
-    """Return the zero-HTTP default tuple used by greeting short-circuit
-    and by budget-blown fetches with no cached entry."""
+    """Return the zero-HTTP fallback tuple used when the budget is
+    blown AND the cache is empty. Not used for classification — the
+    only caller is :func:`get_user_context` after it gives up on a
+    stalled backend and has no cached entry to fall back to."""
     if mode == 'reuse':
         tz = _get_tz()
         formatted_time = datetime.now(pytz.utc).astimezone(tz).strftime(
             '%Y-%m-%d %H:%M:%S') if tz else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         actions = (
-            f"{_GREETING_DEFAULT_ACTIONS}. <PREVIOUS_USER_ACTION_END> \n "
+            f"{_DEFAULT_ACTIONS_EMPTY}. <PREVIOUS_USER_ACTION_END> \n "
             f"Today's datetime in {_DEFAULT_TZ}is: {formatted_time}"
         )
     else:
-        actions = _GREETING_DEFAULT_ACTIONS
-    return _GREETING_DEFAULT_DETAILS, actions
+        actions = _DEFAULT_ACTIONS_EMPTY
+    return _DEFAULT_DETAILS_EMPTY, actions
 
 
 # ─── Layer 7: orchestration ───────────────────────────────────────────────
@@ -548,15 +532,29 @@ def _resolve_fresh(user_id, mode: str, timeout_budget_s: float) -> tuple[str, st
 def get_user_context(
     user_id,
     mode: Literal['create', 'reuse'] = 'reuse',
-    query: str = '',
     timeout_budget_s: float = DEFAULT_BUDGET_SECONDS,
     ttl_s: float = DEFAULT_TTL_SECONDS,
 ) -> tuple[str, str]:
     """Canonical public entry point.
 
-    Three decision layers stacked fast-first, so the common case
-    ("hi") exits in microseconds and the rare case (a substantive
-    query with an empty cache) pays the full HTTP budget once per TTL.
+    Two decision layers stacked fast-first:
+
+      1. Cache hit — if we fetched the same (user_id, mode) within
+         the TTL, return the cached tuple in microseconds.
+      2. Budget-guarded fresh fetch — submit the HTTP fetch to a
+         background thread and wait on it with a hard wall-clock
+         deadline. If the fetch completes in time, its result is
+         cached and returned. If it blows the budget, the running
+         future is LEFT RUNNING (it will populate the cache when it
+         eventually lands) and we return cheap defaults immediately
+         so the hot path never blocks past ``timeout_budget_s``.
+
+    This function deliberately does NOT classify the user's chat
+    message. Chat intent classification is owned by the draft 0.8B
+    model in ``speculative_dispatcher.dispatch_draft_first`` with its
+    augmented classifier prompt — callers that want to skip fetching
+    for a casual message should consult the draft's structured
+    envelope, never re-classify here with Python regex.
 
     Args:
         user_id: Hevolve user id (int or str — passed through to the
@@ -565,13 +563,10 @@ def get_user_context(
             visual + screen context, verbose profile). ``'create'``
             for the initial agent-training path (simple formatting,
             no context windows).
-        query: The user's chat message. Used only for the greeting
-            short-circuit. Pass an empty string if the caller doesn't
-            know — that skips the short-circuit and always fetches.
         timeout_budget_s: Hard wall-clock budget for the HTTP fetch
             phase. Defaults to ``DEFAULT_BUDGET_SECONDS`` (1.5s).
-        ttl_s: Cache freshness window. Unused by this call directly
-            but reserved for future per-call overrides.
+        ttl_s: Cache freshness window. Reserved for future per-call
+            overrides — the module-level constant applies today.
 
     Returns:
         ``(user_details, actions)`` — both strings, both safe to embed
@@ -580,19 +575,14 @@ def get_user_context(
     """
     del ttl_s  # Reserved for future use; the module-level constant applies.
 
-    # Layer 1: greeting short-circuit. "hi" never pays any HTTP cost.
-    if _is_casual_greeting(query):
-        logger.debug("user_context: greeting short-circuit for %r", query)
-        return _cheap_defaults(mode)
-
-    # Layer 2: cache hit.
+    # Layer 1: cache hit.
     cache = get_user_context_cache()
     cached = cache.get(user_id, mode)
     if cached is not None:
         logger.debug("user_context: cache hit user=%s mode=%s", user_id, mode)
         return cached
 
-    # Layer 3: budget-guarded fetch. We want the fetch to COMPLETE
+    # Layer 2: budget-guarded fetch. We want the fetch to COMPLETE
     # inside the budget, not merely to start it — so we use a thread
     # with a future.result(timeout) wall.
     start = time.monotonic()
