@@ -802,6 +802,15 @@ def lifecycle_hook_track_termination(user_prompt: str, user_tasks, group_chat) -
     return False
 
 
+# lifecycle_hook_publish_narration was removed: it published a second
+# JSON format ({"type": "narration", ...}) to the same Crossbar topic
+# that publish_intermediate_thoughts_to_user / publish_agent_thought
+# use for agent-to-agent thinking bubbles. Two publishers emitting
+# two shapes to one topic is shadow code — the thinking-prompts
+# publisher in create_recipe is the single canonical path. Call that
+# from new callers instead of resurrecting this hook.
+
+
 def lifecycle_hook_can_increment_action(user_prompt: str, user_tasks) -> dict:
     """12. Check if we can increment to next action"""
     if hasattr(user_tasks, 'get') and not hasattr(user_tasks, 'current_action'):
