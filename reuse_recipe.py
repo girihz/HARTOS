@@ -2330,7 +2330,7 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
     context_handling.add_to_agent(verify1)
 
     # --- Core tools for time_agent (defined once in core/agent_tools.py) ---
-    from core.agent_tools import build_core_tool_closures, register_core_tools
+    from core.agent_tools import build_core_tool_closures, register_core_tools, register_dual
     _tool_ctx = {
         'user_id': user_id, 'prompt_id': prompt_id,
         'agent_data': agent_data, 'helper_fun': helper_fun,
@@ -2376,13 +2376,9 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
         send_message_to_user1(user_id, last_message, '', prompt_id)
         return 'Done'
 
-    # Register the tool signature with the assistant agent.
-    helper1.register_for_llm(name="Connect_to_main_agent",
-                             description="Connects time agent to main assistant agemt to perform actions which time agent cannot perform")(
-        connect_time_main)
-
-    # Register the tool function with the user proxy agent.
-    time_agent.register_for_execution(name="Connect_to_main_agent")(connect_time_main)
+    register_dual(helper1, time_agent, connect_time_main,
+                  "Connect_to_main_agent",
+                  "Connects time agent to main assistant agemt to perform actions which time agent cannot perform")
 
     visual_agent, visual_user, helper2, executor2, multi_role_agent2, verify2, chat_instructor2 = helper_fun.create_visual_agent(
         user_id, prompt_id)
@@ -2417,13 +2413,7 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
 
                 if tool_def:
                     description = tool_def.get('description', f'MCP tool: {tool_name}')
-
-                    # Register for LLM (helper agent suggests tool use)
-                    helper.register_for_llm(name=tool_name, description=description)(tool_func)
-
-                    # Register for execution (assistant agent executes tool)
-                    assistant.register_for_execution(name=tool_name)(tool_func)
-
+                    register_dual(helper, assistant, tool_func, tool_name, description)
                     current_app.logger.info(f"Registered MCP tool: {tool_name}")
         else:
             current_app.logger.info("No MCP servers configured - continuing with default tools")
@@ -2447,8 +2437,7 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
             tool_def = next((d for d in svc_defs if d['name'] == tool_name), None)
             if tool_def:
                 description = tool_def.get('description', f'Service tool: {tool_name}')
-                helper.register_for_llm(name=tool_name, description=description)(tool_func)
-                assistant.register_for_execution(name=tool_name)(tool_func)
+                register_dual(helper, assistant, tool_func, tool_name, description)
                 current_app.logger.info(f"Registered service tool: {tool_name}")
     except Exception as e:
         current_app.logger.warning(f"Service tools integration error (non-critical): {e}")
@@ -2459,8 +2448,7 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
         skill_funcs = skill_registry.get_autogen_tools()
         for func_name, func in skill_funcs.items():
             description = func.__doc__ or f"HART skill: {func_name}"
-            helper.register_for_llm(name=func_name, description=description)(func)
-            assistant.register_for_execution(name=func_name)(func)
+            register_dual(helper, assistant, func, func_name, description)
             current_app.logger.info(f"Registered HART skill: {func_name}")
     except Exception as e:
         current_app.logger.debug(f"HART skills integration skipped: {e}")
@@ -2544,9 +2532,9 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
             delegation_func = create_delegation_function('assistant')
             return delegation_func(task, required_skills, context)
 
-        helper.register_for_llm(name="delegate_to_specialist",
-                               description="Delegate complex tasks to specialist agents based on required skills")(delegate_to_specialist)
-        assistant.register_for_execution(name="delegate_to_specialist")(delegate_to_specialist)
+        register_dual(helper, assistant, delegate_to_specialist,
+                      "delegate_to_specialist",
+                      "Delegate complex tasks to specialist agents based on required skills")
 
         def share_context_with_agents(context_key: Annotated[str, "Context identifier"],
                                       context_value: Annotated[str, "Context data as string"]) -> str:
@@ -2565,18 +2553,18 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
                     pass
             return result
 
-        helper.register_for_llm(name="share_context_with_agents",
-                               description="Share context information with other agents")(share_context_with_agents)
-        assistant.register_for_execution(name="share_context_with_agents")(share_context_with_agents)
+        register_dual(helper, assistant, share_context_with_agents,
+                      "share_context_with_agents",
+                      "Share context information with other agents")
 
         def get_shared_context(context_key: Annotated[str, "Context identifier"]) -> str:
             """Retrieve context information shared by other agents"""
             retrieval_func = create_context_retrieval_function()
             return retrieval_func(context_key)
 
-        helper.register_for_llm(name="get_shared_context",
-                               description="Retrieve context information shared by other agents")(get_shared_context)
-        assistant.register_for_execution(name="get_shared_context")(get_shared_context)
+        register_dual(helper, assistant, get_shared_context,
+                      "get_shared_context",
+                      "Retrieve context information shared by other agents")
 
         current_app.logger.info("Internal Agent Communication complete - agents can now delegate tasks and share context")
 
@@ -2596,13 +2584,7 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
             tool_func = tool_def['function']
             tool_name = tool_def['name']
             tool_desc = tool_def['description']
-
-            # Register for LLM (helper agent suggests payment tools)
-            helper.register_for_llm(name=tool_name, description=tool_desc)(tool_func)
-
-            # Register for execution (assistant agent executes payment operations)
-            assistant.register_for_execution(name=tool_name)(tool_func)
-
+            register_dual(helper, assistant, tool_func, tool_name, tool_desc)
             current_app.logger.info(f"Registered AP2 payment tool: {tool_name}")
 
         current_app.logger.info("AP2 Agentic Commerce integration complete - agents can now handle payment workflows")
