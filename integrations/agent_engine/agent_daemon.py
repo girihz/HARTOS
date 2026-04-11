@@ -202,6 +202,29 @@ class AgentDaemon:
         except Exception:
             pass
 
+    def _wd_sleep(self, seconds: float) -> None:
+        """Sleep for ``seconds`` while keeping the watchdog heartbeat fresh.
+
+        Delegates to the canonical ``NodeWatchdog.sleep_with_heartbeat``
+        helper so a 480s exponential-backoff sleep can't silently age
+        the heartbeat past the 300s frozen threshold. See the helper's
+        docstring for the full incident context. When the watchdog
+        isn't available (test mode, early boot) this falls back to a
+        plain ``time.sleep`` so behavior is unchanged.
+        """
+        try:
+            from security.node_watchdog import get_watchdog
+            wd = get_watchdog()
+            if wd is not None:
+                wd.sleep_with_heartbeat(
+                    'agent_daemon', seconds,
+                    stop_check=lambda: not self._running,
+                )
+                return
+        except Exception:
+            pass
+        time.sleep(seconds)
+
     def _proactive_hive_tick(self):
         """Proactive hive daemon tick — exploration, self-promotion, and compute optimization.
 
@@ -352,14 +375,18 @@ class AgentDaemon:
 
     def _loop(self):
         while self._running:
-            # Exponential backoff: sleep longer on consecutive failures
+            # Exponential backoff: sleep longer on consecutive failures.
+            # Uses sleep_with_heartbeat so the backoff can't age the
+            # watchdog heartbeat past the frozen threshold — a 480s
+            # backoff used to trigger a restart cascade because the
+            # 300s threshold hit mid-sleep (2026-04-11 incident).
             if self._consecutive_failures > 0:
                 backoff = min(
                     self._interval * (2 ** self._consecutive_failures),
                     self._BACKOFF_MAX)
-                time.sleep(backoff)
+                self._wd_sleep(backoff)
             else:
-                time.sleep(self._interval)
+                self._wd_sleep(self._interval)
             if not self._running:
                 break
             self._wd_heartbeat()

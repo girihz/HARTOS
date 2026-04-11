@@ -144,6 +144,67 @@ class NodeWatchdog:
                 info.in_llm_call = False
                 info.llm_call_started_at = None
 
+    def sleep_with_heartbeat(
+        self,
+        name: str,
+        total_seconds: float,
+        chunk_seconds: float = 10.0,
+        stop_check: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        """Sleep for ``total_seconds`` while keeping the daemon's heartbeat fresh.
+
+        Background daemons freeze the watchdog when a single ``time.sleep``
+        or ``time.sleep + blocking call`` exceeds ``expected_interval *
+        frozen_multiplier`` (default 300s for a 30s interval). The
+        exponential-backoff path in agent_daemon / coding_daemon could
+        issue ``time.sleep(480)`` on its 4th consecutive failure, which
+        aged the heartbeat past the 300s threshold and triggered a
+        restart CASCADE — the exact symptom in 2026-04-11 langchain.log
+        (9 restarts of auto_discovery, agent_daemon, coding_daemon in a
+        single session).
+
+        This helper breaks the sleep into short chunks (default 10s each)
+        and calls :meth:`heartbeat` after every chunk, so:
+
+          - A 30s sleep produces 3 heartbeats.
+          - A 480s backoff produces 48 heartbeats, none aged past 10s.
+          - The watchdog sees the thread as healthy throughout the sleep.
+
+        If ``stop_check`` is provided, the sleep exits early when it
+        returns True — this lets callers shut down cleanly without
+        waiting for the full duration.
+
+        The helper is a no-op when ``name`` isn't registered (during
+        tests or when the watchdog isn't running) so daemons can use it
+        unconditionally without guarding on ``get_watchdog() is not None``.
+
+        Args:
+            name: Thread name registered via :meth:`register`.
+            total_seconds: Total wall-clock time to sleep.
+            chunk_seconds: Size of each sleep chunk. Keep this below
+                ``expected_interval`` so the heartbeat stays fresh.
+                10s is a good default for the standard 30s daemon
+                interval (3× headroom against the 300s frozen threshold).
+            stop_check: Optional callable that returns True to exit
+                the sleep early. Called between chunks.
+        """
+        if total_seconds <= 0:
+            self.heartbeat(name)
+            return
+        end = time.monotonic() + total_seconds
+        # Guarantee at least one heartbeat at the start so callers that
+        # were blocked before calling sleep_with_heartbeat reset their age.
+        self.heartbeat(name)
+        while True:
+            if stop_check is not None and stop_check():
+                return
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return
+            chunk = min(chunk_seconds, remaining)
+            time.sleep(chunk)
+            self.heartbeat(name)
+
     def start(self) -> None:
         """Start the watchdog background thread. Call LAST after all daemons."""
         with self._lock:

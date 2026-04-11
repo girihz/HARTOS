@@ -275,17 +275,10 @@ class ModelLifecycleManager:
 
     def _loop(self):
         while self._running:
-            time.sleep(self._interval)
+            self._wd_sleep(self._interval)
             if not self._running:
                 break
-            # Heartbeat to watchdog
-            try:
-                from security.node_watchdog import get_watchdog
-                wd = get_watchdog()
-                if wd:
-                    wd.heartbeat('model_lifecycle')
-            except Exception:
-                pass
+            self._wd_heartbeat()
             try:
                 self._tick()
             except Exception as e:
@@ -300,6 +293,31 @@ class ModelLifecycleManager:
                 wd.heartbeat('model_lifecycle')
         except Exception:
             pass
+
+    def _wd_sleep(self, seconds: float) -> None:
+        """Sleep while keeping the model_lifecycle heartbeat fresh.
+
+        Delegates to ``NodeWatchdog.sleep_with_heartbeat``. The
+        2026-04-11 incident showed model_lifecycle frozen for 3606s
+        (exactly one hour) — the investigation points at
+        _report_to_federation or a nvidia-smi subprocess hang inside
+        one of the 13 tick phases, but the sleep path is also a
+        candidate whenever HEVOLVE_MODEL_LIFECYCLE_INTERVAL is set
+        above the 300s frozen threshold. Using this helper collapses
+        both problem classes to one primitive.
+        """
+        try:
+            from security.node_watchdog import get_watchdog
+            wd = get_watchdog()
+            if wd is not None:
+                wd.sleep_with_heartbeat(
+                    'model_lifecycle', seconds,
+                    stop_check=lambda: not self._running,
+                )
+                return
+        except Exception:
+            pass
+        time.sleep(seconds)
 
     def _tick(self):
         """Single lifecycle pass with heartbeat checkpoints between phases."""
@@ -342,12 +360,20 @@ class ModelLifecycleManager:
 
         # Phase 7: Background idle eviction
         self._evict_idle_models()
+        self._wd_heartbeat()
 
         # Phase 8: Apply hive hints (every 4th tick, ~60s)
         if self._tick_count % 4 == 0:
             self._apply_hive_hints()
+            self._wd_heartbeat()
 
-        # Phase 9: Report to federation (every 6th tick, ~90s)
+        # Phase 9: Report to federation (every 6th tick, ~90s).
+        # Investigation found this the most likely culprit for the
+        # 1-hour model_lifecycle freeze in the 2026-04-11 incident —
+        # the federation HTTP call had no explicit timeout and could
+        # hang indefinitely on a dead remote. Heartbeat immediately
+        # afterwards so a slow (but not infinite) call doesn't bleed
+        # into phases 10-13.
         if self._tick_count % 6 == 0:
             self._report_to_federation()
         self._wd_heartbeat()
@@ -358,9 +384,11 @@ class ModelLifecycleManager:
 
         # Phase 11: Process pending crash restarts (with backoff)
         self._process_restart_queue()
+        self._wd_heartbeat()
 
         # Phase 12: Swap queue — restore evicted models when space frees up
         self._process_swap_queue()
+        self._wd_heartbeat()
 
         # Phase 13: Pressure alerts to frontend (debounced)
         self._emit_pressure_alerts()
