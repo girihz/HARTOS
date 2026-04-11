@@ -161,6 +161,51 @@ class ModelOrchestrator:
             return None
         return self.load(entry.id)
 
+    def ensure_loaded_async(self, model_type: str,
+                            language: Optional[str] = None,
+                            caller: str = 'unknown',
+                            **kwargs) -> None:
+        """Fire-and-forget wrapper around auto_load().
+
+        THE single "bring me a model that can do X" entry point for
+        every caller (chat fallback on cold LLM, TTS synth on cold
+        engine, VLM request on cold vision, etc.). Replaces the old
+        pattern where each model type had its own starter helper
+        (LlamaConfig.ensure_running_async, tts_engine._switch_backend,
+        …) — all of them did select_best → load under different names.
+
+        Capability/task hints flow through **kwargs to select_best so
+        language routing, voice_clone, emotion_tags, narration etc.
+        all funnel into the same selection logic the catalog already
+        indexes. No parallel path.
+
+        Runs in a daemon thread so the caller returns immediately.
+        Exceptions never escape — the caller already sent its
+        response and this runs in the background.
+        """
+        import threading
+
+        def _worker():
+            try:
+                entry = self.auto_load(model_type, language=language, **kwargs)
+                if entry:
+                    logger.info(
+                        f'ensure_loaded_async: loaded {entry.id} '
+                        f'on {entry.device} (type={model_type}, caller={caller})'
+                    )
+                else:
+                    logger.warning(
+                        f'ensure_loaded_async: no {model_type} fit '
+                        f'(caller={caller})'
+                    )
+            except Exception as e:
+                logger.error(f'ensure_loaded_async: worker crashed: {e}')
+
+        threading.Thread(
+            target=_worker, daemon=True,
+            name=f'ensure_loaded_{model_type}',
+        ).start()
+
     def load(self, model_id: str) -> Optional[ModelEntry]:
         """Load a specific model by ID. Downloads if needed."""
         entry = self._catalog.get(model_id)
