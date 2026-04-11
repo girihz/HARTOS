@@ -312,37 +312,72 @@ def _execute_inprocess(action: dict) -> dict:
                 return {'output': '', 'error': str(e)}
 
         elif act == 'open_file_gui':
-            path = action.get('path', '')
-            os.startfile(path)
-            return {'output': f'Opened {path}'}
+            # Open a file / app in the OS default handler. On Windows this is
+            # os.startfile (uses ShellExecute). On Linux/Mac the equivalent is
+            # `xdg-open` / `open`, which aren't available as a Python API —
+            # route through the shell handler so the same denylist applies.
+            path = action.get('path', '') or text
+            if not path:
+                return {'output': '', 'error': 'open_file_gui needs a path'}
+            if sys.platform == 'win32':
+                try:
+                    os.startfile(path)  # type: ignore[attr-defined]
+                    return {'output': f'Opened {path}'}
+                except OSError as e:
+                    return {'output': '', 'error': f'open_file_gui failed: {e}'}
+            # Non-Windows: delegate to shell so we reuse the denylist
+            shell_cmd = (
+                f'open {path}' if sys.platform == 'darwin' else f'xdg-open {path}'
+            )
+            try:
+                from hart_intelligence_entry import _handle_shell_command_tool
+            except ImportError as e:
+                return {
+                    'output': '',
+                    'error': f'open_file_gui unavailable: {e}',
+                    'status': 'error',
+                }
+            result_text = _handle_shell_command_tool(shell_cmd)
+            ok = isinstance(result_text, str) and result_text.startswith('Exit code: 0')
+            return {
+                'output': result_text,
+                'status': 'ok' if ok else 'error',
+            }
 
         elif act == 'shell':
-            # Deterministic command execution inside the VLM loop. Reuses
-            # hart_intelligence_entry._handle_shell_command_tool so the same
-            # denylist + timeout + truncation apply — single code path.
+            # Deterministic command execution inside the VLM loop. The ONLY
+            # implementation lives in hart_intelligence_entry._handle_shell_command_tool
+            # so the denylist + timeout + truncation + shell-selector parsing all
+            # apply identically to Shell_Command and this VLM-emitted action. If
+            # that import fails (stripped frozen build / circular import), we
+            # fail CLOSED rather than falling back to a bare subprocess.run —
+            # a bare fallback would skip the denylist and expose a command
+            # injection channel that silently weakens safety posture.
             cmd = action.get('command', text)
             if not cmd:
                 return {'output': '', 'error': 'shell action needs command string'}
             try:
                 from hart_intelligence_entry import _handle_shell_command_tool
-                result_text = _handle_shell_command_tool(cmd)
-                # Output is already "Exit code: N\n<body>"; treat non-zero as
-                # non-fatal (VLM can decide what to do next) but surface it.
-                is_error = 'Exit code: 0' not in (result_text or '')
-                return {'output': result_text, 'status': 'error' if is_error else 'ok'}
-            except ImportError:
-                # Fallback: direct subprocess with same safety posture
-                import subprocess as _sp
-                argv = (['cmd', '/c', cmd] if sys.platform == 'win32'
-                        else ['/bin/sh', '-c', cmd])
-                try:
-                    proc = _sp.run(argv, capture_output=True, text=True, timeout=30)
-                    body = (proc.stdout or '')[:2000]
-                    if proc.stderr:
-                        body += f'\n[stderr]\n{proc.stderr[:2000]}'
-                    return {'output': f'Exit code: {proc.returncode}\n{body}'}
-                except _sp.TimeoutExpired:
-                    return {'output': '', 'error': 'shell: timeout after 30s'}
+            except ImportError as e:
+                return {
+                    'output': '',
+                    'error': (
+                        f"shell action unavailable: {e}. Refusing to run "
+                        "without the shared denylist."
+                    ),
+                    'status': 'error',
+                }
+            result_text = _handle_shell_command_tool(cmd)
+            # _handle_shell_command_tool returns 'Exit code: N\n<body>' on
+            # success and 'Shell_Command refused: ...' / 'Shell_Command error: ...'
+            # on refusal or failure. Classify anything other than a clean
+            # 'Exit code: 0' prefix as a non-success so the VLM loop's
+            # consecutive-action-error counter can back off.
+            ok = isinstance(result_text, str) and result_text.startswith('Exit code: 0')
+            return {
+                'output': result_text,
+                'status': 'ok' if ok else 'error',
+            }
 
         elif act == 'Open_file_and_copy_paste':
             src = action.get('source_path', '')

@@ -1287,25 +1287,29 @@ class TestComputerUseLocalLoop:
            return_value='img')
     def test_loop_respects_timeout(self, mock_ss, mock_parse,
                                     mock_llm, mock_exec, mock_sleep):
-        """max_ETA_in_seconds exceeded → early exit."""
-        call_count = [0]
+        """max_ETA_in_seconds exceeded → early exit.
 
-        def slow_llm(*args, **kwargs):
-            call_count[0] += 1
-            return json.dumps({
-                'Reasoning': 'working', 'Next Action': 'wait',
-                'Status': 'IN_PROGRESS',
-            })
+        Windows time.time() has ~15ms resolution; with every real op
+        mocked to instant the loop finishes in <15ms and time.time()
+        returns the same value every iteration, so `elapsed > 0` never
+        fires and the test flakes. Mock local_loop.time.time to advance
+        deterministically — real runs don't hit this because screenshots
+        and LLM calls take seconds each.
+        """
+        mock_llm.return_value = json.dumps({
+            'Reasoning': 'working', 'Next Action': 'wait',
+            'Status': 'IN_PROGRESS',
+        })
 
-        mock_llm.side_effect = slow_llm
+        # First call = start_time (t=0), subsequent = +0.5s per iteration
+        advancing = iter([0.0] + [0.5 * i for i in range(1, 200)])
         from integrations.vlm.local_loop import run_local_agentic_loop
-        # Set max_eta=0 so it times out immediately on second iteration
-        result = run_local_agentic_loop(
-            self._make_message(max_eta=0), tier='inprocess', max_iterations=100)
-        # Should exit much earlier than 100 iterations
+        with patch('integrations.vlm.local_loop.time.time',
+                   side_effect=lambda: next(advancing)):
+            result = run_local_agentic_loop(
+                self._make_message(max_eta=0),
+                tier='inprocess', max_iterations=100)
         assert len(result['extracted_responses']) < 100
-        # Exit reason must be 'timeout' and status 'incomplete' so the
-        # router doesn't confidently claim success on a timed-out run.
         assert result['status'] == 'incomplete'
         assert result['exit_reason'] == 'timeout'
 

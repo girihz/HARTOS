@@ -1459,79 +1459,132 @@ class TestFullActionLoop:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Win+R Fast-Path Tests (local_loop.py)
+# VLM deterministic-action tests (local_loop.py)
+#
+# The VLM's prompt lists `shell` and `open_file_gui` alongside clicks so the
+# model can launch apps / run commands WITHOUT visual grounding when the
+# task is expressible that way. These tests verify the action payloads are
+# built correctly so the existing local_computer_tool executor runs them.
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestWinRFastPath:
-    """Verify 'open [app]' on Windows deterministically uses Win+R instead
-    of trusting the VLM to ground Start menu tiles (which hallucinates)."""
+class TestVLMDeterministicActions:
+    """When the VLM emits `shell` or `open_file_gui`, _build_action_payload
+    must pass command/path through so the existing SUPPORTED_ACTIONS
+    executor handles them — no shortcut layer, no parallel code path."""
 
-    @patch('integrations.vlm.local_loop.platform.system', return_value='Windows')
-    @patch('integrations.vlm.local_computer_tool.execute_action')
-    def test_open_notepad_uses_winr(self, mock_execute, mock_platform):
-        """'open notepad' should take the fast path: Win+R → notepad → Enter."""
-        # Reload local_loop so module-level _os_name picks up the Windows patch
-        import importlib, integrations.vlm.local_loop as ll
-        importlib.reload(ll)
-        mock_execute.return_value = {"output": "ok", "status": "success"}
-
-        message = {
-            "instruction_to_vlm_agent": "open notepad",
-            "user_id": "u",
-            "prompt_id": "p",
-            "max_ETA_in_seconds": 300,
+    def test_shell_action_payload_includes_command(self):
+        from integrations.vlm.local_loop import _build_action_payload
+        action_json = {
+            'Next Action': 'shell',
+            'command': 'notepad',
+            'Reasoning': 'Launch notepad directly',
         }
-        result = ll.run_local_agentic_loop(message, tier='inprocess', max_iterations=10)
+        payload = _build_action_payload(action_json, parsed_screen={})
+        assert payload['action'] == 'shell'
+        assert payload['command'] == 'notepad'
 
-        assert result['status'] == 'success'
-        assert result['exit_reason'] == 'done'
-        # Three actions: Win+R hotkey, type 'notepad', Enter
-        assert mock_execute.call_count == 3
-        call_actions = [c.args[0]['action'] for c in mock_execute.call_args_list]
-        assert call_actions == ['hotkey', 'type', 'key']
-        # First call was win+r
-        assert mock_execute.call_args_list[0].args[0]['value'] == 'win+r'
-        # Second call typed the executable
-        assert mock_execute.call_args_list[1].args[0]['value'] == 'notepad'
-        # Third call pressed Enter
-        assert mock_execute.call_args_list[2].args[0]['value'] == 'enter'
+    def test_open_file_gui_payload_includes_path(self):
+        from integrations.vlm.local_loop import _build_action_payload
+        action_json = {
+            'Next Action': 'open_file_gui',
+            'path': 'notepad',
+            'Reasoning': 'Open notepad via Windows shell handler',
+        }
+        payload = _build_action_payload(action_json, parsed_screen={})
+        assert payload['action'] == 'open_file_gui'
+        assert payload['path'] == 'notepad'
 
-    @patch('integrations.vlm.local_loop.platform.system', return_value='Windows')
-    @patch('integrations.vlm.local_computer_tool.execute_action')
-    def test_open_calc_maps_to_calc_exe(self, mock_execute, mock_platform):
-        """'open calculator' → Win+R → calc (maps to the executable name)."""
-        import importlib, integrations.vlm.local_loop as ll
-        importlib.reload(ll)
-        mock_execute.return_value = {"output": "ok", "status": "success"}
+    def test_shell_is_in_supported_actions(self):
+        """The loop's 'shell' action must exist in the executor's allow-list
+        so no parallel code path is needed to run it."""
+        from integrations.vlm.local_computer_tool import SUPPORTED_ACTIONS
+        assert 'shell' in SUPPORTED_ACTIONS
+        assert 'open_file_gui' in SUPPORTED_ACTIONS
 
-        result = ll.run_local_agentic_loop({
-            "instruction_to_vlm_agent": "open the calculator",
-            "user_id": "u", "prompt_id": "p", "max_ETA_in_seconds": 300,
-        }, tier='inprocess', max_iterations=10)
+    def test_shell_action_delegates_to_shell_command_handler(self):
+        """_execute_inprocess with action='shell' MUST delegate to
+        hart_intelligence_entry._handle_shell_command_tool — the single
+        handler for denylist + timeout + output truncation. Any parallel
+        subprocess path is a security regression."""
+        from integrations.vlm.local_computer_tool import _execute_inprocess
+        with patch('hart_intelligence_entry._handle_shell_command_tool',
+                   return_value='Exit code: 0\nok') as mock_handler:
+            result = _execute_inprocess({'action': 'shell', 'command': 'echo hi'})
+        mock_handler.assert_called_once_with('echo hi')
+        assert result['output'].startswith('Exit code: 0')
+        assert result['status'] == 'ok'
 
-        assert result['exit_reason'] == 'done'
-        assert mock_execute.call_args_list[1].args[0]['value'] == 'calc'
+    def test_shell_action_missing_command_returns_error(self):
+        from integrations.vlm.local_computer_tool import _execute_inprocess
+        result = _execute_inprocess({'action': 'shell'})
+        assert 'error' in result
+        assert 'command' in result['error'].lower()
 
-    @patch('integrations.vlm.local_loop.platform.system', return_value='Linux')
-    @patch('integrations.vlm.local_computer_tool.execute_action')
-    def test_open_notepad_skips_winr_on_linux(self, mock_execute, mock_platform):
-        """Fast path is Windows-only — Linux 'open notepad' falls through
-        to the normal VLM loop."""
-        import importlib, integrations.vlm.local_loop as ll
-        importlib.reload(ll)
-        # make the VLM loop exit immediately by having take_screenshot fail
-        with patch('integrations.vlm.local_computer_tool.take_screenshot',
-                   side_effect=Exception('stub')):
-            result = ll.run_local_agentic_loop({
-                "instruction_to_vlm_agent": "open notepad",
-                "user_id": "u", "prompt_id": "p", "max_ETA_in_seconds": 5,
-            }, tier='inprocess', max_iterations=3)
-        # Fast path did NOT fire (Linux), so no Win+R hotkey calls
-        assert not any(
-            c.args[0].get('action') == 'hotkey' and c.args[0].get('value') == 'win+r'
-            for c in mock_execute.call_args_list
-        )
+    def test_shell_action_nonzero_exit_is_error(self):
+        """Non-zero exit from the handler flips status to 'error' so
+        the loop's consecutive-error counter can back off."""
+        from integrations.vlm.local_computer_tool import _execute_inprocess
+        with patch('hart_intelligence_entry._handle_shell_command_tool',
+                   return_value='Exit code: 1\nsomething went wrong'):
+            result = _execute_inprocess({'action': 'shell', 'command': 'false'})
+        assert result['status'] == 'error'
+
+    def test_shell_action_denylist_refusal_is_error(self):
+        """If the handler refuses the command (denylist match), we must
+        surface it as an error, not a success."""
+        from integrations.vlm.local_computer_tool import _execute_inprocess
+        with patch('hart_intelligence_entry._handle_shell_command_tool',
+                   return_value='Shell_Command refused: destructive pattern'):
+            result = _execute_inprocess({'action': 'shell', 'command': 'rm -rf /'})
+        assert result['status'] == 'error'
+        assert 'refused' in result['output'].lower()
+
+    def test_shell_action_fails_closed_on_import_error(self):
+        """If hart_intelligence_entry can't be imported we MUST fail
+        closed — no bare subprocess fallback that skips the denylist.
+        Regression guard: previously the code had a fallback that ran
+        the command without any safety checks at all."""
+        from integrations.vlm import local_computer_tool
+        real_import = __builtins__['__import__'] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+        def broken_import(name, *args, **kwargs):
+            if name == 'hart_intelligence_entry':
+                raise ImportError('simulated')
+            return real_import(name, *args, **kwargs)
+
+        with patch('builtins.__import__', side_effect=broken_import):
+            result = local_computer_tool._execute_inprocess(
+                {'action': 'shell', 'command': 'echo hi'}
+            )
+        assert 'error' in result
+        assert 'unavailable' in result['error'].lower()
+        assert result.get('status') == 'error'
+
+    def test_open_file_gui_empty_path_returns_error(self):
+        from integrations.vlm.local_computer_tool import _execute_inprocess
+        result = _execute_inprocess({'action': 'open_file_gui'})
+        assert 'error' in result
+        assert 'path' in result['error'].lower()
+
+    def test_vlm_action_list_shared_by_legacy_and_unified(self):
+        """Both the legacy SYSTEM_PROMPT and the unified combined_prompt
+        must advertise shell + open_file_gui + prefer-deterministic guidance.
+        Previously only the unified branch did — non-unified runs hit the
+        old action list and never learned the fast path."""
+        from integrations.vlm import local_loop
+        # Single source of truth must list both deterministic actions
+        assert 'shell' in local_loop._VLM_ACTION_LIST
+        assert 'open_file_gui' in local_loop._VLM_ACTION_LIST
+        assert 'PREFER' in local_loop._VLM_ACTION_LIST
+        # SYSTEM_PROMPT must embed the shared list so legacy branch sees them
+        assert local_loop._VLM_ACTION_LIST in local_loop.SYSTEM_PROMPT
+        # And the unified combined_prompt in run_local_agentic_loop must
+        # embed it too — regression guard against someone re-forking the
+        # action list inside the function body.
+        import inspect
+        src = inspect.getsource(local_loop.run_local_agentic_loop)
+        assert '_VLM_ACTION_LIST' in src
 
 
 # ═══════════════════════════════════════════════════════════════════════════
