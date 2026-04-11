@@ -1420,12 +1420,14 @@ def get_frame(user_id, frame_store=None):
                     f"Frame for user_id {user_id} from injected FrameStore")
                 return frame[:, :, ::-1]  # BGR → RGB
 
-    # Primary: FrameStore via VisionService (in-process, zero latency)
+    # Primary: FrameStore via get_frame_store (in-process, zero latency).
+    # Go through the helper so there's one accessor for the store, not
+    # `get_vision_service().store` reach-ins scattered across files.
     try:
-        from hart_intelligence import get_vision_service
-        svc = get_vision_service()
-        if svc:
-            frame_bytes = svc.store.get_frame(str(user_id))
+        from hart_intelligence import get_frame_store
+        fs = get_frame_store()
+        if fs is not None:
+            frame_bytes = fs.get_frame(str(user_id))
             if frame_bytes is not None:
                 import cv2
                 frame = cv2.imdecode(

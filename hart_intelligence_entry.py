@@ -1358,7 +1358,7 @@ def _wire_vision_to_learning():
     try:
         if hasattr(_learning_provider, 'start_video_learning'):
             _learning_provider.start_video_learning(
-                frame_store=svc.store,
+                frame_store=get_frame_store(),
                 frame_store_user_id='default',
             )
             _logger.info(
@@ -4336,10 +4336,14 @@ except Exception:
 
 def get_frame(user_id):
     """Get latest camera frame — FrameStore first, screenshot fallback, Redis last."""
-    # Primary: FrameStore (in-process, zero latency)
-    svc = get_vision_service()
-    if svc:
-        frame_bytes = svc.store.get_frame(str(user_id))
+    # Primary: FrameStore (in-process, zero latency). Go through
+    # get_frame_store() rather than get_vision_service().store so
+    # every frame-store access funnels through a single accessor —
+    # if tomorrow we move the store behind a proxy/cache/adapter, we
+    # change one helper, not three reach-ins.
+    fs = get_frame_store()
+    if fs is not None:
+        frame_bytes = fs.get_frame(str(user_id))
         if frame_bytes is not None:
             import cv2
             frame = cv2.imdecode(
@@ -6837,6 +6841,27 @@ def health_readiness():
         checks['llm_backend'] = backend_info.get('backend', 'unknown')
     except Exception:
         checks['llm_backend'] = 'unavailable'
+
+    # Check 5: Vision frame store (optional — reports nothing if vision is off)
+    try:
+        fs = get_frame_store()
+        if fs is None:
+            checks['vision_frame_store'] = 'unavailable'
+        else:
+            stats = fs.stats() if hasattr(fs, 'stats') else {}
+            checks['vision_frame_store'] = stats or 'ok'
+    except Exception as e:
+        checks['vision_frame_store'] = f'fail: {e}'
+
+    # Check 6: Diarization sidecar (optional — reports nothing if disabled)
+    try:
+        diar = get_diarization_service()
+        if diar is None:
+            checks['diarization'] = 'unavailable'
+        else:
+            checks['diarization'] = 'ready' if diar.is_ready() else 'starting'
+    except Exception as e:
+        checks['diarization'] = f'fail: {e}'
 
     status_code = 200 if all_ok else 503
     return jsonify({
