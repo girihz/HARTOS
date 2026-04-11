@@ -592,7 +592,7 @@ def get_message_hash(content, request_id):
     hash_input = f"{request_id}:{content}"
     return hashlib.md5(hash_input.encode()).hexdigest()[:10]
 
-def get_action_user_details(user_id, query: str = ''):
+def get_action_user_details(user_id):
     """Thin delegate to the canonical ``core.user_context`` resolver.
 
     The reuse_recipe flow runs during PRODUCTION chat where the prompt
@@ -602,12 +602,13 @@ def get_action_user_details(user_id, query: str = ''):
     resolver. Three inline copies of this function previously drifted
     across hart_intelligence_entry, create_recipe, and reuse_recipe —
     consolidation into ``core.user_context.get_user_context`` gives
-    one source of truth plus greeting short-circuit + TTL cache +
-    1.5s hot-path budget for free. See the 2026-04-11 "hi took 33.8s"
-    post-mortem for the motivation.
+    one source of truth plus TTL cache + 1.5s hot-path budget for
+    free. See the 2026-04-11 "hi took 33.8s" post-mortem for the
+    motivation. No Python-side classification of the user's message
+    — the draft 0.8B model owns that responsibility.
     """
     from core.user_context import get_user_context
-    return get_user_context(user_id=user_id, mode='reuse', query=query)
+    return get_user_context(user_id=user_id, mode='reuse')
 
 
 def visual_based_execution(task_description: str, user_id: int, prompt_id: int):
