@@ -285,6 +285,7 @@ class SpeculativeDispatcher:
             'draft_model': draft_model.model_id,
             'delegate': delegate,
             'draft_confidence': confidence,
+            'is_correction': bool(parsed.get('is_correction', False)),
             'expert_pending': expert_pending,
             'latency_ms': round(draft_latency_ms, 1),
             'energy_kwh': round(
@@ -339,19 +340,28 @@ class SpeculativeDispatcher:
         return (
             persona_block
             + "You are a fast local first-responder. Reply to the user in a "
-            "short helpful way, and ALSO decide whether a bigger model "
-            "should take over.\n\n"
+            "short helpful way, AND decide whether a bigger model should "
+            "take over, AND classify whether the user is correcting a "
+            "previous assistant response.\n\n"
             f"User: {user_prompt}\n\n"
             "Respond with ONE JSON object on a single line and NOTHING else:\n"
             '{"reply": "<your short reply to the user, 1-3 sentences>", '
             '"delegate": "none" OR "local" OR "hive", '
             '"confidence": <float 0-1>, '
+            '"is_correction": true OR false, '
             '"reason": "<why you chose this delegate value>"}\n\n'
             "Use delegate=\"none\" for greetings, small-talk, or anything you "
             "can fully answer yourself. Use \"local\" if the request needs "
             "tools, code, reasoning, or multi-step work the 4B model can "
             "handle. Use \"hive\" if it needs large-model expertise, "
-            "long-context research, or specialized skill distribution."
+            "long-context research, or specialized skill distribution.\n\n"
+            "Set is_correction=true when the user is telling you something "
+            "in the previous assistant turn was wrong, incorrect, or "
+            "inaccurate, or when they're restating what they actually meant "
+            "(e.g. 'no that's wrong', 'actually, I meant X', 'not quite', "
+            "'you got it wrong'). Otherwise set is_correction=false. This "
+            "flag routes the message into the hive's real-time learning "
+            "pipeline, so be accurate — prefer false when unsure."
         )
 
     def _track_call_telemetry(

@@ -5463,6 +5463,7 @@ def chat():
                     'delegate': result.get('delegate'),
                     'draft_model': result.get('draft_model'),
                     'draft_confidence': result.get('draft_confidence'),
+                    'is_correction': bool(result.get('is_correction', False)),
                     'latency_ms': result.get('latency_ms'),
                 })
         except ImportError:
