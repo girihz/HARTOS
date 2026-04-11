@@ -648,3 +648,128 @@ def test_ft15_idle_timer_stops_after_final_call_then_wait():
         assert t._worker is None, 'worker should be stopped by idle timer'
     finally:
         t.stop()
+
+
+def test_ft20_pythonpath_propagates_parent_syspath():
+    """Regression for the TTS refactor bug.
+
+    Before subprocess isolation (commit dce4b31), TTS engines ran in-process
+    and inherited Nunba's runtime sys.path mutations automatically — including
+    the ~/.nunba/site-packages/ prepend in app.py:97 that holds CUDA torch,
+    regex, transformers, parler_tts. After the refactor, spawned subprocess
+    workers booted fresh from python-embed's default path and all
+    transformers-based engines crashed on `import regex`.
+
+    This test locks in the fix: every subprocess spawn must carry the
+    parent's current sys.path via PYTHONPATH so the child sees the same
+    package dirs the parent does. Verifies by inspecting the env argument
+    passed to subprocess.Popen when GPUWorker._spawn() runs."""
+    from unittest.mock import patch, MagicMock
+
+    # Create a worker without starting it
+    w = GPUWorker(
+        name='path_test',
+        module=DISPATCHER,
+        args=[ECHO_MODULE],
+        startup_timeout=2.0,
+        request_timeout=2.0,
+    )
+
+    captured_env = {}
+
+    class _FakeProc:
+        def __init__(self, *a, **kw):
+            captured_env.update(kw.get('env', {}))
+            self.stdin = MagicMock()
+            self.stdout = MagicMock()
+            self.stderr = MagicMock()
+            self.returncode = None
+
+        def poll(self):
+            return None  # pretend still running
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    with patch('subprocess.Popen', side_effect=_FakeProc), \
+         patch.object(w, '_wait_ready'):
+        try:
+            w.start()
+        except Exception:
+            # _wait_ready is patched so start() should complete cleanly
+            pass
+
+    # PYTHONPATH must be set and must contain a real dir from parent sys.path
+    assert 'PYTHONPATH' in captured_env, \
+        'spawn env missing PYTHONPATH — parent sys.path not propagated'
+    pathsep = os.pathsep
+    child_paths = captured_env['PYTHONPATH'].split(pathsep)
+
+    # Every child entry must be a real directory (no empty / stale entries)
+    for p in child_paths:
+        assert os.path.isdir(p), \
+            f'PYTHONPATH contains non-dir entry {p!r}'
+
+    # At least one parent sys.path entry should appear in the child PYTHONPATH
+    parent_dirs = {p for p in sys.path if p and os.path.isdir(p)}
+    child_dirs = set(child_paths)
+    overlap = parent_dirs & child_dirs
+    assert overlap, (
+        'No parent sys.path entries made it to the child PYTHONPATH. '
+        'TTS engines (Indic Parler, Chatterbox, F5) will crash on '
+        '`import regex` in frozen builds. See commit dce4b31.'
+    )
+
+
+def test_ft21_pythonpath_preserves_caller_value():
+    """If caller set PYTHONPATH on the ToolWorker env, gpu_worker must
+    APPEND the parent sys.path to it rather than overwrite. Caller
+    intent wins for anything they explicitly set, parent paths fill in
+    the gaps."""
+    from unittest.mock import patch, MagicMock
+
+    w = GPUWorker(
+        name='path_preserve',
+        module=DISPATCHER,
+        args=[ECHO_MODULE],
+        startup_timeout=2.0,
+        request_timeout=2.0,
+        env={'PYTHONPATH': r'C:\caller\override'},
+    )
+
+    captured_env = {}
+
+    class _FakeProc:
+        def __init__(self, *a, **kw):
+            captured_env.update(kw.get('env', {}))
+            self.stdin = MagicMock()
+            self.stdout = MagicMock()
+            self.stderr = MagicMock()
+            self.returncode = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    with patch('subprocess.Popen', side_effect=_FakeProc), \
+         patch.object(w, '_wait_ready'):
+        try:
+            w.start()
+        except Exception:
+            pass
+
+    final = captured_env.get('PYTHONPATH', '')
+    assert r'C:\caller\override' in final, \
+        "caller's PYTHONPATH was dropped"
+    # And at least one parent dir still made it in
+    parent_dirs = [p for p in sys.path if p and os.path.isdir(p)]
+    assert any(p in final for p in parent_dirs), \
+        'parent sys.path not appended alongside caller override'

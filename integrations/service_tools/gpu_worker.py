@@ -347,11 +347,41 @@ class GPUWorker:
     # ── Internals ──────────────────────────────────────────────────
 
     def _spawn(self) -> None:
-        """Launch the subprocess."""
+        """Launch the subprocess.
+
+        IMPORTANT: propagates the parent process's current sys.path to the
+        child via PYTHONPATH. Before the subprocess-isolation refactor, TTS
+        engines ran in-process and inherited any runtime sys.path mutations
+        automatically (e.g. Nunba's app.py prepends ~/.nunba/site-packages/
+        where CUDA torch, regex, transformers, parler_tts actually live).
+        Spawned subprocesses boot fresh from the python binary's default
+        sys.path and can't see those entries — every transformers-based
+        worker then crashes on `import regex` / `import transformers`.
+        Fixing at the spawn layer means every worker (TTS, STT, VLM, any
+        future engine) benefits without each one re-implementing the same
+        path plumbing.
+        """
         env = os.environ.copy()
         env.update(self.env)
         # Unbuffered so stdout/stderr come through immediately
         env['PYTHONUNBUFFERED'] = '1'
+
+        # Propagate parent sys.path via PYTHONPATH so the child inherits
+        # runtime-added package dirs (e.g. ~/.nunba/site-packages for CUDA
+        # torch + TTS deps). Filter to existing dirs only — empty / stale
+        # entries can mask imports. Preserve an existing PYTHONPATH in env
+        # by appending our paths to the front (caller-set overrides last).
+        _extra_paths = [
+            p for p in sys.path
+            if p and os.path.isdir(p)
+        ]
+        if _extra_paths:
+            _existing = env.get('PYTHONPATH', '')
+            _joined = os.pathsep.join(_extra_paths)
+            if _existing:
+                env['PYTHONPATH'] = _joined + os.pathsep + _existing
+            else:
+                env['PYTHONPATH'] = _joined
 
         # Windows: don't pop a console window
         creationflags = 0
