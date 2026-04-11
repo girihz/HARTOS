@@ -1567,6 +1567,88 @@ class TestVLMDeterministicActions:
         assert 'error' in result
         assert 'path' in result['error'].lower()
 
+    def test_open_file_gui_windows_happy_path_calls_startfile(self):
+        """On Windows, open_file_gui delegates to os.startfile — verify it's
+        actually called with the path, not swallowed or redirected."""
+        from integrations.vlm import local_computer_tool as lct
+        with patch.object(lct.sys, 'platform', 'win32'), \
+             patch.object(lct.os, 'startfile', create=True) as mock_startfile:
+            result = lct._execute_inprocess(
+                {'action': 'open_file_gui', 'path': 'notepad'}
+            )
+        mock_startfile.assert_called_once_with('notepad')
+        assert 'Opened notepad' in result['output']
+
+    def test_open_file_gui_windows_oserror_surfaces_error(self):
+        """Missing file association / missing file / access denied → the
+        OSError must come back as a structured error dict, not an
+        unhandled exception that blows up the loop."""
+        from integrations.vlm import local_computer_tool as lct
+        with patch.object(lct.sys, 'platform', 'win32'), \
+             patch.object(lct.os, 'startfile', create=True,
+                          side_effect=OSError('no handler')):
+            result = lct._execute_inprocess(
+                {'action': 'open_file_gui', 'path': 'xyz.unknown'}
+            )
+        assert 'error' in result
+        assert 'no handler' in result['error']
+
+    def test_open_file_gui_macos_routes_through_shell_handler(self):
+        """On Darwin, open_file_gui delegates to `open <path>` via the
+        shared shell handler so the denylist + timeout + truncation all
+        apply. Single safety layer across platforms."""
+        from integrations.vlm import local_computer_tool as lct
+        with patch.object(lct.sys, 'platform', 'darwin'), \
+             patch('hart_intelligence_entry._handle_shell_command_tool',
+                   return_value='Exit code: 0\nok') as mock_handler:
+            result = lct._execute_inprocess(
+                {'action': 'open_file_gui', 'path': '/tmp/foo.pdf'}
+            )
+        mock_handler.assert_called_once()
+        assert mock_handler.call_args.args[0].startswith('open ')
+        assert '/tmp/foo.pdf' in mock_handler.call_args.args[0]
+        assert result['status'] == 'ok'
+
+    def test_open_file_gui_linux_routes_through_xdg_open(self):
+        """On Linux, open_file_gui delegates to `xdg-open <path>` via
+        the shared shell handler."""
+        from integrations.vlm import local_computer_tool as lct
+        with patch.object(lct.sys, 'platform', 'linux'), \
+             patch('hart_intelligence_entry._handle_shell_command_tool',
+                   return_value='Exit code: 0\nok') as mock_handler:
+            result = lct._execute_inprocess(
+                {'action': 'open_file_gui', 'path': '/home/u/doc.pdf'}
+            )
+        mock_handler.assert_called_once()
+        assert mock_handler.call_args.args[0].startswith('xdg-open ')
+        assert '/home/u/doc.pdf' in mock_handler.call_args.args[0]
+        assert result['status'] == 'ok'
+
+    def test_open_file_gui_nonwindows_fails_closed_on_import_error(self):
+        """If the shared shell handler can't be imported on non-Windows,
+        open_file_gui must fail closed — NO bare subprocess fallback that
+        would skip the denylist. Same regression guard as the shell action."""
+        from integrations.vlm import local_computer_tool as lct
+        real_import = (
+            __builtins__['__import__']
+            if isinstance(__builtins__, dict)
+            else __builtins__.__import__
+        )
+
+        def broken_import(name, *args, **kwargs):
+            if name == 'hart_intelligence_entry':
+                raise ImportError('simulated')
+            return real_import(name, *args, **kwargs)
+
+        with patch.object(lct.sys, 'platform', 'linux'), \
+             patch('builtins.__import__', side_effect=broken_import):
+            result = lct._execute_inprocess(
+                {'action': 'open_file_gui', 'path': '/home/u/doc.pdf'}
+            )
+        assert 'error' in result
+        assert 'unavailable' in result['error'].lower()
+        assert result.get('status') == 'error'
+
     def test_vlm_action_list_shared_by_legacy_and_unified(self):
         """Both the legacy SYSTEM_PROMPT and the unified combined_prompt
         must advertise shell + open_file_gui + prefer-deterministic guidance.
