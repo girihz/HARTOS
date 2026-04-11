@@ -841,55 +841,42 @@ class TestVLMAgentContextActions:
         assert 'not available' in result['message'].lower()
 
 
-class TestVLMAgentContextWindowsCommand:
-    """execute_windows_command() — multi-step Win+R flow."""
+class TestVLMAgentContextWindowsCommandRemoved:
+    """Regression guard: execute_windows_command was deleted — the unified
+    cross-OS entry point is create_recipe.execute_windows_or_android_command
+    which handles windows/linux/macos/android through one pipeline. A
+    Windows-only method with its own Win+R simulation, no denylist, no
+    NFKC normalization, and no timeout is exactly the shadow code the
+    dead-code sweep is removing. Any future commit that re-adds an
+    OS-specific execute_*_command variant to VLMAgentContext fails this
+    test so the reviewer catches the parallel path before it ships."""
 
-    @patch('integrations.vlm.vlm_agent_integration.pooled_post')
-    @patch('integrations.vlm.vlm_agent_integration.pooled_get')
-    def test_execute_windows_command(self, mock_get, mock_post):
-        """Windows command executes 4 steps: Win+R, wait, type, Return."""
-        mock_get.return_value = _make_health_ok()
-
-        mock_post_resp = MagicMock()
-        mock_post_resp.status_code = 200
-        mock_post_resp.json.return_value = {"status": "success", "output": "done"}
-        mock_post.return_value = mock_post_resp
-
+    def test_execute_windows_command_does_not_exist(self):
         from integrations.vlm.vlm_agent_integration import VLMAgentContext
         ctx = VLMAgentContext()
+        assert not hasattr(ctx, 'execute_windows_command'), (
+            "execute_windows_command is a Windows-only parallel path — "
+            "use create_recipe.execute_windows_or_android_command instead, "
+            "which is cross-OS and denylist-gated via _handle_shell_command_tool."
+        )
 
-        result = ctx.execute_windows_command("notepad")
-
-        assert result['status'] == 'success'
-        assert result['command'] == 'notepad'
-        assert len(result['results']) == 4  # hotkey, wait, type, hotkey
-
-        # 4 actions tracked in history
-        assert len(ctx.action_history) == 4
-
-    @patch('integrations.vlm.vlm_agent_integration.pooled_post')
-    @patch('integrations.vlm.vlm_agent_integration.pooled_get')
-    def test_execute_windows_command_step_failure(self, mock_get, mock_post):
-        """If any step fails, command returns error with partial results."""
-        mock_get.return_value = _make_health_ok()
-
-        # First call succeeds, second fails
-        success_resp = MagicMock()
-        success_resp.status_code = 200
-        success_resp.json.return_value = {"status": "success"}
-
-        fail_resp = MagicMock()
-        fail_resp.status_code = 200
-        fail_resp.json.return_value = {"status": "error", "message": "action failed"}
-
-        mock_post.side_effect = [success_resp, fail_resp]
-
+    def test_no_per_os_command_methods(self):
+        """SRP: VLMAgentContext must not grow execute_{os}_command methods.
+        One unified cross-OS entry point only."""
         from integrations.vlm.vlm_agent_integration import VLMAgentContext
-        ctx = VLMAgentContext()
-
-        result = ctx.execute_windows_command("calc")
-        assert result['status'] == 'error'
-        assert 'Failed at step' in result['message']
+        forbidden = (
+            'execute_windows_command',
+            'execute_linux_command',
+            'execute_macos_command',
+            'execute_android_command',
+            'execute_ios_command',
+        )
+        for name in forbidden:
+            assert not hasattr(VLMAgentContext, name), (
+                f"VLMAgentContext.{name} is a per-OS parallel path. "
+                f"Use create_recipe.execute_windows_or_android_command "
+                f"with os_to_control=... instead."
+            )
 
 
 class TestVLMAgentContextHistory:

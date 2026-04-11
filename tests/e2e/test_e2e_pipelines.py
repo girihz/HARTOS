@@ -1654,24 +1654,14 @@ class TestVLMAgentIntegrationBridge:
         assert result['visual_context']['has_screen_info'] is False
         assert 'not available' in result['visual_context']['note']
 
-    @patch('integrations.vlm.vlm_agent_integration.requests.post')
-    @patch('integrations.vlm.vlm_agent_integration.requests.get')
-    def test_execute_windows_command_steps(self, mock_get, mock_post):
-        """4-step Win+R sequence dispatched correctly."""
-        # VLM server available
-        mock_health = MagicMock()
-        mock_health.status_code = 200
-        mock_get.return_value = mock_health
-
-        # Each action succeeds
-        mock_action = MagicMock()
-        mock_action.status_code = 200
-        mock_action.json.return_value = {'status': 'success', 'output': 'ok'}
-        mock_post.return_value = mock_action
-
+    def test_execute_windows_command_removed(self):
+        """execute_windows_command was a Windows-only parallel Win+R path
+        (no denylist, no NFKC, no timeout) against the old OmniParser HTTP
+        server. Deleted in favor of the unified cross-OS
+        create_recipe.execute_windows_or_android_command which routes
+        through vlm_adapter → run_local_agentic_loop → shared `shell` /
+        `open_file_gui` actions for all four OSes. Regression guard
+        against any future commit that re-adds a per-OS method to
+        VLMAgentContext."""
         from integrations.vlm.vlm_agent_integration import VLMAgentContext
-        ctx = VLMAgentContext()
-        result = ctx.execute_windows_command('notepad')
-        assert result['status'] == 'success'
-        assert result['command'] == 'notepad'
-        assert len(result['results']) == 4  # hotkey, wait, type, hotkey
+        assert not hasattr(VLMAgentContext, 'execute_windows_command')
