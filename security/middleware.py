@@ -242,7 +242,20 @@ def _apply_api_auth(app: Flask):
             # still accept JWTs (useful for admin UI + k8s probes).
         auth_header = request.headers.get('Authorization', '')
         if auth_header.startswith('Bearer '):
-            return None
+            # Actually decode and verify the JWT — not just check the prefix.
+            # Without this, `Bearer garbage` passes the admin gate.
+            _token = auth_header[7:]
+            try:
+                from integrations.social.auth import decode_jwt
+                jwt_payload = decode_jwt(_token)
+                if jwt_payload:
+                    g.auth_source = 'jwt'
+                    g.jwt_payload = jwt_payload
+                    return None
+            except Exception:
+                pass
+            # Token invalid/expired — reject
+            return jsonify({'error': 'Invalid or expired Bearer token'}), 401
         if expected_key:
             logger.warning(f"Invalid/missing credential for {request.path}")
             return jsonify(
