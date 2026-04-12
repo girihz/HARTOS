@@ -374,6 +374,15 @@ class AgentDaemon:
             logger.debug(f"Proactive hive: compute optimizer check failed: {e}")
 
     def _loop(self):
+        # Boot grace period: let user chat have exclusive LLM access for 60s.
+        # Without this, daemon goals consume all llama-server slots immediately
+        # and user /chat requests timeout (the 2026-04-12 slot starvation bug).
+        _boot_grace = int(os.environ.get('HEVOLVE_DAEMON_BOOT_DELAY', '60'))
+        if _boot_grace > 0:
+            logger.info(f"Agent daemon: boot grace period {_boot_grace}s — "
+                        f"user chat gets priority. Set HEVOLVE_DAEMON_BOOT_DELAY=0 to disable.")
+            self._wd_sleep(_boot_grace)
+
         while self._running:
             # Exponential backoff: sleep longer on consecutive failures.
             # Uses sleep_with_heartbeat so the backoff can't age the

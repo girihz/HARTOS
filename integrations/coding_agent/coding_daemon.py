@@ -76,6 +76,12 @@ class CodingAgentDaemon:
         time.sleep(seconds)
 
     def _loop(self):
+        # Boot grace period: let user chat have exclusive LLM access
+        import os as _os
+        _boot_grace = int(_os.environ.get('HEVOLVE_DAEMON_BOOT_DELAY', '60'))
+        if _boot_grace > 0:
+            self._wd_sleep(_boot_grace)
+
         while self._running:
             self._wd_sleep(self._interval)
             if not self._running:
