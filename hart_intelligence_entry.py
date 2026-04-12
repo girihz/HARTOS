@@ -4776,7 +4776,7 @@ def get_ans(casual_conv, req_tool, user_id, query, custom_prompt, preferred_lang
     # Skip tool loading for casual_conv=True — the 0.8B draft handles
     # casual chat without tools, saving ~2.5s of tool registry loading.
     if casual_conv:
-        tools = ''
+        tools = []  # Empty list — prevents pydantic validation error in agent constructor
         app.logger.info("get_tools SKIPPED (casual_conv=True) — 0s")
     else:
         tools = get_tools(req_tool=req_tool, is_first=True)
