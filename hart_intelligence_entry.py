@@ -5440,6 +5440,21 @@ def chat():
         }), 401
 
     user_id = data.get('user_id', None)
+    # Sanitize user_id globally (not just JWT-mismatch branch) to prevent
+    # log injection via newlines/ANSI escapes in body-sourced user_id.
+    if user_id is not None:
+        import re as _re
+        user_id = _re.sub(r'[\x00-\x1f\x7f-\x9f]', '', str(user_id))[:64]
+        data['user_id'] = user_id
+
+    # Reject oversized prompts to prevent DoS (worker-pool starvation).
+    _prompt = data.get('prompt') or data.get('input_text') or ''
+    if len(_prompt) > 16384:
+        return jsonify({
+            'error': f'Prompt too large ({len(_prompt)} chars, max 16384).',
+            'response': None,
+        }), 413
+
     preferred_lang = data.get('preferred_lang', 'en')
 
     # Persist language preference so next startup warm-up loads the right TTS.
