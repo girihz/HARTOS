@@ -5224,6 +5224,25 @@ def _chat_reply(user_id, request_id, response_text: str, **payload):
         except Exception as e:
             # Never let a TTS failure block delivery of the text reply.
             app.logger.debug(f"_chat_reply: TTS dispatch skipped: {e}")
+
+        # Persist conversation turn to SimpleMem so multi-turn context works.
+        # prep_outputs (the normal LangChain path) never fires for casual_conv
+        # or draft-first early returns, so we save here — the ONE place every
+        # reply goes through. The user prompt comes via the 'user_prompt' kwarg
+        # from callers that have it (most /chat paths do).
+        try:
+            _prompt = payload.pop('user_prompt', '')
+            if _prompt and response_text:
+                _mem = get_memory(user_id=user_id)
+                if _mem and hasattr(_mem, 'save_context'):
+                    from langchain_classic.schema.messages import HumanMessage, AIMessage
+                    _mem.save_context(
+                        {'input': _prompt},
+                        {'output': response_text[:500]},
+                    )
+        except Exception as _mem_err:
+            app.logger.debug(f"_chat_reply: memory save skipped: {_mem_err}")
+
     payload['response'] = response_text
     return jsonify(payload)
 
@@ -5772,6 +5791,7 @@ def chat():
                         channel_connect=result.get('channel_connect', ''),
                         language_change=result.get('language_change', ''),
                         latency_ms=result.get('latency_ms'),
+                        user_prompt=prompt,
                     )
         except ImportError:
             pass
@@ -6366,6 +6386,7 @@ def chat():
         res_token_count=thread_local_data.get_res_token_count(),
         history_request_id=thread_local_data.get_reqid_list(),
         ui_actions=_ui_actions,
+        user_prompt=prompt,
         **_resonance,
     )
 
