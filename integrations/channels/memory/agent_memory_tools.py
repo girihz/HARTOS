@@ -300,7 +300,10 @@ def create_langchain_tools(
     try:
         from langchain.tools import StructuredTool
     except ImportError:
-        logger.warning("LangChain not available — cannot create LangChain tools")
+        # In bundled mode, LangChain may use langchain_classic which
+        # has StructuredTool under a different path. This is expected
+        # noise in the frozen build — log at DEBUG, not WARNING.
+        logger.debug("LangChain StructuredTool not available — memory tools skipped")
         return []
 
     tools = []

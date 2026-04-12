@@ -411,11 +411,24 @@ class GossipProtocol:
     def _announce_to_all(self):
         peers = self._load_peers_from_db(exclude_dead=False)
         urls = set(p['url'] for p in peers)
-        urls.update(self.seed_peers)
+        # Skip genesis/seed peers in flat mode — a single-user desktop
+        # has no reason to announce to central.hevolve.ai (which is
+        # unreachable offline anyway). Prevents the recurring
+        # 'NameResolutionError: Failed to resolve central.hevolve.ai'
+        # warnings that flood the logs every gossip interval. Regional
+        # and central tiers still announce to seeds for network bootstrap.
+        _tier = os.environ.get('HEVOLVE_NODE_TIER', 'flat')
+        if _tier != 'flat':
+            urls.update(self.seed_peers)
         for url in urls:
             if not self._running:
                 return
             if url != self.base_url:
+                # Skip peers that are currently backed off (exponential
+                # backoff from PeerBackoff). This prevents unnecessary
+                # DNS lookups for hosts that have been unreachable.
+                if self._is_peer_backed_off(url):
+                    continue
                 self._announce_to_peer(url)
                 self._heartbeat()
 

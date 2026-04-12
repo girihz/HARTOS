@@ -2585,11 +2585,21 @@ def _handle_request_resource(input_text: str) -> str:
 
 
 def _safe_load_google_search():
-    """Load google-search tool, returning empty list if package is missing."""
+    """Load google-search tool, returning empty list if package is missing.
+
+    In bundled/flat mode (NUNBA_BUNDLED=1 or HEVOLVE_NODE_TIER=flat),
+    the Google API key is expected to be missing — log at DEBUG instead
+    of WARNING so the log doesn't fill with noise every request. On
+    cloud/regional tiers, a missing key IS a warning worth surfacing.
+    """
     try:
         return load_tools(["google-search"])
     except (ImportError, Exception) as e:
-        logging.warning(f"Google Search tool unavailable: {e}")
+        _bundled = os.environ.get('NUNBA_BUNDLED') or os.environ.get('HEVOLVE_NODE_TIER', 'flat') == 'flat'
+        if _bundled:
+            logging.debug(f"Google Search tool unavailable (expected in local mode): {e}")
+        else:
+            logging.warning(f"Google Search tool unavailable: {e}")
         return []
 
 
