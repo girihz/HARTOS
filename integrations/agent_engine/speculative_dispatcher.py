@@ -289,21 +289,20 @@ class SpeculativeDispatcher:
         if not isinstance(_channel, str):
             _channel = ''
         # Language change — same defensive coercion as channel_connect.
-        # CISO: truncate to 5 chars (longest ISO 639-1 is 2-3) and
-        # whitelist validate to prevent injection via hallucinating draft.
-        _VALID_LANG_CODES = frozenset([
-            'en', 'hi', 'ta', 'te', 'ml', 'kn', 'bn', 'mr', 'gu', 'pa',
-            'zh', 'ja', 'ko', 'es', 'fr', 'de', 'it', 'pt', 'ar', 'ru',
-            'tr', 'pl', 'nl', 'sv', 'fi', 'da', 'no', 'el', 'he', 'th',
-            'vi', 'id', 'ms', 'uk', 'cs', 'ro', 'hu', 'bg', 'hr', 'sk',
-        ])
+        # Validated against the canonical SUPPORTED_LANG_DICT (single
+        # source of truth for language codes, lives in hart_intelligence_entry).
         _lang = parsed.get('language_change') or ''
         if not isinstance(_lang, str):
             _lang = ''
         _lang = _lang.strip().lower()[:5]
-        if _lang and _lang not in _VALID_LANG_CODES:
-            logger.debug(f"draft: invalid language_change '{_lang}' — ignoring")
-            _lang = ''
+        if _lang:
+            try:
+                from hart_intelligence_entry import SUPPORTED_LANG_DICT
+                if _lang not in SUPPORTED_LANG_DICT:
+                    logger.debug(f"draft: language_change '{_lang}' not in SUPPORTED_LANG_DICT — ignoring")
+                    _lang = ''
+            except ImportError:
+                pass  # Can't validate — accept the code as-is
         return {
             'response': draft_reply,
             'speculation_id': speculation_id,
