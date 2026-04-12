@@ -219,6 +219,58 @@ def get_guardrail_status():
     })
 
 
+# ─── Agent Ledger ───
+
+@agent_engine_bp.route('/api/agent-engine/ledger/tasks', methods=['GET'])
+@require_auth
+def list_ledger_tasks():
+    """List tasks from the agent ledger with optional filters."""
+    try:
+        from agent_ledger import SmartLedger
+        ledger = SmartLedger.get_instance()
+        status = request.args.get('status')
+        agent_id = request.args.get('agent_id')
+        limit = int(request.args.get('limit', 50))
+        tasks = ledger.list_tasks(status=status, agent_id=agent_id, limit=limit)
+        return jsonify({
+            'success': True,
+            'tasks': [t.to_dict() for t in tasks],
+            'total': len(tasks),
+        })
+    except ImportError:
+        return jsonify({'success': False, 'error': 'agent_ledger not installed'}), 501
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@agent_engine_bp.route('/api/agent-engine/ledger/tasks/<task_id>', methods=['GET'])
+@require_auth
+def get_ledger_task(task_id):
+    """Get a single task by ID with full history."""
+    try:
+        from agent_ledger import SmartLedger
+        ledger = SmartLedger.get_instance()
+        task = ledger.get_task(task_id)
+        if not task:
+            return jsonify({'success': False, 'error': 'Task not found'}), 404
+        return jsonify({'success': True, 'task': task.to_dict()})
+    except ImportError:
+        return jsonify({'success': False, 'error': 'agent_ledger not installed'}), 501
+
+
+@agent_engine_bp.route('/api/agent-engine/ledger/stats', methods=['GET'])
+@require_auth
+def get_ledger_stats():
+    """Get ledger summary stats."""
+    try:
+        from agent_ledger import SmartLedger
+        ledger = SmartLedger.get_instance()
+        stats = ledger.get_stats()
+        return jsonify({'success': True, 'stats': stats})
+    except ImportError:
+        return jsonify({'success': False, 'error': 'agent_ledger not installed'}), 501
+
+
 # ─── IP Protection ───
 
 @agent_engine_bp.route('/api/ip/patents', methods=['GET'])
