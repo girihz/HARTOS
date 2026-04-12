@@ -1,3 +1,4 @@
+import logging
 import os
 import asyncio
 from autobahn.asyncio.component import Component, run
@@ -162,11 +163,13 @@ async def on_compute_request(msg):
             wamp_session.publish(response_topic, result)
 
     except Exception as e:
-        print(f"Compute relay error: {e}")
+        logging.warning(f"Compute relay error: {e}")
         if wamp_session and owner_id:
+            # CISO: sanitize error response — don't leak internal paths
+            # or stack traces to the WAMP caller. Generic message only.
             wamp_session.publish(
                 f'com.hertzai.hevolve.compute.response.{owner_id}',
-                {'error': str(e), 'request_id': request_id}
+                {'error': 'Compute relay encountered an error', 'request_id': request_id}
             )
 
 
