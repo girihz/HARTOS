@@ -4766,9 +4766,15 @@ def get_ans(casual_conv, req_tool, user_id, query, custom_prompt, preferred_lang
                     time.time() - memory_start_time)
 
     tools_start_time = time.time()
-    tools = get_tools(req_tool=req_tool, is_first=True)
-    app.logger.info("time taken by get_tools %s seconds",
-                    time.time() - tools_start_time)
+    # Skip tool loading for casual_conv=True — the 0.8B draft handles
+    # casual chat without tools, saving ~2.5s of tool registry loading.
+    if casual_conv:
+        tools = ''
+        app.logger.info("get_tools SKIPPED (casual_conv=True) — 0s")
+    else:
+        tools = get_tools(req_tool=req_tool, is_first=True)
+        app.logger.info("time taken by get_tools %s seconds",
+                        time.time() - tools_start_time)
 
     app.logger.info(f'tools {type(tools)}')
     language = SUPPORTED_LANG_DICT.get(preferred_lang[:2], 'English')
