@@ -207,9 +207,7 @@ class _FrozenValues:
     )
 
     # ── Prohibited Evolution Skills ──
-    PROHIBITED_EVOLUTION_SKILLS = frozenset({
-        'network_exploitation', 'data_exfiltration', 'self_replication',
-        'guardrail_circumvention', 'identity_impersonation',
+    PROHIBITED_EVOLUTION_SKILLS = PROHIBITED_SKILL_CATEGORIES | frozenset({
         'weapons_design', 'surveillance_evasion',
     })
 
