@@ -182,15 +182,8 @@ redis_client = redis.StrictRedis(
     host='azure_all_vms.hertzai.com', port=6369, db=0)
 agent_data = TTLCache(ttl_seconds=7200, max_size=500, name='reuse_agent_data', loader=load_agent_data)
 user_simplemem = TTLCache(ttl_seconds=7200, max_size=500, name='reuse_user_simplemem', loader=load_user_simplemem)
-# Azure OpenAI configuration (fallback - gpt-4o)
-# config_list = [{
-#     "model": 'gpt-4o',
-#     "api_type": "azure",
-#     "api_key": '4xmi9X9pGCwRn2Pb0vldz6t6FQaAe29bUIkFjKRC7ytrVZ1Ni5cWJQQJ99BAACHYHv6XJ3w3AAABACOG99Zf',
-#     "base_url": 'https://hertzai-gpt4.openai.azure.com/',
-#     "api_version": "2024-02-15-preview",
-#     "price": [0.0025, 0.01]
-# }]
+# Azure OpenAI fallback config removed — credentials must come from
+# HEVOLVE_AZURE_API_KEY env var or SecretsManager, never hardcoded.
 
 # Mode-aware config_list: cloud/regional use external LLM, flat uses local
 # (user's wizard-configured endpoint via HEVOLVE_LOCAL_LLM_URL)
