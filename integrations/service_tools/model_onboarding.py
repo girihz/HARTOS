@@ -730,6 +730,44 @@ def _create_blueprint():
             logger.error(f"API status error: {e}", exc_info=True)
             return jsonify({'status': 'error', 'error': str(e)}), 500
 
+    @model_onboarding_bp.route('/api/models/checklist', methods=['GET'])
+    def api_checklist():
+        """T19: Model onboarding checklist — validates all model types have entries.
+
+        Returns a checklist of 8 model types with status (ok/missing/error)
+        and the number of registered + downloaded models per type.
+        """
+        try:
+            from .model_catalog import get_catalog
+            catalog = get_catalog()
+            MODEL_TYPES = ['llm', 'tts', 'stt', 'vlm', 'image_gen',
+                           'video_gen', 'audio_gen', 'embedding']
+            checklist = []
+            for mt in MODEL_TYPES:
+                entries = [e for e in catalog.list_all() if e.model_type == mt]
+                downloaded = [e for e in entries if e.downloaded]
+                loaded = [e for e in entries if e.loaded]
+                checklist.append({
+                    'model_type': mt,
+                    'status': 'ok' if entries else 'missing',
+                    'registered': len(entries),
+                    'downloaded': len(downloaded),
+                    'loaded': len(loaded),
+                    'models': [{'id': e.model_id, 'name': e.display_name,
+                                'downloaded': e.downloaded, 'loaded': e.loaded}
+                               for e in entries],
+                })
+            all_ok = all(c['status'] == 'ok' for c in checklist)
+            return jsonify({
+                'status': 'ok' if all_ok else 'incomplete',
+                'checklist': checklist,
+                'total_registered': sum(c['registered'] for c in checklist),
+                'total_downloaded': sum(c['downloaded'] for c in checklist),
+            }), 200
+        except Exception as e:
+            logger.error(f"API checklist error: {e}", exc_info=True)
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
     @model_onboarding_bp.route('/api/models/downloaded', methods=['GET'])
     def api_downloaded():
         """List all downloaded GGUF models."""
