@@ -2168,7 +2168,7 @@ def _handle_shell_command_tool(input_text: str) -> str:
     # --- Denylist of destructive patterns (case-insensitive, conservative)
     _DENY_PATTERNS = [
         r'\bformat\s+[a-z]:',                 # format C:
-        r'\brm\s+-rf\s+/\s*$',                # rm -rf /
+        r'\brm\s+-rf\s+/',                    # rm -rf / (anywhere in string)
         r'\brm\s+-rf\s+--no-preserve-root',
         r'\brm\s+-rf\s+~',                    # rm -rf ~
         r'\bdel\s+/s\s+/q\s+[a-z]:\\',        # del /s /q C:\
@@ -2183,6 +2183,14 @@ def _handle_shell_command_tool(input_text: str) -> str:
         r'\breset-computermachinepassword',   # dangerous ps cmdlet (lowercased)
         r'\bformat-volume',
         r'\bremove-item\s+-recurse\s+-force\s+[a-z]:\\',
+        # Chaining patterns — ethical hacker flagged that 'echo hi && rm -rf /'
+        # bypassed the old $-anchored pattern. These catch destructive commands
+        # anywhere in a chained expression (&&, ;, |, ||, backtick, $()).
+        r'\bmv\s+/\s+/dev/null',              # mv / /dev/null
+        r'\bchmod\s+-[rR]\s+000\s+/',         # chmod -R 000 /
+        r'\bfind\s+/\s+-delete',              # find / -delete
+        r'\bcurl\s+.*\|\s*bash',              # curl ... | bash (pipe to shell)
+        r'\bwget\s+.*\|\s*bash',              # wget ... | bash
     ]
     # NFKC maps full-width / compatibility chars to their ASCII equivalents
     # ('ｒｍ' → 'rm', '＞' → '>'), defeating the common homoglyph bypass.
