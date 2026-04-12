@@ -1070,6 +1070,24 @@ if not GPT_API:
         _llm_url = os.environ.get('HEVOLVE_LOCAL_LLM_URL', '')
         if _llm_url:
             GPT_API = _llm_url.rstrip('/') + '/chat/completions'
+
+# Draft LLM endpoint — the 0.8B on :8081 that serves casual_conv=True.
+# When casual_conv=True, CustomGPT._call() posts here instead of GPT_API.
+# The 0.8B responds in ~300ms with a short reply. If the response signals
+# delegate=local (needs tools/reasoning), the caller re-dispatches with
+# casual_conv=False which hits GPT_API (the 4B on :8080).
+DRAFT_GPT_API = ''
+try:
+    from core.port_registry import get_local_draft_url
+    _draft_resolved = get_local_draft_url()
+    if _draft_resolved:
+        DRAFT_GPT_API = _draft_resolved.rstrip('/') + '/chat/completions'
+except Exception:
+    pass
+if not DRAFT_GPT_API:
+    _draft_url = os.environ.get('HEVOLVE_LOCAL_DRAFT_URL', '')
+    if _draft_url:
+        DRAFT_GPT_API = _draft_url.rstrip('/') + '/chat/completions'
 FAV_TEACHER_API = config.get('FAV_TEACHER_API', '')
 DREAMBOOTH_API = config.get('DREAMBOOTH_API', '')
 STABLE_DIFF_API = config.get('STABLE_DIFF_API', '')
@@ -3270,14 +3288,18 @@ class CustomGPT(LLM):
             #     app.logger.info("gpt 3.5 fails on line number 483!!")
             try:
                 if self.casual_conv:
-                    app.logger.info(f"casual conv!")
+                    app.logger.info(f"casual conv — routing to draft 0.8B")
                     start = time.time()
+                    # T23: casual_conv=True routes to the 0.8B draft on
+                    # :8081 via DRAFT_GPT_API. Falls back to GPT_API (4B)
+                    # if the draft server isn't available.
+                    _api = DRAFT_GPT_API or GPT_API
                     response = pooled_post(
-                        GPT_API,
+                        _api,
                         json={
                             "model": "llama",
                             "messages": [{"role": "user", "content": prompt}],
-                            "max_tokens": 200,  # Reduced from 1000 for faster responses
+                            "max_tokens": 200,
                             "temperature": 0.7
                         })
                     app.logger.info(
@@ -3353,13 +3375,12 @@ class CustomGPT(LLM):
             try:
                 # app.logger.info(f"the prompt we are sending is {prompt}")
                 if self.casual_conv:
-
                     app.logger.info(
-                        f"the casual conv line 519 casual conv {self.casual_conv} type of casual conv {type(self.casual_conv)}")
+                        f"casual conv first call — routing to draft 0.8B")
                     start = time.time()
-
+                    _api = DRAFT_GPT_API or GPT_API
                     response = pooled_post(
-                        GPT_API,
+                        _api,
                         json={
                             "model": "llama",
                             "messages": [{"role": "user", "content": prompt}],
