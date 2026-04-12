@@ -229,7 +229,13 @@ MODEL_RESOURCE_TABLE = {
 
 TIER_REQUIREMENTS: List[TierRequirement] = [
     TierRequirement(NodeTierLevel.COMPUTE_HOST, 16, 32.0, 100.0, 12.0),
-    TierRequirement(NodeTierLevel.FULL,          8, 16.0,  20.0,  8.0),
+    # RAM lowered from 16.0 to 15.0: 16 GB physical DIMMs report ~15.7 GB
+    # after BIOS/hardware reservation. The old 16.0 threshold excluded
+    # every standard 16 GB laptop from FULL tier — the exact machines
+    # that HAVE 8 GB VRAM and should qualify. Disk lowered from 20.0 to
+    # 15.0: models can be downloaded on-demand (auto-download with
+    # progress), so 50 GB upfront is not a hard requirement.
+    TierRequirement(NodeTierLevel.FULL,          8, 15.0,  15.0,  8.0),
     TierRequirement(NodeTierLevel.STANDARD,      4,  8.0,   2.0,  0.0),
     TierRequirement(NodeTierLevel.LITE,          2,  4.0,   1.0,  0.0),
     TierRequirement(NodeTierLevel.OBSERVER,      1,  2.0,   0.0,  0.0),
@@ -261,11 +267,18 @@ FEATURE_TIER_MAP: Dict[str, Tuple[NodeTierLevel, str]] = {
     'whisper':              (NodeTierLevel.STANDARD,  'HEVOLVE_WHISPER_ENABLED'),
     # Lite tier - cloud-backed services
     'crawl4ai':             (NodeTierLevel.LITE,      'HEVOLVE_CRAWL4AI_ENABLED'),
-    # Full tier - GPU workloads
+    # Standard tier — features that need a local LLM but NOT full GPU
+    # The 0.8B draft classifier needs ~550 MB VRAM, well within STANDARD's
+    # budget. local_llm enables the 2B/4B llama-server which also runs at
+    # STANDARD (4-8 GB VRAM, handled by the model lifecycle's eviction
+    # policy). These were incorrectly gated at FULL, which blocked the
+    # entire draft-first architecture on every 16 GB laptop because the
+    # OS reports ~15.7 GB (below the old 16.0 threshold). See T20 #163.
+    'speculative_dispatch': (NodeTierLevel.STANDARD,  'HEVOLVE_SPECULATIVE_ENABLED'),
+    'local_llm':            (NodeTierLevel.STANDARD,  'HEVOLVE_LOCAL_LLM_ENABLED'),
+    # Full tier - heavy GPU workloads (video gen, media agent, large VLMs)
     'video_gen':            (NodeTierLevel.FULL,      'HEVOLVE_VIDEO_GEN_ENABLED'),
     'media_agent':          (NodeTierLevel.FULL,      'HEVOLVE_MEDIA_AGENT_ENABLED'),
-    'speculative_dispatch': (NodeTierLevel.FULL,      'HEVOLVE_SPECULATIVE_ENABLED'),
-    'local_llm':            (NodeTierLevel.FULL,      'HEVOLVE_LOCAL_LLM_ENABLED'),
     'vlm_omniparser':       (NodeTierLevel.FULL,      'HEVOLVE_VLM_OMNIPARSER_ENABLED'),
     'minicpm_vision':       (NodeTierLevel.FULL,      'HEVOLVE_MINICPM_ENABLED'),
     'video_captioning':     (NodeTierLevel.FULL,      'HEVOLVE_VIDEO_CAPTIONING_ENABLED'),
