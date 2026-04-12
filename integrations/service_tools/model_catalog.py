@@ -607,20 +607,49 @@ class ModelCatalog:
     # ── Persistence ───────────────────────────────────────────────
 
     def _load(self) -> None:
-        """Load catalog from JSON file."""
+        """Load catalog from JSON file.
+
+        On load, ALL entries have their ``loaded`` state cleared to False
+        and ``device`` reset to 'unloaded'. This prevents stale
+        "loaded" markers from a previous Nunba session from surviving
+        across restarts — the old state claimed models were loaded even
+        though the llama-server processes died with the previous session.
+        ``ensure_loaded_async`` then trusted the stale state and skipped
+        ``start_server()``, leaving the LLM down. See T21 #164.
+
+        ``downloaded`` is NOT cleared — model files persist on disk
+        across restarts and the catalog's downloaded flag is still valid.
+        """
         if not self._path.exists():
             logger.info(f"No catalog at {self._path} — will auto-populate on first use")
             return
         try:
             with open(self._path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+            _cleared = 0
             for d in data.get('models', []):
                 try:
                     entry = ModelEntry.from_dict(d)
+                    # Clear stale loaded state from previous session.
+                    # Processes don't survive restart; loaded markers must
+                    # not either. The eager-boot + ensure_loaded_async
+                    # paths will re-mark as loaded once the server is
+                    # actually alive and verified via /v1/models.
+                    if entry.loaded:
+                        entry.loaded = False
+                        entry.device = 'unloaded'
+                        entry.active_since = None
+                        _cleared += 1
                     self._entries[entry.id] = entry
                 except Exception as e:
                     logger.warning(f"Skipped malformed catalog entry: {e}")
-            logger.info(f"Loaded {len(self._entries)} models from catalog")
+            if _cleared:
+                logger.info(
+                    f"Loaded {len(self._entries)} models from catalog "
+                    f"(cleared {_cleared} stale loaded markers)")
+                self._save()  # Persist the cleared state
+            else:
+                logger.info(f"Loaded {len(self._entries)} models from catalog")
         except Exception as e:
             logger.error(f"Failed to load catalog: {e}")
 
