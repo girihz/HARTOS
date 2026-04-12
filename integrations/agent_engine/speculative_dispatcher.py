@@ -288,6 +288,10 @@ class SpeculativeDispatcher:
         _channel = parsed.get('channel_connect') or ''
         if not isinstance(_channel, str):
             _channel = ''
+        # Language change — same defensive coercion as channel_connect.
+        _lang = parsed.get('language_change') or ''
+        if not isinstance(_lang, str):
+            _lang = ''
         return {
             'response': draft_reply,
             'speculation_id': speculation_id,
@@ -298,6 +302,7 @@ class SpeculativeDispatcher:
             'is_casual': bool(parsed.get('is_casual', False)),
             'is_create_agent': bool(parsed.get('is_create_agent', False)),
             'channel_connect': _channel.strip().lower(),
+            'language_change': _lang.strip().lower(),
             'expert_pending': expert_pending,
             'latency_ms': round(draft_latency_ms, 1),
             'energy_kwh': round(
@@ -407,6 +412,7 @@ class SpeculativeDispatcher:
             '"is_casual": true OR false, '
             '"is_create_agent": true OR false, '
             '"channel_connect": "<channel name or empty string>", '
+            '"language_change": "<ISO 639-1 code or empty string>", '
             '"reason": "<why you chose this delegate value>"}\n\n'
             # ── delegate ────────────────────────────────────────────────
             "delegate: Use \"none\" for greetings, small-talk, factual "
@@ -441,7 +447,19 @@ class SpeculativeDispatcher:
             "Slack, Discord, Gmail, SMS, Teams, Messenger, etc.) put "
             "the lowercased channel name here (e.g. \"whatsapp\"). "
             "Otherwise use an empty string \"\". This routes the turn "
-            "to the Connect_Channel tool."
+            "to the Connect_Channel tool.\n\n"
+            # ── language_change ─────────────────────────────────────────
+            "language_change: if the user is asking to switch language "
+            "(e.g. \"talk to me in tamil\", \"hablame en español\", "
+            "\"parle-moi en français\", \"日本語で話して\"), put the "
+            "ISO 639-1 code here (e.g. \"ta\" for Tamil, \"es\" for "
+            "Spanish, \"fr\" for French, \"ja\" for Japanese, \"hi\" "
+            "for Hindi, \"zh\" for Chinese, \"ko\" for Korean, \"ar\" "
+            "for Arabic, \"de\" for German, \"ru\" for Russian). "
+            "Otherwise use an empty string \"\". This overrides the "
+            "session's preferred_lang so the main LLM responds in "
+            "the requested language and TTS routes to an engine that "
+            "supports it."
         )
 
     def _track_call_telemetry(

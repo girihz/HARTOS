@@ -5607,6 +5607,28 @@ def chat():
                 # routing — callers no longer need to keyword-match user
                 # text before calling /chat, the 0.8B draft handles it.
                 _draft_conf = float(result.get('draft_confidence') or 0.0)
+                # Language change: the draft detected "talk to me in
+                # tamil" → language_change="ta". Override preferred_lang
+                # so the main LLM prompt says "respond in Tamil" and TTS
+                # routes to a Tamil-capable engine (Indic Parler).
+                _lang_change = result.get('language_change', '')
+                if _lang_change:
+                    preferred_lang = _lang_change
+                    app.logger.info(
+                        f'draft classifier: language_change={_lang_change} '
+                        f'— overriding preferred_lang for this request'
+                    )
+                    # Persist so next requests also use the new language
+                    try:
+                        _lang_file = os.path.join(
+                            os.path.expanduser('~'), 'Documents',
+                            'Nunba', 'data', 'hart_language.json')
+                        os.makedirs(os.path.dirname(_lang_file), exist_ok=True)
+                        with open(_lang_file, 'w') as _f:
+                            json.dump({'language': _lang_change}, _f)
+                    except Exception:
+                        pass
+
                 if (result.get('is_create_agent')
                         and _draft_conf >= _DRAFT_INTENT_CONFIDENCE):
                     app.logger.info(
@@ -5618,26 +5640,21 @@ def chat():
                     # Fall through — do NOT return the draft reply; the
                     # create_agent branch below runs in this same request.
                 else:
-                    return jsonify({
-                        'response': result['response'],
-                        'Agent_status': 'Draft-First Mode',
-                        'speculation_id': result.get('speculation_id'),
-                        'expert_pending': result.get('expert_pending', False),
-                        'delegate': result.get('delegate'),
-                        'draft_model': result.get('draft_model'),
-                        'draft_confidence': result.get('draft_confidence'),
-                        # Intent classification surfaced by the draft so the
-                        # caller can route downstream (correction → learner,
-                        # casual → draft-only fast path, channel_connect →
-                        # Connect_Channel tool). Keyword-based classifiers
-                        # in callers are anti-pattern; the draft model is
-                        # the single source of truth.
-                        'is_correction': bool(result.get('is_correction', False)),
-                        'is_casual': bool(result.get('is_casual', False)),
-                        'is_create_agent': bool(result.get('is_create_agent', False)),
-                        'channel_connect': result.get('channel_connect', ''),
-                        'latency_ms': result.get('latency_ms'),
-                    })
+                    return _chat_reply(
+                        user_id, request_id, result['response'],
+                        Agent_status='Draft-First Mode',
+                        speculation_id=result.get('speculation_id'),
+                        expert_pending=result.get('expert_pending', False),
+                        delegate=result.get('delegate'),
+                        draft_model=result.get('draft_model'),
+                        draft_confidence=result.get('draft_confidence'),
+                        is_correction=bool(result.get('is_correction', False)),
+                        is_casual=bool(result.get('is_casual', False)),
+                        is_create_agent=bool(result.get('is_create_agent', False)),
+                        channel_connect=result.get('channel_connect', ''),
+                        language_change=result.get('language_change', ''),
+                        latency_ms=result.get('latency_ms'),
+                    )
         except ImportError:
             pass
 
