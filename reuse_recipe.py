@@ -183,33 +183,8 @@ user_simplemem = TTLCache(ttl_seconds=7200, max_size=500, name='reuse_user_simpl
 
 # Mode-aware config_list: cloud/regional use external LLM, flat uses local
 # (user's wizard-configured endpoint via HEVOLVE_LOCAL_LLM_URL)
-_node_tier = os.environ.get('HEVOLVE_NODE_TIER', 'flat')
-_active_cloud = os.environ.get('HEVOLVE_ACTIVE_CLOUD_PROVIDER', '')
-if _node_tier in ('regional', 'central') and os.environ.get('HEVOLVE_LLM_ENDPOINT_URL'):
-    config_list = [{
-        "model": os.environ.get('HEVOLVE_LLM_MODEL_NAME', 'gpt-4.1-mini'),
-        "api_key": os.environ.get('HEVOLVE_LLM_API_KEY', 'dummy'),
-        "base_url": os.environ['HEVOLVE_LLM_ENDPOINT_URL'],
-        "price": [0.0025, 0.01]
-    }]
-elif _active_cloud and os.environ.get('HEVOLVE_LLM_API_KEY'):
-    # Wizard-configured cloud provider (flat mode desktop user)
-    _cloud_cfg = {
-        "model": os.environ.get('HEVOLVE_LLM_MODEL_NAME', 'gpt-4o-mini'),
-        "api_key": os.environ['HEVOLVE_LLM_API_KEY'],
-        "price": [0.0025, 0.01],
-    }
-    if os.environ.get('HEVOLVE_LLM_ENDPOINT_URL'):
-        _cloud_cfg["base_url"] = os.environ['HEVOLVE_LLM_ENDPOINT_URL']
-    config_list = [_cloud_cfg]
-else:
-    from core.port_registry import get_local_llm_url
-    config_list = [{
-        "model": os.environ.get('HEVOLVE_LOCAL_LLM_MODEL', 'local'),
-        "api_key": 'dummy',
-        "base_url": get_local_llm_url(),
-        "price": [0, 0]
-    }]
+from core.autogen_config import get_autogen_config_list
+config_list = get_autogen_config_list()
 
 # Per-request model config override (speculative execution, hive compute routing)
 # Canonical implementation lives in helper.py — thin wrapper passes local config_list.
