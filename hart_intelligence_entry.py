@@ -2209,6 +2209,13 @@ def _handle_shell_command_tool(input_text: str) -> str:
         r'\bfind\s+/\s+-delete',              # find / -delete
         r'\bcurl\s+.*\|\s*bash',              # curl ... | bash (pipe to shell)
         r'\bwget\s+.*\|\s*bash',              # wget ... | bash
+        # Interpreter wrappers — ethical hacker found python -c / perl -e / ruby -e
+        # bypass all above patterns by wrapping destructive code inside an interpreter.
+        r'\bpython[23]?\s+-c\s',              # python -c "os.system(...)"
+        r'\bperl\s+-e\s',                     # perl -e "system(...)"
+        r'\bruby\s+-e\s',                     # ruby -e "system(...)"
+        r'\bnode\s+-e\s',                     # node -e "require('child_process')..."
+        r'\bpowershell.*-enc',                # powershell -EncodedCommand (obfuscation)
     ]
     # NFKC maps full-width / compatibility chars to their ASCII equivalents
     # ('ｒｍ' → 'rm', '＞' → '>'), defeating the common homoglyph bypass.
@@ -5317,9 +5324,10 @@ def chat():
     if _api_key:
         # API key is configured — validate it first (Layer 0)
         # Accept either API key directly or a valid JWT
+        import hmac as _hmac_mod
         _api_key_match = (
             _bearer_token and
-            _bearer_token == _api_key
+            _hmac_mod.compare_digest(_bearer_token, _api_key)
         )
         if _api_key_match:
             g.auth_source = 'api_key'
