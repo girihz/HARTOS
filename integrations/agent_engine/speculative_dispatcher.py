@@ -732,26 +732,42 @@ class SpeculativeDispatcher:
         inner call so the dispatcher can never recursively re-enter itself
         when HEVOLVE_DRAFT_FIRST or the legacy speculative flag is enabled
         upstream. The outer chat route triggered us, and that's where the
-        decision to speculate was made."""
+        decision to speculate was made.
+
+        In bundled/in-process mode (Nunba desktop), uses Flask test_client()
+        instead of HTTP — port 6777 is never bound in bundled mode.
+        """
+        payload = {
+            'user_id': user_id,
+            'prompt_id': f'{goal_type}_{goal_id[:8]}' if goal_id else prompt_id,
+            'prompt': prompt,
+            'create_agent': True,
+            'autonomous': True,
+            'casual_conv': False,
+            'model_config': model.to_config_list(),
+            # Hard no-reentry guard — inner dispatch never speculates
+            'speculative': False,
+            'draft_first': False,
+        }
+
+        # Bundled mode: in-process dispatch via Flask test_client
+        _bundled = bool(os.environ.get('NUNBA_BUNDLED') or getattr(__import__('sys'), 'frozen', False))
+        if _bundled:
+            try:
+                from hart_intelligence_entry import app as _flask_app
+                with _flask_app.test_client() as client:
+                    resp = client.post('/chat', json=payload)
+                    if resp.status_code == 200:
+                        return (resp.get_json() or {}).get('response', '')
+            except Exception as e:
+                logger.debug(f"In-process dispatch failed ({model.model_id}): {e}")
+            return ''
+
+        # HTTP mode: external HARTOS server
         import requests as req
         base_url = os.environ.get('HEVOLVE_BASE_URL', f'http://localhost:{get_port("backend")}')
         try:
-            resp = req.post(
-                f'{base_url}/chat',
-                json={
-                    'user_id': user_id,
-                    'prompt_id': f'{goal_type}_{goal_id[:8]}' if goal_id else prompt_id,
-                    'prompt': prompt,
-                    'create_agent': True,
-                    'autonomous': True,
-                    'casual_conv': False,
-                    'model_config': model.to_config_list(),
-                    # Hard no-reentry guard — inner dispatch never speculates
-                    'speculative': False,
-                    'draft_first': False,
-                },
-                timeout=30,
-            )
+            resp = req.post(f'{base_url}/chat', json=payload, timeout=30)
             if resp.status_code == 200:
                 return resp.json().get('response', '')
         except req.RequestException as e:
