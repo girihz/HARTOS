@@ -4776,15 +4776,17 @@ def get_ans(casual_conv, req_tool, user_id, query, custom_prompt, preferred_lang
     # Skip tool loading for casual_conv=True — the 0.8B draft handles
     # casual chat without tools, saving ~2.5s of tool registry loading.
     if casual_conv:
-        # Load full tool set even for casual chat — the LLM must have access
-        # to ALL tools so it never blindly says "I can't do that." The draft
-        # classifier already decided this is casual, but the LLM should still
-        # be able to use tools if the user's message actually needs them.
+        # Minimal first-pass tools — enough for the LLM to help with common
+        # tasks (calculator, history, image) without loading the full registry.
         tools = get_tools(req_tool=req_tool, is_first=True)
-        app.logger.info("get_tools loaded for casual_conv=True (full tool set)")
+        app.logger.info("get_tools loaded (is_first=True, casual_conv=True) %s seconds",
+                        time.time() - tools_start_time)
     else:
-        tools = get_tools(req_tool=req_tool, is_first=True)
-        app.logger.info("time taken by get_tools %s seconds",
+        # Exhaustive intent-based tool set — full registry scan based on
+        # detected intent. This is the heavy path (~2.5s) but gives the LLM
+        # access to every tool for complex/agentic requests.
+        tools = get_tools(req_tool=req_tool, is_first=False)
+        app.logger.info("get_tools loaded (is_first=False, casual_conv=False) %s seconds",
                         time.time() - tools_start_time)
 
     app.logger.info(f'tools {type(tools)}')
