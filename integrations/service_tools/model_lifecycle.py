@@ -290,6 +290,38 @@ class ModelLifecycleManager:
         # Detect node tier
         self._detect_tier()
 
+        # VRAM budget check: warn if total GPU VRAM is insufficient for
+        # pinned models. On 4GB GPUs, 0.8B (1.5GB) + 4B (3.5GB) = 5GB
+        # exceeds the budget — the pressure system will handle it, but
+        # the user should know the main model may be CPU-offloaded.
+        try:
+            from .vram_manager import get_vram_manager
+            vm = get_vram_manager()
+            total_vram = vm.total_vram_gb if vm else 0
+            pinned_vram = sum(
+                s.vram_gb for s in self._models.values()
+                if s.pinned and s.vram_gb > 0
+            )
+            all_model_vram = sum(
+                s.vram_gb for s in self._models.values()
+                if s.vram_gb > 0
+            )
+            if total_vram > 0 and all_model_vram > total_vram:
+                logger.warning(
+                    f"VRAM budget exceeded: models need {all_model_vram:.1f}GB "
+                    f"but GPU has {total_vram:.1f}GB. "
+                    f"Pressure eviction will offload non-pinned models to CPU. "
+                    f"Pinned models ({pinned_vram:.1f}GB) are protected."
+                )
+                if pinned_vram > total_vram:
+                    logger.error(
+                        f"CRITICAL: Pinned models alone need {pinned_vram:.1f}GB "
+                        f"but GPU only has {total_vram:.1f}GB. "
+                        f"Consider reducing pinned model count or using CPU inference."
+                    )
+        except Exception:
+            pass  # VRAM check is advisory, not blocking
+
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         logger.info(f"Model lifecycle manager started (interval={self._interval}s)")
