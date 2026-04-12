@@ -345,6 +345,10 @@ class NodeWatchdog:
                         'time': datetime.now(timezone.utc).isoformat(),
                         'restart_count': info.restart_count,
                     })
+                    # Cap at 100 entries to prevent memory leak on long-running
+                    # instances with flapping daemons (SRE audit finding).
+                    if len(self._restart_log) > 100:
+                        self._restart_log = self._restart_log[-100:]
             logger.critical(
                 f"Watchdog: thread '{name}' RESTARTED successfully "
                 f"(total restarts: {info.restart_count})")
