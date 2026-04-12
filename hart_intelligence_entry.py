@@ -3543,7 +3543,15 @@ class CustomGPT(LLM):
             end_time = time.time()
             elapsed_time = end_time - start_time
             app.logger.info(f"time taken for this call is {elapsed_time}")
-            response_text = response.json()["choices"][0]["message"]["content"]
+            resp_json = response.json()
+            # Guard: llama-server returns an error dict (e.g. n_ctx exceeded)
+            # instead of a choices array. Handle gracefully instead of crashing.
+            if 'error' in resp_json:
+                _err = resp_json['error']
+                _msg = _err.get('message', str(_err)) if isinstance(_err, dict) else str(_err)
+                app.logger.error(f"LLM server error: {_msg}")
+                return f"I couldn't process that request — {_msg}"
+            response_text = resp_json["choices"][0]["message"]["content"]
             num_tokens = len(encoding.encode(
                 response_text.replace('\n', ' ').replace('\t', ''))) if encoding else len(response_text.split())
             thread_local_data.update_res_token_count(num_tokens)
