@@ -368,8 +368,19 @@ _watchdog: Optional[NodeWatchdog] = None
 
 
 def start_watchdog(check_interval: int = None) -> NodeWatchdog:
-    """Create and return the global watchdog instance."""
+    """Create and return the global watchdog instance.
+
+    Idempotent: if a watchdog already exists and is running, return it.
+    Without this guard, a second call (e.g. init_social called from both
+    hart_intelligence_entry AND Nunba main.py) replaces the global
+    singleton.  The first watchdog's check-loop thread keeps running
+    with stale ThreadInfo entries that never receive heartbeats,
+    causing it to false-FROZEN every daemon every 300 s — the exact
+    6-minute restart cascade seen since 2026-04-11.
+    """
     global _watchdog
+    if _watchdog is not None:
+        return _watchdog
     _watchdog = NodeWatchdog(check_interval=check_interval)
     return _watchdog
 

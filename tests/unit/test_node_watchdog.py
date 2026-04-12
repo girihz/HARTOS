@@ -464,13 +464,20 @@ class TestModuleSingleton:
         assert get_watchdog() is wd
         wd.stop()
 
-    def test_start_watchdog_replaces_previous(self):
+    def test_start_watchdog_is_idempotent(self):
+        """start_watchdog returns the existing instance if one exists.
+
+        Previously it unconditionally replaced the singleton, leaving
+        the old watchdog's check-loop thread running with stale
+        ThreadInfo entries that never received heartbeats — causing
+        false FROZEN detections every 300s (the 6-minute daemon
+        restart cascade from the 2026-04-11 incident).
+        """
         wd1 = start_watchdog(check_interval=60)
         wd2 = start_watchdog(check_interval=60)
-        assert get_watchdog() is wd2
-        assert wd1 is not wd2
+        assert get_watchdog() is wd1
+        assert wd1 is wd2
         wd1.stop()
-        wd2.stop()
 
 
 # ---------------------------------------------------------------------------
