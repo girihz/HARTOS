@@ -146,10 +146,25 @@ class VisionService:
                         return
 
             if self._vision_backend is None:
-                self._start_minicpm()
-                # Register atexit handler to prevent orphan subprocess on crash
-                import atexit
-                atexit.register(self._cleanup_subprocess)
+                # T8: ONE auto-start captioning path — get_vision_backend()
+                # which prefers the 0.8B Qwen already on :8081 (pinned,
+                # eager-booted, dual-purpose: draft classifier + captioner).
+                #
+                # MiniCPM sidecar (_start_minicpm) is NOT auto-started.
+                # It was a parallel captioning path that consumed 4GB VRAM
+                # and never booted healthy on 8GB cards (120s timeout every
+                # launch). The sidecar code stays for users who explicitly
+                # load MiniCPM via the admin model management page on
+                # COMPUTE_HOST machines with 12+ GB VRAM — but the default
+                # auto-start path is always get_vision_backend().
+                self._vision_backend = get_vision_backend()
+                if self._vision_backend.name != 'none':
+                    if hasattr(self._vision_backend, 'start'):
+                        self._vision_backend.start()
+                    logger.info(
+                        f"Vision: using {self._vision_backend.name} backend")
+                else:
+                    logger.warning("No vision backend available")
 
         self._ws_thread = threading.Thread(
             target=self._run_ws_server, daemon=True, name='vision-ws',
