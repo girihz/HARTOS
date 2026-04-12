@@ -97,20 +97,49 @@ async def on_remote_desktop_signal(msg):
 async def on_compute_request(msg):
     """Handle compute relay request from phone behind NAT.
 
-    Phone publishes to com.hertzai.hevolve.compute.request.{user_id},
-    HARTOS processes locally, responds on compute.response.{user_id}.
-    Same user_id scoping as fleet commands — no cross-user leakage.
+    Phone publishes to com.hertzai.hevolve.compute.request.{owner_id},
+    HARTOS processes locally, responds on compute.response.{owner_id}.
+
+    SECURITY (M1 fix, T137): The user_id is ALWAYS the node owner
+    (HEVOLVE_OWNER_USER_ID), never taken from the message body. This
+    prevents a peer on the same WAMP realm from publishing with a
+    spoofed user_id to impersonate another user. The subscription is
+    already scoped to the owner's topic at line 163, but the handler
+    used to read user_id from data.get('user_id') which let an
+    attacker override it. Now the body's user_id field is ignored —
+    the owner_id is the single source of truth.
+
+    If the body contains a user_id that doesn't match the owner, the
+    request is logged as suspicious and dropped.
     """
+    # The owner_id is set at subscription time (line 161) — it's the
+    # only user this node serves compute for. Reading it from env is
+    # safe because HEVOLVE_OWNER_USER_ID is set at boot, not by the
+    # WAMP peer.
+    owner_id = os.environ.get('HEVOLVE_OWNER_USER_ID', '')
+    if not owner_id:
+        return
+
     try:
         data = msg if isinstance(msg, dict) else {}
-        user_id = data.get('user_id', '')
         request_id = data.get('request_id', '')
         text = data.get('text', '')
 
-        if not text or not user_id:
+        if not text:
             return
 
-        # Process via the same /chat endpoint everything else uses
+        # SECURITY: reject messages where the body claims a different
+        # user_id than the owner. This catches both honest mistakes
+        # (phone sending the wrong id) and malicious impersonation.
+        body_user_id = data.get('user_id', '')
+        if body_user_id and str(body_user_id) != str(owner_id):
+            print(f"SECURITY: compute relay rejected — body user_id "
+                  f"'{body_user_id}' != owner '{owner_id}'. "
+                  f"Possible impersonation attempt.")
+            return
+
+        # Process via the same /chat endpoint everything else uses.
+        # user_id is ALWAYS owner_id, never from the message body.
         import requests as http_requests
         from core.port_registry import get_port
         resp = http_requests.post(
@@ -118,7 +147,7 @@ async def on_compute_request(msg):
             json={
                 'text': [text] if isinstance(text, str) else text,
                 'raw_text': text if isinstance(text, str) else str(text),
-                'user_id': user_id,
+                'user_id': owner_id,  # ALWAYS the owner, never body
                 'source': 'compute_relay',
                 'request_id': request_id,
             },
@@ -128,15 +157,15 @@ async def on_compute_request(msg):
         result['request_id'] = request_id
 
         # Publish response back via WAMP (reaches phone through NAT)
-        response_topic = f'com.hertzai.hevolve.compute.response.{user_id}'
+        response_topic = f'com.hertzai.hevolve.compute.response.{owner_id}'
         if wamp_session:
             wamp_session.publish(response_topic, result)
 
     except Exception as e:
         print(f"Compute relay error: {e}")
-        if wamp_session and user_id:
+        if wamp_session and owner_id:
             wamp_session.publish(
-                f'com.hertzai.hevolve.compute.response.{user_id}',
+                f'com.hertzai.hevolve.compute.response.{owner_id}',
                 {'error': str(e), 'request_id': request_id}
             )
 
