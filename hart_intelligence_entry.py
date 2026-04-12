@@ -1052,42 +1052,43 @@ if config.get('CLOUD_FALLBACK_URL'):
 # In bundled Nunba mode the config.json is URL-template format with IP_ADDRESS dict;
 # in cloud/dev mode it has flat top-level keys.
 _ip = config.get('IP_ADDRESS', {})
-GPT_API = config.get('GPT_API', _ip.get('gpt3_url', ''))
-# If GPT_API is empty (no config.json in local/bundled mode), resolve from
-# the local LLM URL that Nunba/setup-wizard configured. This ensures
-# CustomGPT._call() can reach the llama-server for agent reasoning.
-if not GPT_API:
+
+
+def _resolve_llm_endpoint(registry_fn_name: str, env_var: str) -> str:
+    """Resolve an LLM chat-completions URL via port_registry → env var fallback.
+
+    Both GPT_API and DRAFT_GPT_API use the same 2-step resolution:
+      1. core.port_registry.<registry_fn_name>()  →  base URL  →  + /chat/completions
+      2. os.environ[env_var]                       →  base URL  →  + /chat/completions
+    Returns '' if neither resolves.
+    """
+    url = ''
     try:
-        from core.port_registry import get_local_llm_url
-        _resolved = get_local_llm_url()
-        if _resolved:
-            # get_local_llm_url returns base like http://127.0.0.1:8081/v1
-            # CustomGPT._call() needs the chat completions endpoint
-            GPT_API = _resolved.rstrip('/') + '/chat/completions'
+        import importlib
+        _mod = importlib.import_module('core.port_registry')
+        _base = getattr(_mod, registry_fn_name)()
+        if _base:
+            url = _base.rstrip('/') + '/chat/completions'
     except Exception:
         pass
-    if not GPT_API:
-        _llm_url = os.environ.get('HEVOLVE_LOCAL_LLM_URL', '')
-        if _llm_url:
-            GPT_API = _llm_url.rstrip('/') + '/chat/completions'
+    if not url:
+        _env = os.environ.get(env_var, '')
+        if _env:
+            url = _env.rstrip('/') + '/chat/completions'
+    return url
+
+
+# Main LLM endpoint (4B on :8080). Config.json first, then registry/env fallback.
+GPT_API = config.get('GPT_API', _ip.get('gpt3_url', ''))
+if not GPT_API:
+    GPT_API = _resolve_llm_endpoint('get_local_llm_url', 'HEVOLVE_LOCAL_LLM_URL')
 
 # Draft LLM endpoint — the 0.8B on :8081 that serves casual_conv=True.
 # When casual_conv=True, CustomGPT._call() posts here instead of GPT_API.
 # The 0.8B responds in ~300ms with a short reply. If the response signals
 # delegate=local (needs tools/reasoning), the caller re-dispatches with
 # casual_conv=False which hits GPT_API (the 4B on :8080).
-DRAFT_GPT_API = ''
-try:
-    from core.port_registry import get_local_draft_url
-    _draft_resolved = get_local_draft_url()
-    if _draft_resolved:
-        DRAFT_GPT_API = _draft_resolved.rstrip('/') + '/chat/completions'
-except Exception:
-    pass
-if not DRAFT_GPT_API:
-    _draft_url = os.environ.get('HEVOLVE_LOCAL_DRAFT_URL', '')
-    if _draft_url:
-        DRAFT_GPT_API = _draft_url.rstrip('/') + '/chat/completions'
+DRAFT_GPT_API = _resolve_llm_endpoint('get_local_draft_url', 'HEVOLVE_LOCAL_DRAFT_URL')
 FAV_TEACHER_API = config.get('FAV_TEACHER_API', '')
 DREAMBOOTH_API = config.get('DREAMBOOTH_API', '')
 STABLE_DIFF_API = config.get('STABLE_DIFF_API', '')
@@ -5098,6 +5099,25 @@ def _tune_resonance_after_chat(user_id, prompt_text, response_text):
 
 _tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='tts_async')
 
+# --- Language persistence (DRY: one write path) ---
+_HART_LANG_PATH = os.path.join(
+    os.path.expanduser('~'), 'Documents', 'Nunba', 'data', 'hart_language.json')
+
+
+def _persist_language(lang: str) -> bool:
+    """Write hart_language.json so next startup loads the right TTS voice.
+
+    Returns True on success, False on failure (logged silently).
+    Called from two sites: initial preferred_lang and draft language_change.
+    """
+    try:
+        os.makedirs(os.path.dirname(_HART_LANG_PATH), exist_ok=True)
+        with open(_HART_LANG_PATH, 'w') as _f:
+            json.dump({'language': lang}, _f)
+        return True
+    except Exception:
+        return False
+
 
 def _chat_reply(user_id, request_id, response_text: str, **payload):
     """Return a /chat JSON response AND fire TTS synthesis in the background.
@@ -5333,7 +5353,13 @@ def chat():
                 from integrations.social.auth import decode_jwt
                 jwt_payload = decode_jwt(_bearer_token)
                 if jwt_payload and 'user_id' in jwt_payload:
-                    data['user_id'] = jwt_payload['user_id']
+                    _body_uid = data.get('user_id')
+                    _jwt_uid = jwt_payload['user_id']
+                    if _body_uid and str(_body_uid) != str(_jwt_uid):
+                        app.logger.warning(
+                            f'/chat user_id mismatch: body={_body_uid} jwt={_jwt_uid} '
+                            f'— using JWT (body value dropped)')
+                    data['user_id'] = _jwt_uid
                     g.auth_source = 'jwt'
                     g.token_scope = jwt_payload.get('scope', 'local')
                 else:
@@ -5353,10 +5379,13 @@ def chat():
         except Exception:
             pass
 
-    # Reject unauthenticated requests on exposed deployments
-    # (central tier or HEVOLVE_REQUIRE_AUTH=true)
+    # Reject unauthenticated requests on multi-user deployments.
+    # Body-sourced user_id is only safe on flat tier (single-user desktop).
+    # On regional (multi-user LAN) or central (cloud), accepting body user_id
+    # lets any client impersonate any user.
+    _node_tier = os.environ.get('HEVOLVE_NODE_TIER', 'flat')
     if g.auth_source == 'body' and (
-        os.environ.get('HEVOLVE_NODE_TIER') == 'central' or
+        _node_tier in ('central', 'regional') or
         os.environ.get('HEVOLVE_REQUIRE_AUTH', '').lower() == 'true'
     ):
         return jsonify({
@@ -5370,16 +5399,9 @@ def chat():
     # Persist language preference so next startup warm-up loads the right TTS.
     # Lazy one-time write — avoids disk I/O on every chat request.
     if preferred_lang and preferred_lang != 'en' and not getattr(chat, '_lang_persisted', False):
-        try:
-            _hart_lang_path = os.path.join(
-                os.path.expanduser('~'), 'Documents', 'Nunba', 'data', 'hart_language.json')
-            if not os.path.exists(_hart_lang_path):
-                os.makedirs(os.path.dirname(_hart_lang_path), exist_ok=True)
-                with open(_hart_lang_path, 'w') as _f:
-                    json.dump({'language': preferred_lang}, _f)
+        if not os.path.exists(_HART_LANG_PATH):
+            if _persist_language(preferred_lang):
                 chat._lang_persisted = True
-        except Exception:
-            pass
     request_id = data.get('request_id', None)
     req_tool = data.get('tools', None)
     file_id = data.get('file_id', None)
@@ -5648,15 +5670,7 @@ def chat():
                         f'— overriding preferred_lang for this request'
                     )
                     # Persist so next requests also use the new language
-                    try:
-                        _lang_file = os.path.join(
-                            os.path.expanduser('~'), 'Documents',
-                            'Nunba', 'data', 'hart_language.json')
-                        os.makedirs(os.path.dirname(_lang_file), exist_ok=True)
-                        with open(_lang_file, 'w') as _f:
-                            json.dump({'language': _lang_change}, _f)
-                    except Exception:
-                        pass
+                    _persist_language(_lang_change)
 
                 if (result.get('is_create_agent')
                         and _draft_conf >= _DRAFT_INTENT_CONFIDENCE):
