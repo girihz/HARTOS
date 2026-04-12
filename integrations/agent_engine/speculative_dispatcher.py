@@ -17,6 +17,7 @@ Guardrails enforced at EVERY layer:
 - Budget enforcement via ResonanceService.spend_spark()
 """
 import atexit
+import json
 import logging
 import os
 import time
@@ -260,6 +261,30 @@ class SpeculativeDispatcher:
                 f"{_DRAFT_CONFIDENCE_FLOOR}) → escalating to local verifier"
             )
             delegate = 'local'
+
+        # ── Draft telemetry: log full envelope for offline calibration ──
+        # The data scientist requires this to build a confidence calibration
+        # curve and detect intent classification drift over time.
+        try:
+            _telemetry = {
+                'speculation_id': speculation_id,
+                'user_id': user_id,
+                'confidence': confidence,
+                'delegate': delegate,
+                'is_casual': parsed.get('is_casual'),
+                'is_correction': parsed.get('is_correction'),
+                'is_create_agent': parsed.get('is_create_agent'),
+                'channel_connect': parsed.get('channel_connect'),
+                'language_change': parsed.get('language_change'),
+                'draft_model': draft_model.model_id if draft_model else None,
+                'latency_ms': draft_latency_ms,
+                'reply_len': len(draft_reply) if draft_reply else 0,
+                'escalated': delegate != parsed.get('delegate', 'local'),
+            }
+            logger.info(f"draft-telemetry: {json.dumps(_telemetry)}")
+        except Exception:
+            pass  # telemetry must never break the hot path
+
         self._record_interaction_safely(
             user_id=user_id, prompt_id=prompt_id, prompt=prompt,
             response=draft_reply, model_id=draft_model.model_id,
