@@ -769,7 +769,10 @@ class ToolWorker:
 
         self._worker: Optional[GPUWorker] = None
         self._lock = threading.Lock()
-        self._last_used: float = 0.0
+        # Init to NOW so a brand-new worker isn't LRU-evicted immediately.
+        # The old 0.0 default made fresh workers look like the oldest idle
+        # in the LRU sort, causing premature eviction before first use.
+        self._last_used: float = time.monotonic()
         self._idle_timer: Optional[threading.Timer] = None
         # State change observers. Listeners receive (tool_name, event)
         # where event is 'spawned' | 'stopped' | 'crashed'. Fired AFTER
@@ -832,8 +835,9 @@ class ToolWorker:
         transient failure). Does NOT shape the result — callers that
         want uniform JSON output should use `synthesize()` instead.
         """
-        self._allocate_vram()
-
+        # VRAM allocation moved INSIDE _get_or_start (after the _worker is
+        # None check) to prevent double-counting when two concurrent call()
+        # invocations both allocate before either enters the lock. See T138.
         try:
             worker = self._get_or_start()
         except (WorkerCrash, WorkerTimeout, WorkerError) as e:
@@ -964,18 +968,35 @@ class ToolWorker:
             self._idle_timer.start()
 
     def _on_idle(self) -> None:
-        """Fired when idle_timeout elapses with no requests."""
+        """Fired when idle_timeout elapses with no requests.
+
+        TOCTOU fix (T138): the elapsed-time check AND the stop decision
+        both run INSIDE the lock. The old code checked elapsed under the
+        lock, then called stop() OUTSIDE it — a concurrent call() could
+        update _last_used between the check and the stop, killing a
+        worker that was actively serving a request.
+        """
         if self.idle_timeout <= 0:
             return
-        # Double-check the deadline in case a late request came in
         with self._lock:
             elapsed = time.monotonic() - self._last_used
             if elapsed + 0.5 < self.idle_timeout:
                 return  # someone used it recently, skip
-        logger.info(
-            f"{self.tool_name}: idle for {self.idle_timeout:.0f}s, stopping worker to free VRAM"
-        )
-        self.stop()
+            # Stop INSIDE the lock so no concurrent call() can slip in
+            # between the elapsed check and the actual termination.
+            if self._worker is not None and self._worker.is_alive():
+                logger.info(
+                    f"{self.tool_name}: idle for {self.idle_timeout:.0f}s, "
+                    f"stopping worker to free VRAM"
+                )
+                try:
+                    self._worker.stop()
+                except Exception:
+                    pass
+                self._worker = None
+                self._release_vram()
+        # Notify OUTSIDE the lock (observers may call back into us)
+        self._notify('stopped')
 
     # ── Internals ─────────────────────────────────────────────────
 
@@ -990,6 +1011,10 @@ class ToolWorker:
         spawned = False
         with self._lock:
             if self._worker is None or not self._worker.is_alive():
+                # Allocate VRAM INSIDE the lock so concurrent call()
+                # invocations don't double-count. T138 fix (c).
+                self._allocate_vram()
+
                 # Cross-worker VRAM eviction: if our budget won't fit
                 # in current free VRAM, stop LRU other workers to make
                 # room BEFORE spawning. Prevents a predictable OOM in
