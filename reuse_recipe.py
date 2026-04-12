@@ -179,7 +179,9 @@ _active_tools = {}
 _active_tools_lock = threading.Lock()
 
 redis_client = redis.StrictRedis(
-    host='azure_all_vms.hertzai.com', port=6369, db=0)
+    host=os.environ.get('HEVOLVE_REDIS_HOST', '127.0.0.1'),
+    port=int(os.environ.get('HEVOLVE_REDIS_PORT', '6379')),
+    db=0)
 agent_data = TTLCache(ttl_seconds=7200, max_size=500, name='reuse_agent_data', loader=load_agent_data)
 user_simplemem = TTLCache(ttl_seconds=7200, max_size=500, name='reuse_user_simplemem', loader=load_user_simplemem)
 # Azure OpenAI fallback config removed — credentials must come from
