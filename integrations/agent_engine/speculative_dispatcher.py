@@ -750,17 +750,46 @@ class SpeculativeDispatcher:
             'draft_first': False,
         }
 
-        # Bundled mode: in-process dispatch via Flask test_client
+        # Bundled mode: call the model's llama-server directly on its port.
+        # Do NOT use Flask test_client('/chat') — that re-enters the full
+        # HARTOS pipeline (autogen, agent creation, etc.) causing re-entrancy.
         _bundled = bool(os.environ.get('NUNBA_BUNDLED') or getattr(__import__('sys'), 'frozen', False))
         if _bundled:
             try:
-                from hart_intelligence_entry import app as _flask_app
-                with _flask_app.test_client() as client:
-                    resp = client.post('/chat', json=payload)
-                    if resp.status_code == 200:
-                        return (resp.get_json() or {}).get('response', '')
+                # Resolve the model's direct port from the catalog/port_registry
+                _port = None
+                if hasattr(model, 'port') and model.port:
+                    _port = model.port
+                if not _port:
+                    try:
+                        from core.port_registry import get_local_draft_url, get_local_llm_url
+                        _url = get_local_draft_url() or get_local_llm_url()
+                        if _url:
+                            # Extract port from URL like http://127.0.0.1:8081/v1
+                            import re as _re
+                            _m = _re.search(r':(\d+)', _url)
+                            _port = int(_m.group(1)) if _m else 8081
+                    except Exception:
+                        _port = 8081  # draft default
+                import requests as _req
+                resp = _req.post(
+                    f'http://127.0.0.1:{_port}/v1/chat/completions',
+                    json={
+                        'model': 'llama',
+                        'messages': [{'role': 'user', 'content': prompt}],
+                        'max_tokens': 500,
+                        'temperature': 0.7,
+                    },
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if 'choices' in data:
+                        return data['choices'][0]['message']['content']
+                    elif 'error' in data:
+                        logger.debug(f"Draft model error: {data['error']}")
             except Exception as e:
-                logger.debug(f"In-process dispatch failed ({model.model_id}): {e}")
+                logger.debug(f"Direct draft dispatch failed ({model.model_id}): {e}")
             return ''
 
         # HTTP mode: external HARTOS server
