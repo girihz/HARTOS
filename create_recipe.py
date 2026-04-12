@@ -1,14 +1,7 @@
 """create_recipe.py"""
-# Guard: cx_Freeze frozen builds close stdout/stderr. Autogen writes to them.
-# Must be at module level BEFORE autogen imports.
+# Guard: cx_Freeze frozen builds close stdout/stderr. Must be BEFORE autogen imports.
 import sys, os
-try:
-    if sys.stdout is None or sys.stdout.closed:
-        sys.stdout = open(os.devnull, 'w')
-    if sys.stderr is None or sys.stderr.closed:
-        sys.stderr = open(os.devnull, 'w')
-except Exception:
-    pass
+from core.io_guard import silence_stdio; silence_stdio()
 
 import ast
 import autogen

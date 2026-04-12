@@ -1,13 +1,7 @@
 """reuse_recipe.py"""
-# Guard: cx_Freeze frozen builds close stdout/stderr. Autogen writes to them.
+# Guard: cx_Freeze frozen builds close stdout/stderr.
 import sys, os
-try:
-    if sys.stdout is None or sys.stdout.closed:
-        sys.stdout = open(os.devnull, 'w')
-    if sys.stderr is None or sys.stderr.closed:
-        sys.stderr = open(os.devnull, 'w')
-except Exception:
-    pass
+from core.io_guard import silence_stdio; silence_stdio()
 
 from enum import Enum
 import random
