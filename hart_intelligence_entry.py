@@ -4776,8 +4776,12 @@ def get_ans(casual_conv, req_tool, user_id, query, custom_prompt, preferred_lang
     # Skip tool loading for casual_conv=True — the 0.8B draft handles
     # casual chat without tools, saving ~2.5s of tool registry loading.
     if casual_conv:
-        tools = []  # Empty list — prevents pydantic validation error in agent constructor
-        app.logger.info("get_tools SKIPPED (casual_conv=True) — 0s")
+        # Load full tool set even for casual chat — the LLM must have access
+        # to ALL tools so it never blindly says "I can't do that." The draft
+        # classifier already decided this is casual, but the LLM should still
+        # be able to use tools if the user's message actually needs them.
+        tools = get_tools(req_tool=req_tool, is_first=True)
+        app.logger.info("get_tools loaded for casual_conv=True (full tool set)")
     else:
         tools = get_tools(req_tool=req_tool, is_first=True)
         app.logger.info("time taken by get_tools %s seconds",
