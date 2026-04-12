@@ -281,7 +281,10 @@ FEATURE_TIER_MAP: Dict[str, Tuple[NodeTierLevel, str]] = {
     'media_agent':          (NodeTierLevel.FULL,      'HEVOLVE_MEDIA_AGENT_ENABLED'),
     'vlm_omniparser':       (NodeTierLevel.FULL,      'HEVOLVE_VLM_OMNIPARSER_ENABLED'),
     'minicpm_vision':       (NodeTierLevel.FULL,      'HEVOLVE_MINICPM_ENABLED'),
-    'video_captioning':     (NodeTierLevel.FULL,      'HEVOLVE_VIDEO_CAPTIONING_ENABLED'),
+    # video_captioning uses the 0.8B caption server (same as draft
+    # classifier) — needs only 550MB VRAM, runs at STANDARD tier.
+    # MiniCPM stays at FULL for richer captioning when VRAM allows.
+    'video_captioning':     (NodeTierLevel.STANDARD,  'HEVOLVE_VIDEO_CAPTIONING_ENABLED'),
     # Compute host tier - regional hosting
     'local_llm_large':      (NodeTierLevel.COMPUTE_HOST, 'HEVOLVE_LOCAL_LLM_LARGE_ENABLED'),
     'regional_host':        (NodeTierLevel.COMPUTE_HOST, 'HEVOLVE_REGIONAL_HOST_ELIGIBLE'),
