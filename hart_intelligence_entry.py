@@ -559,6 +559,23 @@ try:
 except Exception as e:
     app.logger.warning(f"Security middleware not applied: {e}")
 
+# Boot-time tier safety check: warn if HEVOLVE_NODE_TIER is unset on non-bundled.
+# A misconfigured central/regional node defaults to 'flat' and silently accepts
+# body-sourced user_id without auth — the CISO flagged this as a data-exfil risk.
+_boot_tier = os.environ.get('HEVOLVE_NODE_TIER')
+_is_bundled = bool(os.environ.get('NUNBA_BUNDLED') or getattr(sys, 'frozen', False))
+if not _boot_tier and not _is_bundled:
+    app.logger.warning(
+        'HEVOLVE_NODE_TIER not set — defaulting to "flat" (no auth on /chat). '
+        'Set HEVOLVE_NODE_TIER=regional or =central for multi-user deployments.')
+elif _boot_tier in ('regional', 'central'):
+    # Verify JWT secret exists, otherwise auth enforcement is pointless
+    _jwt_secret = os.environ.get('SECRET_KEY', '') or app.config.get('SECRET_KEY', '')
+    if not _jwt_secret:
+        app.logger.error(
+            f'HEVOLVE_NODE_TIER={_boot_tier} but no SECRET_KEY configured! '
+            f'JWT auth will reject ALL requests. Set SECRET_KEY env var.')
+
 # Security: Block inspect.getsource() for protected packages (hevolveai)
 try:
     from security.source_protection import install_source_guards
@@ -3241,6 +3258,14 @@ class CustomGPT(LLM):
         return "custom"
 
     def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+        # Guard: if no LLM endpoint is configured, return gracefully instead
+        # of crashing with MissingSchema on every request (SRE FM3 fix).
+        if not (DRAFT_GPT_API or GPT_API):
+            app.logger.error(
+                'No LLM endpoint configured (GPT_API and DRAFT_GPT_API both empty). '
+                'Set HEVOLVE_LOCAL_LLM_URL or configure port_registry.')
+            return "I'm not available right now — no language model endpoint is configured."
+
         start_time = time.time()
         self.count += 1
         # self.total_tokens = 0
@@ -5109,7 +5134,10 @@ def _persist_language(lang: str) -> bool:
 
     Returns True on success, False on failure (logged silently).
     Called from two sites: initial preferred_lang and draft language_change.
+    Validates lang against SUPPORTED_LANG_DICT to prevent garbage writes.
     """
+    if not lang or lang[:2] not in SUPPORTED_LANG_DICT:
+        return False
     try:
         os.makedirs(os.path.dirname(_HART_LANG_PATH), exist_ok=True)
         with open(_HART_LANG_PATH, 'w') as _f:
@@ -5356,8 +5384,12 @@ def chat():
                     _body_uid = data.get('user_id')
                     _jwt_uid = jwt_payload['user_id']
                     if _body_uid and str(_body_uid) != str(_jwt_uid):
+                        # Sanitize for log injection (strip newlines/ANSI escapes)
+                        import re as _re
+                        _safe_body = _re.sub(r'[\x00-\x1f\x7f-\x9f]', '', str(_body_uid))[:64]
+                        _safe_jwt = _re.sub(r'[\x00-\x1f\x7f-\x9f]', '', str(_jwt_uid))[:64]
                         app.logger.warning(
-                            f'/chat user_id mismatch: body={_body_uid} jwt={_jwt_uid} '
+                            f'/chat user_id mismatch: body={_safe_body} jwt={_safe_jwt} '
                             f'— using JWT (body value dropped)')
                     data['user_id'] = _jwt_uid
                     g.auth_source = 'jwt'
