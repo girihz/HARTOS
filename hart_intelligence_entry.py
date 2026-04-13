@@ -5180,7 +5180,8 @@ def _chat_reply(user_id, request_id, response_text: str, **payload):
     """
     if response_text:
         try:
-            _tts_synthesize_and_publish(response_text, user_id, request_id)
+            _lang = payload.get('preferred_lang', 'en')
+            _tts_synthesize_and_publish(response_text, user_id, request_id, language=_lang)
         except Exception as e:
             # Never let a TTS failure block delivery of the text reply.
             app.logger.debug(f"_chat_reply: TTS dispatch skipped: {e}")
@@ -5207,7 +5208,7 @@ def _chat_reply(user_id, request_id, response_text: str, **payload):
     return jsonify(payload)
 
 
-def _tts_synthesize_and_publish(text, user_id, request_id):
+def _tts_synthesize_and_publish(text, user_id, request_id, language='en'):
     """Fire-and-forget: synthesize TTS, push audio via WAMP.
 
     Same pattern as chatbot_pipeline/chatbot.py:
@@ -5258,7 +5259,7 @@ def _tts_synthesize_and_publish(text, user_id, request_id):
             _clean = _re.sub(r'\s+', ' ', _clean).strip()         # collapse whitespace
             if not _clean:
                 return  # nothing left after cleaning
-            _raw = synthesize_text(_clean)
+            _raw = synthesize_text(_clean, language=language)
             app.logger.info(f"TTS async: synthesize_text returned: {_raw}")
             # synthesize_text may return a file path string OR a JSON dict/string
             # with {"path": "...", "duration": ...}. Normalize to a file path.
@@ -5769,6 +5770,7 @@ def chat():
                         language_change=result.get('language_change', ''),
                         latency_ms=result.get('latency_ms'),
                         user_prompt=prompt,
+                        preferred_lang=preferred_lang,
                     )
         except ImportError:
             pass
