@@ -263,15 +263,8 @@ class SpeculativeDispatcher:
             )
             delegate = 'local'
 
-        # Non-Latin languages: default is native script (user selected that
-        # language). The 0.8B draft can't produce correct native script, so
-        # delegate to 4B. The draft's romanized reply serves as fast standby.
-        # If user writes in romanized Latin, the 4B will match their style.
-        if preferred_lang and not preferred_lang.startswith('en'):
-            _NON_LATIN = {'ta','hi','bn','te','mr','gu','kn','ml','pa','or',
-                          'ar','he','th','ko','ja','zh','ru','uk','el','ne'}
-            if preferred_lang[:2] in _NON_LATIN and delegate == 'none':
-                delegate = 'local'
+        # Non-Latin languages skip draft entirely (hart_intelligence_entry.py)
+        # so this code path is only reached for English/Latin-script languages.
 
         # ── Draft telemetry: log full envelope for offline calibration ──
         # The data scientist requires this to build a confidence calibration
