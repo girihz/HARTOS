@@ -642,13 +642,18 @@ class ModelOrchestrator:
             _pinned = False
             _pressure_evict_only = False
             if entry.model_type == 'llm':
-                _eid = entry.id.lower()
-                # Draft tier — always first-contact, always pinned.
-                if '0.8b' in _eid or 'draft' in _eid or 'caption' in _eid:
+                # Use catalog purpose assignment (admin-configurable).
+                # Fallback: pattern match on ID for backward compat.
+                _purposes = getattr(entry, 'purposes', []) or []
+                if 'draft' in _purposes or (
+                    not _purposes and any(
+                        t in entry.id.lower() for t in ('0.8b', 'draft', 'caption')
+                    )
+                ):
                     _pinned = True
                 else:
-                    # Main chat tier — 2B / 4B / larger. Survive idle
-                    # sweeps but yield under real VRAM pressure.
+                    # Main chat tier — survive idle sweeps, yield under
+                    # real VRAM pressure.
                     _pressure_evict_only = True
 
             _priority = ModelPriority.ACTIVE if entry.model_type == 'llm' else ModelPriority.WARM

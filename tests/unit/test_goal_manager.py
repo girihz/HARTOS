@@ -502,20 +502,21 @@ class TestBuildPrompt(unittest.TestCase):
         self.assertIn('MyTitle', result)
         self.assertIn('MyDesc', result)
 
-    def test_build_prompt_guardrails_unavailable_returns_none(self):
-        """When hive_guardrails can't be imported, build_prompt returns None (fail-closed)."""
+    def test_build_prompt_guardrails_unavailable_proceeds_in_warn_mode(self):
+        """When hive_guardrails can't be imported, build_prompt proceeds (warn mode)."""
         import builtins
         original_import = builtins.__import__
         def fail_guardrails(name, *args, **kwargs):
             if 'hive_guardrails' in name:
                 raise ImportError("mocked")
             return original_import(name, *args, **kwargs)
-        # Clear it from modules so the import is attempted fresh
         sys.modules.pop('security.hive_guardrails', None)
         with patch('builtins.__import__', side_effect=fail_guardrails):
             result = self.gm.GoalManager.build_prompt(
                 {'goal_type': 'unknown_xyz', 'title': 'T', 'description': 'D'})
-        self.assertIsNone(result)
+        # Warn mode: returns a basic prompt with title + description
+        self.assertIsNotNone(result)
+        self.assertIn('T', result)
 
     def test_build_prompt_sanitizes_title(self):
         """Title is truncated to 200 chars and control chars are stripped."""

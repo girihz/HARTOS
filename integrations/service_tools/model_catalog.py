@@ -154,6 +154,7 @@ class ModelEntry:
     enabled: bool = True
     auto_load: bool = False
     pinned: bool = False
+    purposes: List[str] = field(default_factory=list)  # e.g. ['draft', 'main', 'caption']
 
     def to_dict(self) -> dict:
         """Serialize to JSON-safe dict (excludes runtime state)."""
@@ -383,6 +384,55 @@ class ModelCatalog:
         if entry:
             entry.error = error
             entry.loaded = False
+
+    # ── Purpose assignment ──────────────────────────────────────
+
+    # Universal purpose list.  A single model can serve ANY combination
+    # (e.g. Qwen3.5-0.8B is LLM+VLM → purposes=['draft','caption','grounding']).
+    # Purposes are NOT gated by model_type — the model's actual capabilities
+    # determine what it can do, not an artificial type label.
+    ALL_PURPOSES: List[str] = [
+        'draft',       # Fast classifier / speculative decode
+        'main',        # Primary model for this capability
+        'caption',     # Image/video captioning (VLM)
+        'grounding',   # GUI element grounding (VLM)
+    ]
+
+    def get_by_purpose(self, purpose: str) -> Optional[ModelEntry]:
+        """Return the model assigned to *purpose*, or None."""
+        for entry in self._entries.values():
+            if purpose in entry.purposes and entry.enabled:
+                return entry
+        return None
+
+    def set_purpose(self, model_id: str, purpose: str, enabled: bool = True) -> bool:
+        """Toggle a purpose on/off for a model.
+
+        When enabling: clears the same purpose from any other model
+        (one model per purpose globally), then adds it.
+        When disabling: removes the purpose from this model.
+        Persists to disk.  Returns True on success.
+        """
+        with self._lock:
+            entry = self._entries.get(model_id)
+            if entry is None:
+                return False
+            if purpose not in self.ALL_PURPOSES:
+                return False
+            if enabled:
+                # Clear the same purpose from any other model
+                for other in self._entries.values():
+                    if other.id != model_id and purpose in other.purposes:
+                        other.purposes = [p for p in other.purposes if p != purpose]
+                if purpose not in entry.purposes:
+                    entry.purposes.append(purpose)
+            else:
+                entry.purposes = [p for p in entry.purposes if p != purpose]
+            self._dirty = True
+        self._save()
+        logger.info(f"Model {model_id} purpose {purpose!r} {'enabled' if enabled else 'disabled'} "
+                    f"→ purposes={entry.purposes}")
+        return True
 
     # ── Auto-populate from registered subsystem populators ─────────
 
