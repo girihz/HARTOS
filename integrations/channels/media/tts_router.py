@@ -265,13 +265,14 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
 LANG_ENGINE_PREFERENCE: Dict[str, List[str]] = {
     # English ladder (quality-then-speed):
     #   1. chatterbox_turbo — big GPU voice-clone, highest quality
-    #   2. luxtts           — CPU voice-clone at decent quality
-    #   3. kokoro           — 82M neural, CPU-friendly, beats Piper
-    #   4. pocket_tts       — small cloneable fallback
-    #   5. cosyvoice3       — big multilingual GPU, usable for EN
-    #   6. piper            — bundled CPU fallback, always ships
-    #   7. espeak           — absolute last-resort phoneme synth
-    'en': ['chatterbox_turbo', 'luxtts', 'kokoro', 'pocket_tts', 'cosyvoice3', 'piper', 'espeak'],
+    #   2. kokoro           — 82M neural, CPU-friendly, best non-GPU quality
+    #   3. pocket_tts       — small cloneable fallback
+    #   4. cosyvoice3       — big multilingual GPU, usable for EN
+    #   5. piper            — bundled CPU fallback, always ships
+    #   6. espeak           — absolute last-resort phoneme synth
+    # luxtts dropped from default ladder (poor naturalness); still available
+    # for explicit voice-clone requests via direct engine selection.
+    'en': ['chatterbox_turbo', 'kokoro', 'pocket_tts', 'cosyvoice3', 'piper', 'espeak'],
     # Indic languages
     'hi': ['indic_parler', 'chatterbox_ml', 'cosyvoice3', 'espeak'],
     'ta': ['indic_parler', 'chatterbox_ml', 'espeak'],
