@@ -2429,16 +2429,14 @@ class TestBootstrapGoals:
         from integrations.agent_engine.goal_seeding import SEED_BOOTSTRAP_GOALS
         count = seed_bootstrap_goals(db, platform_product_id=str(test_product.id))
         assert count == len(SEED_BOOTSTRAP_GOALS)
+        # Build allowlist from actual seed data (use_product=True goals get product_id)
+        product_slugs = {g['slug'] for g in SEED_BOOTSTRAP_GOALS if g.get('use_product')}
         for g in db.query(AgentGoal).filter(AgentGoal.status == 'active').all():
             cfg = g.config_json or {}
             slug = cfg.get('bootstrap_slug', '')
-            if slug in ('bootstrap_marketing_awareness', 'bootstrap_referral_campaign',
-                        'bootstrap_growth_analytics', 'bootstrap_crowdsource_intelligence'):
+            if slug in product_slugs:
                 assert g.product_id == str(test_product.id), f"{slug} should have product_id"
-            elif slug and slug not in ('bootstrap_marketing_awareness',
-                                        'bootstrap_referral_campaign',
-                                        'bootstrap_growth_analytics',
-                                        'bootstrap_crowdsource_intelligence'):
+            elif slug:
                 assert g.product_id is None, f"{slug} should NOT have product_id"
 
     def test_system_agent_created(self, db):

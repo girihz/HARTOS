@@ -427,6 +427,20 @@ def init_social(app):
         except Exception as e:
             logger.debug(f"Model lifecycle manager start skipped: {e}")
 
+        # Distributed worker loop — claims tasks from shared Redis queue.
+        # Self-gates: start() is a no-op when Redis is unreachable.
+        try:
+            from integrations.distributed_agent.worker_loop import worker_loop as _wl
+            _wl.start()
+            if _wl._running:
+                watchdog.register('distributed_worker',
+                                  expected_interval=_wl._interval * 4,
+                                  restart_fn=_wl.start,
+                                  stop_fn=_wl.stop)
+                logger.info("Distributed worker loop started")
+        except Exception as e:
+            logger.debug(f"Distributed worker loop start skipped: {e}")
+
         watchdog.start()
         logger.info(f"NodeWatchdog started: monitoring "
                     f"{len(watchdog._threads)} threads")
