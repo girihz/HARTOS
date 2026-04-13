@@ -32,23 +32,50 @@ SERVERS_DIR = os.path.join(os.path.dirname(__file__), 'servers')
 # catalog_id links RTM tools to ModelCatalog entries so the orchestrator stays in sync.
 # None = no catalog entry (tool is a wrapper or resolved dynamically).
 TOOL_CONFIGS = {
+    # Video generation
     'wan2gp': {
         'repo_url': 'https://github.com/deepbeepmeep/Wan2GP',
         'server_script': os.path.join(SERVERS_DIR, 'wan2gp_server.py'),
         'download_type': 'git',
+        'catalog_id': 'video_gen-wan2gp',
+    },
+    'ltx2': {
+        'server_script': os.path.join(SERVERS_DIR, 'ltx2_server.py') if SERVERS_DIR else None,
+        'hf_repo_id': 'Lightricks/LTX-Video',
+        'download_type': 'hf',
         'catalog_id': 'video_gen-ltx2',
     },
+    # Music / singing
+    'acestep': {
+        'repo_url': 'https://github.com/ace-step/ACE-Step-1.5',
+        'download_type': 'git',
+        'run_command': ['uv', 'run', 'acestep-api', '--port', '8001'],
+        'catalog_id': 'audio_gen-acestep',
+    },
+    'diffrhythm': {
+        'hf_repo_id': 'DiffRhythm/diffrhythm-v1',
+        'download_type': 'hf',
+        'catalog_id': 'audio_gen-diffrhythm',
+    },
+    # TTS audio suite (multiple engines)
     'tts_audio_suite': {
         'repo_url': 'https://github.com/diodiogod/TTS-Audio-Suite',
         'server_script': os.path.join(SERVERS_DIR, 'tts_audio_suite_server.py'),
         'download_type': 'git',
-        'catalog_id': None,  # wrapper — individual engines have their own entries
+        'catalog_id': None,
     },
+    # STT
     'whisper': {
         'hf_repo_id': 'openai/whisper-base',
         'download_type': 'hf',
         'is_inprocess': True,
-        'catalog_id': None,  # resolved dynamically from select_whisper_model()
+        'catalog_id': None,
+    },
+    # Vision
+    'minicpm': {
+        'hf_repo_id': 'openbmb/MiniCPM-V-2_6',
+        'download_type': 'hf',
+        'catalog_id': None,
     },
 }
 
