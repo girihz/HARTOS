@@ -53,7 +53,8 @@ services:
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-changeme}
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./init-db:/docker-entrypoint-initdb.d:ro
+      # init-db NOT mounted — 01-init.sql uses PostgreSQL syntax (incompatible).
+      # HARTOS uses SQLAlchemy create_all() for table initialization instead.
     ports:
       - "3306:3306"
     networks:
