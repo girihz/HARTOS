@@ -171,7 +171,7 @@ class AdminAPI:
                 with os.fdopen(fd, 'w') as f:
                     json.dump(self._config, f, indent=2, default=str)
                 os.replace(tmp_path, config_path)  # atomic rename
-            except:
+            except Exception:
                 os.unlink(tmp_path)
                 raise
             logger.info("Saved admin configuration to %s", config_path)

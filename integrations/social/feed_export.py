@@ -193,7 +193,7 @@ class FeedGenerator:
                 if isinstance(created_at, str):
                     try:
                         created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                    except:
+                    except Exception:
                         created_at = datetime.now(timezone.utc)
                 ET.SubElement(item, 'pubDate').text = created_at.strftime(
                     '%a, %d %b %Y %H:%M:%S +0000')

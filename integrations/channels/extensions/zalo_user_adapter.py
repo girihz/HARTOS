@@ -157,7 +157,7 @@ class ZaloUserAdapter(ChannelAdapter):
                     self._user_id = data.get("data", {}).get("user_id")
                     return True
                 return False
-        except:
+        except Exception:
             return False
 
     async def disconnect(self) -> None:
