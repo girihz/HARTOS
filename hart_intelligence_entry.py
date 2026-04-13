@@ -5298,8 +5298,18 @@ def _tts_synthesize_and_publish(text, user_id, request_id):
             _clean = _re.sub(r'\s+', ' ', _clean).strip()         # collapse whitespace
             if not _clean:
                 return  # nothing left after cleaning
-            audio_path = synthesize_text(_clean)
-            app.logger.info(f"TTS async: synthesize_text returned: {audio_path}")
+            _raw = synthesize_text(_clean)
+            app.logger.info(f"TTS async: synthesize_text returned: {_raw}")
+            # synthesize_text may return a file path string OR a JSON dict/string
+            # with {"path": "...", "duration": ...}. Normalize to a file path.
+            audio_path = _raw
+            if isinstance(_raw, dict):
+                audio_path = _raw.get('path', '')
+            elif isinstance(_raw, str) and _raw.startswith('{'):
+                try:
+                    audio_path = json.loads(_raw).get('path', '')
+                except (json.JSONDecodeError, AttributeError):
+                    pass
             if audio_path and os.path.isfile(audio_path):
                 audio_filename = os.path.basename(audio_path)
                 audio_url = f'/tts/audio/{audio_filename}'
@@ -5740,6 +5750,7 @@ def chat():
                 prompt, str(user_id),
                 str(prompt_id) if prompt_id else str(request_id or 'anon'),
                 agent_persona=custom_prompt or None,
+                preferred_lang=preferred_lang,
             )
             # Only commit when the dispatcher actually produced a reply.
             # no_draft_model / circuit breaker / guardrail block all leave

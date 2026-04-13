@@ -179,7 +179,8 @@ class SpeculativeDispatcher:
     def dispatch_draft_first(self, prompt: str, user_id: str, prompt_id: str,
                              goal_id: str = None, goal_type: str = 'general',
                              node_id: str = None,
-                             agent_persona: Optional[str] = None) -> dict:
+                             agent_persona: Optional[str] = None,
+                             preferred_lang: str = 'en') -> dict:
         """Draft-first dispatch: tiny model answers immediately, signals whether
         to delegate.
 
@@ -235,7 +236,7 @@ class SpeculativeDispatcher:
 
         # ── 2. Dispatch the draft with the classifier prompt ──
         draft_prompt = self._build_draft_classifier_prompt(
-            prompt, agent_persona=agent_persona)
+            prompt, agent_persona=agent_persona, preferred_lang=preferred_lang)
         start = time.time()
         draft_raw = self._dispatch_to_model(
             draft_model, draft_prompt, user_id, prompt_id, goal_type, goal_id)
@@ -408,6 +409,7 @@ class SpeculativeDispatcher:
 
     def _build_draft_classifier_prompt(
         self, user_prompt: str, agent_persona: Optional[str] = None,
+        preferred_lang: str = 'en',
     ) -> str:
         """Wrap the user prompt with the draft-first classifier instruction.
 
@@ -433,8 +435,29 @@ class SpeculativeDispatcher:
                 "specified. Persona:\n"
                 f"{snippet}\n\n"
             )
+        lang_block = ''
+        if preferred_lang and not preferred_lang.startswith('en'):
+            try:
+                from hart_intelligence_entry import SUPPORTED_LANG_DICT
+                lang_name = SUPPORTED_LANG_DICT.get(preferred_lang[:2], preferred_lang)
+            except ImportError:
+                lang_name = preferred_lang
+            # Same language + tone prompt the 4B path uses (with examples, code-mixing rules)
+            _tone = ''
+            try:
+                from core.agent_personality import get_regional_tone_prompt
+                _tone = get_regional_tone_prompt(preferred_lang)
+            except Exception:
+                pass
+            lang_block = (
+                f"Answer questions accurately and respond as quickly as possible in {lang_name}. "
+                f"Keep responses under 200 words. Be colloquial and natural.\n"
+                f"{_tone}\n\n"
+            )
+
         return (
             persona_block
+            + lang_block
             + "You are a fast local first-responder. Produce a short reply AND "
             "classify the user's intent on several independent axes. The "
             "classification flags are what route the message downstream — "
