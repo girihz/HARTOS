@@ -5702,7 +5702,13 @@ def chat():
     # populated with the persona and is forwarded so the standby reply
     # comes back in character.
     _is_agentic_orchestration = bool(create_agent) or bool(autonomous)
-    if draft_first and prompt and user_id and not _is_agentic_orchestration:
+    # Skip draft-first for non-Latin-script languages — the 0.8B can't produce
+    # correct native script (outputs garbled Kannada for Tamil, etc.). Going
+    # straight to the 4B avoids wasted compute on a useless standby reply.
+    _NON_LATIN_LANGS = {'ta','hi','bn','te','mr','gu','kn','ml','pa','or',
+                        'ar','he','th','ko','ja','zh','ru','uk','el','ne'}
+    _skip_draft_for_lang = preferred_lang and preferred_lang[:2] in _NON_LATIN_LANGS
+    if draft_first and not _skip_draft_for_lang and prompt and user_id and not _is_agentic_orchestration:
         try:
             from integrations.agent_engine.speculative_dispatcher import get_speculative_dispatcher
             dispatcher = get_speculative_dispatcher()
