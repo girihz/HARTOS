@@ -22,6 +22,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from core.http_pool import pooled_get, pooled_post, pooled_patch, pooled_request
 from core.port_registry import get_port as _get_llm_port, get_local_llm_url
+import txaio; txaio.use_asyncio()  # Must be before any autobahn import
 from autobahn.asyncio.component import Component, run
 import uuid
 import asyncio
