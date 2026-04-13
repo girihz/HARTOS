@@ -416,7 +416,24 @@ def _build_tone_prompt(lang_code: str) -> str:
     lang_name, tier, phrases = entry
 
     # Compact rules — injected into all tiers
+    # Languages with non-Latin scripts must use native script, not romanization
+    _NON_LATIN_SCRIPTS = {
+        'ta': 'Tamil (தமிழ்)', 'hi': 'Devanagari (हिन्दी)', 'bn': 'Bengali (বাংলা)',
+        'te': 'Telugu (తెలుగు)', 'mr': 'Devanagari (मराठी)', 'gu': 'Gujarati (ગુજરાતી)',
+        'kn': 'Kannada (ಕನ್ನಡ)', 'ml': 'Malayalam (മലയാളം)', 'pa': 'Gurmukhi (ਪੰਜਾਬੀ)',
+        'or': 'Odia (ଓଡ଼ିଆ)', 'ar': 'Arabic (العربية)', 'he': 'Hebrew (עברית)',
+        'th': 'Thai (ไทย)', 'ko': 'Hangul (한국어)', 'ja': 'Japanese (日本語)',
+        'zh': 'Chinese (中文)', 'ru': 'Cyrillic (Русский)', 'uk': 'Cyrillic (Українська)',
+        'el': 'Greek (Ελληνικά)', 'ne': 'Devanagari (नेपाली)',
+    }
+    _script_note = ''
+    if lang_code in _NON_LATIN_SCRIPTS:
+        _script_note = (
+            f'IMPORTANT: Write in {_NON_LATIN_SCRIPTS[lang_code]} script, '
+            f'NOT romanized Latin. Example: use "வணக்கம்" not "Vanakkam". '
+        )
     _rules = (
+        f'{_script_note}'
         'Say "I" not "we". Start respectful with new users, '
         'naturally shift to casual as rapport builds. Match user\'s register. '
         f'Use correct {lang_name} grammar or switch to English. '
