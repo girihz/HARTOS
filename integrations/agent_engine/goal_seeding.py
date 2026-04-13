@@ -1034,7 +1034,7 @@ SEED_BOOTSTRAP_GOALS = [
     },
     {
         'slug': 'bootstrap_compute_optimizer',
-        'goal_type': 'system_health',
+        'goal_type': 'hive_infra',
         'title': 'System Compute Optimizer — Net Positive on Every Machine',
         'description': (
             'Monitor and optimize system compute resources. '
