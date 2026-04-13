@@ -87,19 +87,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_worker_attr='_turbo',
         required_package='chatterbox',
     ),
-    'luxtts': TTSEngineSpec(
-        engine_id='luxtts',
-        device=TTSDevice.CPU_ONLY,
-        vram_key='',
-        languages=('en',),
-        quality=0.93,
-        voice_clone=True,
-        latency_gpu_ms=0,
-        latency_cpu_ms=800,
-        latency_cloud_ms=0,
-        tool_module='integrations.service_tools.luxtts_tool',
-        tool_function='luxtts_synthesize',
-    ),
+    # luxtts REMOVED — poor audio quality, not suitable for any use case.
     'cosyvoice3': TTSEngineSpec(
         engine_id='cosyvoice3',
         device=TTSDevice.GPU_ONLY,
