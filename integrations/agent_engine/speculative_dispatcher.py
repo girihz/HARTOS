@@ -263,6 +263,19 @@ class SpeculativeDispatcher:
             )
             delegate = 'local'
 
+        # Non-Latin-script languages: 0.8B draft can't produce correct script
+        # (confuses Dravidian scripts, outputs garbled text). Always delegate
+        # to the 4B which handles Indic/CJK/Arabic script properly.
+        # The draft's romanized reply serves as a fast standby.
+        if preferred_lang and not preferred_lang.startswith('en'):
+            _NON_LATIN = {'ta','hi','bn','te','mr','gu','kn','ml','pa','or',
+                          'ar','he','th','ko','ja','zh','ru','uk','el','ne'}
+            if preferred_lang[:2] in _NON_LATIN and delegate == 'none':
+                logger.info(
+                    f"draft-first: non-Latin lang '{preferred_lang}' "
+                    f"→ escalating to local for proper script")
+                delegate = 'local'
+
         # ── Draft telemetry: log full envelope for offline calibration ──
         # The data scientist requires this to build a confidence calibration
         # curve and detect intent classification drift over time.

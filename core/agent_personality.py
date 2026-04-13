@@ -426,11 +426,16 @@ def _build_tone_prompt(lang_code: str) -> str:
         'zh': 'Chinese (中文)', 'ru': 'Cyrillic (Русский)', 'uk': 'Cyrillic (Українська)',
         'el': 'Greek (Ελληνικά)', 'ne': 'Devanagari (नेपाली)',
     }
+    # Note: native script instruction kept for 4B+ models that can handle it.
+    # The 0.8B draft confuses Dravidian scripts (outputs Kannada for Tamil).
+    # The speculative dispatcher forces delegate="local" for non-Latin langs
+    # so the 4B produces the actual reply.
     _script_note = ''
     if lang_code in _NON_LATIN_SCRIPTS:
         _script_note = (
-            f'IMPORTANT: Write in {_NON_LATIN_SCRIPTS[lang_code]} script, '
-            f'NOT romanized Latin. Example: use "வணக்கம்" not "Vanakkam". '
+            f'Write in {_NON_LATIN_SCRIPTS[lang_code]} script when possible. '
+            f'If you cannot produce correct script, use romanized text with '
+            f'proper grammar instead of wrong script. '
         )
     _rules = (
         f'{_script_note}'
