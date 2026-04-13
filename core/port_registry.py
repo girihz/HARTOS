@@ -194,15 +194,21 @@ def get_local_draft_url() -> str:
 
     The draft model is the Qwen3.5-0.8B instance that answers
     dispatch_draft_first calls and generates continuous video captions.
-    It runs on a DIFFERENT port than the main 4B so both can stay
-    resident at once — otherwise draft-first hits the main server and
-    pays main-model latency for every greeting.
+
+    On ≥8GB VRAM, draft runs on a SEPARATE port (8081) from the main
+    model (8080) so both stay resident simultaneously.
+
+    On ≤6GB VRAM (no separate draft server), the draft URL points to
+    the MAIN model's port so the same model serves both roles — draft
+    classification AND agentic responses. This avoids the "draft offline
+    → fall through → slow main" latency penalty by letting the speculative
+    dispatcher talk to whatever model IS running.
 
     Resolution order:
-      1. HEVOLVE_DRAFT_LLM_URL   — full URL override
-      2. HEVOLVE_VLM_CAPTION_PORT — port override (same env var
-         LlamaConfig.start_caption_server honours)
-      3. port_registry default    — get_port('vlm_caption') = 8081
+      1. HEVOLVE_DRAFT_LLM_URL    — full URL override
+      2. HEVOLVE_VLM_CAPTION_PORT — port override (separate draft server)
+      3. If draft server is running on default port → use it
+      4. Otherwise → fall back to main LLM URL (same model, dual role)
 
     Returns full URL with /v1 suffix (OpenAI-compatible).
     """
@@ -212,9 +218,27 @@ def get_local_draft_url() -> str:
         if not port:
             port = str(get_port('vlm_caption'))
         url = f'http://127.0.0.1:{port}/v1'
+
     url = url.rstrip('/')
     if not url.endswith('/v1'):
         url += '/v1'
+
+    # If draft port has no server, use the main LLM instead (single-model mode).
+    # This makes the main model serve BOTH draft and agentic roles on low VRAM.
+    try:
+        import socket
+        _body = url.split('://', 1)[-1].split('/', 1)[0]
+        host, _, port_s = _body.partition(':')
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.3)
+        result = s.connect_ex((host or '127.0.0.1', int(port_s or 8081)))
+        s.close()
+        if result != 0:
+            # Draft port not listening → use main model as draft
+            return get_local_llm_url()
+    except Exception:
+        pass
+
     return url
 
 
