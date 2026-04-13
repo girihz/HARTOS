@@ -427,6 +427,11 @@ def _build_tone_prompt(lang_code: str) -> str:
         'el': 'Greek (Ελληνικά)', 'ne': 'Devanagari (नेपाली)',
     }
     _script_note = ''
+    if lang_code in _NON_LATIN_SCRIPTS:
+        _script_note = (
+            f'SCRIPT: By default write in {_NON_LATIN_SCRIPTS[lang_code]} script. '
+            f'If the user writes in romanized Latin, match their style and respond romanized. '
+        )
     _rules = (
         f'{_script_note}'
         'Say "I" not "we". Start respectful with new users, '
