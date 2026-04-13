@@ -349,9 +349,10 @@ class NodeWatchdog:
                     # instances with flapping daemons (SRE audit finding).
                     if len(self._restart_log) > 100:
                         self._restart_log = self._restart_log[-100:]
+            _count = info.restart_count if info else '?'
             logger.critical(
                 f"Watchdog: thread '{name}' RESTARTED successfully "
-                f"(total restarts: {info.restart_count})")
+                f"(total restarts: {_count})")
             return True
         except Exception as e:
             with self._lock:
