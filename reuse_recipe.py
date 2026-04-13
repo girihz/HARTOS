@@ -43,6 +43,7 @@ from autogen.agentchat.contrib.capabilities import transform_messages, transform
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import traceback
+import txaio; txaio.use_asyncio()  # Must be before any autobahn import
 from autobahn.asyncio.component import Component
 
 from threadlocal import thread_local_data
