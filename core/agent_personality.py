@@ -426,18 +426,7 @@ def _build_tone_prompt(lang_code: str) -> str:
         'zh': 'Chinese (中文)', 'ru': 'Cyrillic (Русский)', 'uk': 'Cyrillic (Українська)',
         'el': 'Greek (Ελληνικά)', 'ne': 'Devanagari (नेपाली)',
     }
-    # Code-mixing script rule: each word in its ORIGINAL language's script.
-    # Tamil words → Tamil script, English words → English script, mixed naturally.
-    # Example: "நான் உன் code check பண்றேன்" (not "நான் உன் கோட் செக் பண்றேன்")
     _script_note = ''
-    if lang_code in _NON_LATIN_SCRIPTS:
-        _script_note = (
-            f'SCRIPT: Use {_NON_LATIN_SCRIPTS[lang_code]} script for {lang_name} words '
-            f'and English script for English words — mixed naturally in one sentence. '
-            f'Do NOT transliterate English words into {lang_name} script. '
-            f'Do NOT write {lang_name} words in Latin/romanized form. '
-            f'Example for Tamil: "நான் உன் code check பண்றேன்" — Tamil words in தமிழ், English words in English. '
-        )
     _rules = (
         f'{_script_note}'
         'Say "I" not "we". Start respectful with new users, '
