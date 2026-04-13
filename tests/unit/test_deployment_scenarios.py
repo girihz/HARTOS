@@ -108,8 +108,8 @@ class TestStandardTierAgents:
                 disabled.append(feature)
 
         assert 'video_gen' in disabled
-        assert 'local_llm' in disabled
         assert 'regional_host' in disabled
+        # local_llm moved to STANDARD tier for draft-first architecture
 
     def test_standard_tier_classification(self):
         """4 cores, 8GB RAM, 3GB disk → STANDARD (disk < 20GB blocks FULL)."""

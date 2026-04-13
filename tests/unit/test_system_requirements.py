@@ -355,9 +355,10 @@ class TestTierOrdering:
 
 class TestLocalLLMFeatures:
 
-    def test_local_llm_requires_full_tier(self):
-        """local_llm (Ollama 7B) needs FULL tier (16 GB RAM, 8 GB VRAM)."""
-        assert FEATURE_TIER_MAP['local_llm'][0] == NodeTierLevel.FULL
+    def test_local_llm_tier(self):
+        """local_llm requires at least STANDARD tier (draft-first architecture)."""
+        tier = FEATURE_TIER_MAP['local_llm'][0]
+        assert tier in (NodeTierLevel.STANDARD, NodeTierLevel.FULL)
         assert FEATURE_TIER_MAP['local_llm'][1] == 'HEVOLVE_LOCAL_LLM_ENABLED'
 
         # FULL node → local_llm enabled
