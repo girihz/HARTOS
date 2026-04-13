@@ -162,7 +162,7 @@ def get_agent_response(assistant: autogen.AssistantAgent, user_proxy: autogen.Us
                     )
                     key = list(user_proxy.chat_messages.keys())[0]
                     response = user_proxy.chat_messages[key][-1]['content']
-        except:
+        except Exception:
             pass
         
         return response
