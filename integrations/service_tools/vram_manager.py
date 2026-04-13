@@ -236,7 +236,7 @@ class VRAMManager:
         gpu = self.detect_gpu()
         if not gpu["cuda_available"]:
             return False  # no GPU at all
-        return self.get_free_vram() >= model_size
+        return self.get_free_vram() >= min_vram
 
     def allocate(self, tool_name: str) -> bool:
         """Reserve VRAM for a tool. Returns True if allocated."""
