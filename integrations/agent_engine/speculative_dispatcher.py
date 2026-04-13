@@ -438,7 +438,7 @@ class SpeculativeDispatcher:
         lang_block = ''
         if preferred_lang and not preferred_lang.startswith('en'):
             try:
-                from hart_intelligence_entry import SUPPORTED_LANG_DICT
+                from core.constants import SUPPORTED_LANG_DICT
                 lang_name = SUPPORTED_LANG_DICT.get(preferred_lang[:2], preferred_lang)
             except ImportError:
                 lang_name = preferred_lang
