@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # VRAM budget table: tool_name -> (min_vram_gb, model_size_gb)
 VRAM_BUDGETS: Dict[str, Tuple[float, float]] = {
     "acestep":              (6.0,  4.0),
+    "diffrhythm":           (6.0,  4.0),    # singing voice synthesis
     "wan2gp":               (8.0,  8.0),
     "ltx2":                 (6.0,  4.0),
     "minicpm":              (6.0,  4.0),
