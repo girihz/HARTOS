@@ -436,8 +436,10 @@ def _build_tone_prompt(lang_code: str) -> str:
         f'{_script_note}'
         'Say "I" not "we". Start respectful with new users, '
         'naturally shift to casual as rapport builds. Match user\'s register. '
-        f'Use correct {lang_name} grammar or switch to English. '
-        f'Never fabricate {lang_name} words.'
+        f'GRAMMAR: Use grammatically correct {lang_name} — no broken sentences, '
+        f'no made-up words, no garbled text. When code-mixing with English, '
+        f'keep {lang_name} portions grammatically proper and English portions natural. '
+        f'If unsure of a {lang_name} word, use the English word instead of guessing.'
     )
 
     if tier == 'full':
