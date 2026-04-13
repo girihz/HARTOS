@@ -29,8 +29,11 @@ DELTA_VERSION = 1
 DELTA_MAX_AGE_SECONDS = 3600  # 1 hour freshness window
 
 # ── G8: Per-node HMAC secret (generated at first boot) ──
+# Default to user-writable dir — installed builds at Program Files are read-only.
 _HMAC_SECRET_PATH = os.path.join(
-    os.environ.get('HEVOLVE_AGENT_DATA', 'agent_data'), '.hmac_secret')
+    os.environ.get('HEVOLVE_AGENT_DATA',
+                   os.path.join(os.path.expanduser('~'), '.nunba', 'agent_data')),
+    '.hmac_secret')
 
 
 def _load_or_create_hmac_secret() -> str:
