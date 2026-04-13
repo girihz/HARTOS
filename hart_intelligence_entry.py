@@ -3208,48 +3208,8 @@ def get_tools(req_tool, is_first: bool = False):
 # custom GPT
 
 
-SUPPORTED_LANG_DICT = {
-    "ar": "Arabic",
-    "bg": "Bulgarian",
-    "zh": "Chinese",
-    "zh-cn": "Chinese (Simplified)",
-    "nl": "Dutch",
-    "fi": "Finnish",
-    "fr": "French",
-    "de": "German",
-    "el": "Greek",
-    "he": "Hebrew",
-    "hu": "Hungarian",
-    "is": "Icelandic",
-    "id": "Indonesian",
-    "ko": "Korean",
-    "lv": "Latvian",
-    "ms": "Malay",
-    "fa": "Persian",
-    "pl": "Polish",
-    "pt": "Portuguese",
-    "ro": "Romanian",
-    "ru": "Russian",
-    "es": "Spanish",
-    "sw": "Swahili",
-    "sv": "Swedish",
-    "th": "Thai",
-    "tr": "Turkish",
-    "uk": "Ukrainian",
-    "ur": "Urdu",
-    "vi": "Vietnamese",
-    "cy": "Welsh",
-    "hi": "Hindi",
-    "bn": "Bengali",
-    "ta": "Tamil",
-    "pa": "Punjabi",
-    "gu": "Gujarati",
-    "kn": "Kannada",
-    "te": "Telugu",
-    "mr": "Marathi",
-    "ml": "Malayalam",
-    "en": "English"
-}
+# Language dict — canonical in core/constants.py
+from core.constants import SUPPORTED_LANG_DICT  # noqa: E402
 
 
 class CustomGPT(LLM):
