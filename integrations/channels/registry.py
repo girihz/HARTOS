@@ -140,7 +140,7 @@ class ChannelRegistry:
                     text="Sorry, I encountered an error processing your message.",
                     reply_to=message.id,
                 )
-            except:
+            except Exception:
                 pass
 
     async def send_to_channel(

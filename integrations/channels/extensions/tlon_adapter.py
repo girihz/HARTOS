@@ -154,7 +154,7 @@ class TlonAdapter(ChannelAdapter):
                 await self._session.delete(
                     f"{self.config.ship_url}/~/channel/{self._channel_id}"
                 )
-            except:
+            except Exception:
                 pass
             await self._session.close()
             self._session = None

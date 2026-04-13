@@ -566,7 +566,7 @@ class LINEAdapter(ChannelAdapter):
                     'name': group.group_name,
                     'picture_url': group.picture_url,
                 }
-            except:
+            except Exception:
                 pass
 
             # Try to get room info (chat rooms don't have names)
@@ -576,7 +576,7 @@ class LINEAdapter(ChannelAdapter):
                     'id': chat_id,
                     'type': 'room',
                 }
-            except:
+            except Exception:
                 pass
 
             # Assume it's a user
@@ -589,7 +589,7 @@ class LINEAdapter(ChannelAdapter):
                     'picture_url': profile.picture_url,
                     'status_message': profile.status_message,
                 }
-            except:
+            except Exception:
                 pass
 
             return None

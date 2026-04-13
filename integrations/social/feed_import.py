@@ -103,7 +103,7 @@ class FeedImporter:
                     return FeedFormat.JSON
                 if 'items' in data or 'entries' in data:
                     return FeedFormat.JSON
-            except:
+            except Exception:
                 pass
 
         if '<feed' in content_lower and 'xmlns' in content_lower:
@@ -166,7 +166,7 @@ class FeedImporter:
                 parsed = feedparser._parse_date(date_str)
                 if parsed:
                     return datetime(*parsed[:6], tzinfo=timezone.utc)
-            except:
+            except Exception:
                 pass
 
         logger.warning(f"Could not parse date: {date_str}")

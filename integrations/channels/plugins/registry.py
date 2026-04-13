@@ -406,7 +406,7 @@ class PluginRegistry:
                 return -1
 
             return 0
-        except:
+        except Exception:
             # Fall back to string comparison
             if v1 > v2:
                 return 1

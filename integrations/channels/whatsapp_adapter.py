@@ -252,7 +252,7 @@ class WhatsAppAdapter(ChannelAdapter):
                 await self._session.post(
                     f"{self._base_url}/api/sessions/{self._account_id}/stop"
                 )
-            except:
+            except Exception:
                 pass
             await self._session.close()
             self._session = None
@@ -363,7 +363,7 @@ class WhatsAppAdapter(ChannelAdapter):
             await self._session.post(
                 f"{self._base_url}/api/sessions/{self._account_id}/chats/{chat_id}/composing"
             )
-        except:
+        except Exception:
             pass
 
     async def get_chat_info(self, chat_id: str) -> Optional[Dict[str, Any]]:

@@ -595,7 +595,7 @@ class ChannelBridge:
         if self._component:
             try:
                 await self._component.stop()
-            except:
+            except Exception:
                 pass
         self._session = None
         logger.info("Channel bridge disconnected")

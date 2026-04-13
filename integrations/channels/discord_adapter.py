@@ -239,7 +239,7 @@ class DiscordAdapter(ChannelAdapter):
                 try:
                     ref_msg = await channel.fetch_message(int(reply_to))
                     reference = ref_msg
-                except:
+                except Exception:
                     pass
 
             # Send message
@@ -347,7 +347,7 @@ class DiscordAdapter(ChannelAdapter):
             channel = self._bot.get_channel(int(chat_id))
             if channel:
                 await channel.typing()
-        except:
+        except Exception:
             pass
 
     async def get_chat_info(self, chat_id: str) -> Optional[Dict[str, Any]]:
