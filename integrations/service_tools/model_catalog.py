@@ -564,11 +564,11 @@ class ModelCatalog:
         added = 0
         if 'vlm-minicpm-v2' not in self._entries:
             entry = ModelEntry(
-                id='vlm-minicpm-v2', name='MiniCPM-V-2',
+                id='vlm-minicpm-v2', name='MiniCPM-V-2',  # 4GB VRAM → standard tier
                 model_type=ModelType.VLM, source='huggingface',
                 repo_id='openbmb/MiniCPM-V-2',
                 vram_gb=4.0, ram_gb=4.0, disk_gb=4.0,
-                min_capability_tier='full',
+                min_capability_tier='standard',  # 4GB VRAM = standard, not full
                 backend='sidecar', supports_gpu=True, supports_cpu=False,
                 idle_timeout_s=900,
                 capabilities={'image_input': True, 'video_input': False,
