@@ -719,12 +719,28 @@ except ImportError:
 except Exception as e:
     app.logger.warning(f"App Marketplace init skipped: {e}")
 
-# Resource Governor — start background monitoring
+# Resource Governor — start background monitoring (task #260: watchdog-registered)
 try:
     from core.resource_governor import get_governor
     _gov = get_governor()
     _gov.start()
     app.logger.info(f"Resource Governor started (mode={_gov.get_mode()})")
+    # Register both daemon loops with the watchdog.  Monitor runs every 5s;
+    # proactive waits up to 5s per iteration.  Allow 4× grace for noisy
+    # system-state probes (nvidia-smi, /proc).
+    try:
+        from security.node_watchdog import get_watchdog
+        _wd = get_watchdog()
+        if _wd and _gov._running:
+            _wd.register('resource_governor_monitor',
+                         expected_interval=20,
+                         restart_fn=_gov.start, stop_fn=_gov.stop)
+            _wd.register('resource_governor_proactive',
+                         expected_interval=20,
+                         restart_fn=_gov.start, stop_fn=_gov.stop)
+            app.logger.info("Resource Governor registered with watchdog")
+    except Exception as e:
+        app.logger.debug(f"Governor watchdog registration skipped: {e}")
 except ImportError:
     pass
 except Exception as e:
