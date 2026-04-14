@@ -96,7 +96,7 @@ class TestMasterKeyAndCircuitBreaker:
     def test_compute_caps_defined(self):
         from security.hive_guardrails import COMPUTE_CAPS
         assert COMPUTE_CAPS.get('max_influence_weight', 0) > 0
-        assert COMPUTE_CAPS.get('single_entity_cap', 0) > 0
+        assert COMPUTE_CAPS.get('single_entity_cap_pct', 0) > 0
 
 
 class TestDistributedTaskCoordinator:

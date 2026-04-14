@@ -70,6 +70,13 @@ def fresh_orchestrator(catalog=None):
 # 1. Language Segmenter
 # ═══════════════════════════════════════════════════════════════════════════
 
+try:
+    from tts.language_segmenter import segment as _seg_check
+    _has_tts = True
+except ImportError:
+    _has_tts = False
+
+@pytest.mark.skipif(not _has_tts, reason="tts package not installed (Nunba-only)")
 class TestLanguageSegmenter:
     """Tests for tts.language_segmenter.segment()."""
 
@@ -344,6 +351,7 @@ class TestMediaAgentGates:
 # 5. Synthesize Multilingual Audio — Degradation
 # ═══════════════════════════════════════════════════════════════════════════
 
+@pytest.mark.skipif(not _has_tts, reason="tts package not installed (Nunba-only)")
 class TestMultilingualSynthDegradation:
     """Tests for synthesize_multilingual_audio partial/degraded results."""
 

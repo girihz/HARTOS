@@ -230,6 +230,19 @@ class PeerLinkManager:
         if link.connect():
             with self._lock:
                 self._links[peer_id] = link
+            # On the flat-tier host (Nunba), a new persistent peer means
+            # the WAMP router is now needed for realtime push to this
+            # mobile device.  Safe no-op when Nunba boot already started
+            # the router or when wamp_router module isn't present (HARTOS
+            # core used in regional/central deployments that manage their
+            # own router elsewhere).
+            try:
+                from wamp_router import ensure_wamp_running  # type: ignore
+                ensure_wamp_running(reason=f"peer {peer_id[:8]} upgraded")
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.debug(f"ensure_wamp_running skipped: {e}")
             return True
         return False
 
