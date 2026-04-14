@@ -1146,14 +1146,32 @@ _DEVICE_TO_COMPUTE: Dict[str, Tuple[bool, bool]] = {
     TTSDevice.CLOUD.value:          (False, False),
 }
 
-# Approximate VRAM usage per GPU engine (GB) — CPU/cloud engines are 0
-_ENGINE_VRAM_GB: Dict[str, float] = {
-    'chatterbox_turbo': 4.0,
-    'cosyvoice3':       6.0,
-    'f5_tts':           4.0,
-    'indic_parler':     8.0,
-    'chatterbox_ml':    6.0,
-}
+# DEPRECATED: VRAM specs now live in vram_manager.MODEL_BUDGETS (single
+# source of truth). Use _engine_vram_gb(engine_id) helper below.
+# This dict is kept for backward compatibility but should NOT be edited.
+_ENGINE_VRAM_GB: Dict[str, float] = {}  # populated lazily by _engine_vram_gb
+
+
+def _engine_vram_gb(engine_id: str) -> float:
+    """Single source of truth for engine VRAM requirement.
+
+    Reads from vram_manager.MODEL_BUDGETS — the canonical specs. Falls
+    back to 0.0 (assume CPU) if engine not registered.
+    """
+    if engine_id in _ENGINE_VRAM_GB:
+        return _ENGINE_VRAM_GB[engine_id]
+    try:
+        from integrations.service_tools.vram_manager import MODEL_BUDGETS
+        # Engine 'indic_parler' → vram_manager key 'tts_indic_parler'
+        key = f'tts_{engine_id}'
+        if key in MODEL_BUDGETS:
+            vram = MODEL_BUDGETS[key][0]  # (gpu_gb, cpu_gb)
+            _ENGINE_VRAM_GB[engine_id] = vram  # cache
+            return vram
+    except ImportError:
+        pass
+    _ENGINE_VRAM_GB[engine_id] = 0.0
+    return 0.0
 
 # Approximate disk footprint per engine (GB)
 _ENGINE_DISK_GB: Dict[str, float] = {
@@ -1254,7 +1272,7 @@ def populate_tts_catalog(catalog) -> int:
             model_type=ModelType.TTS,
             version='1.0',
             source='cloud' if spec.device == TTSDevice.CLOUD else 'local',
-            vram_gb=_ENGINE_VRAM_GB.get(engine_id, 0.0),
+            vram_gb=_engine_vram_gb(engine_id),
             ram_gb=_ENGINE_RAM_GB.get(engine_id, 0.5),
             disk_gb=_ENGINE_DISK_GB.get(engine_id, 0.0),
             min_capability_tier='lite' if supports_cpu else 'standard',

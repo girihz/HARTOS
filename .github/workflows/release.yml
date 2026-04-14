@@ -43,7 +43,7 @@ jobs:
           pip install grep-ast tree-sitter tree-sitter-language-pack 2>/dev/null || true
           python -c "import nltk; nltk.download('punkt', quiet=True); nltk.download('punkt_tab', quiet=True)" 2>/dev/null || true
 
-      - name: Run tests
+      - name: Run unit + functional tests
         env:
           HEVOLVE_DB_PATH: ':memory:'
           PYTHONPATH: ${{ github.workspace }}
@@ -55,6 +55,36 @@ jobs:
             --ignore=tests/unit/test_social_models.py \
             --noconftest \
             -q --tb=line
+
+      # Integration tests — cross-module flows (channels, social, federation).
+      # Best-effort: don't block release on integration regressions, but surface them.
+      - name: Run integration tests (best-effort)
+        if: always()
+        env:
+          HEVOLVE_DB_PATH: ':memory:'
+          PYTHONPATH: ${{ github.workspace }}
+        continue-on-error: true
+        run: |
+          cd ${{ github.workspace }}
+          python -m pytest \
+            tests/integration/ \
+            --noconftest \
+            -q --tb=line || echo "Integration tests had failures (non-blocking)"
+
+      # E2E tests — full-stack scenarios. Best-effort.
+      - name: Run e2e tests (best-effort)
+        if: always()
+        env:
+          HEVOLVE_DB_PATH: ':memory:'
+          PYTHONPATH: ${{ github.workspace }}
+        continue-on-error: true
+        run: |
+          cd ${{ github.workspace }}
+          python -m pytest \
+            tests/e2e/ \
+            --ignore=tests/e2e/runtime_tests \
+            --noconftest \
+            -q --tb=line || echo "E2E tests had failures (non-blocking)"
 
   # ═══════════════════════════════════════════════════════════
   # 2. Tag + Sign (only on manual dispatch with version)
