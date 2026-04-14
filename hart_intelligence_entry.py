@@ -719,12 +719,28 @@ except ImportError:
 except Exception as e:
     app.logger.warning(f"App Marketplace init skipped: {e}")
 
-# Resource Governor — start background monitoring
+# Resource Governor — start background monitoring (task #260: watchdog-registered)
 try:
     from core.resource_governor import get_governor
     _gov = get_governor()
     _gov.start()
     app.logger.info(f"Resource Governor started (mode={_gov.get_mode()})")
+    # Register both daemon loops with the watchdog.  Monitor runs every 5s;
+    # proactive waits up to 5s per iteration.  Allow 4× grace for noisy
+    # system-state probes (nvidia-smi, /proc).
+    try:
+        from security.node_watchdog import get_watchdog
+        _wd = get_watchdog()
+        if _wd and _gov._running:
+            _wd.register('resource_governor_monitor',
+                         expected_interval=20,
+                         restart_fn=_gov.start, stop_fn=_gov.stop)
+            _wd.register('resource_governor_proactive',
+                         expected_interval=20,
+                         restart_fn=_gov.start, stop_fn=_gov.stop)
+            app.logger.info("Resource Governor registered with watchdog")
+    except Exception as e:
+        app.logger.debug(f"Governor watchdog registration skipped: {e}")
 except ImportError:
     pass
 except Exception as e:
@@ -5273,7 +5289,15 @@ def _tts_synthesize_and_publish(text, user_id, request_id, language='en'):
                     pass
             if audio_path and os.path.isfile(audio_path):
                 audio_filename = os.path.basename(audio_path)
-                audio_url = f'/tts/audio/{audio_filename}'
+                # Use absolute URL if this node's external URL is known —
+                # required when the request was delegated from a remote peer,
+                # since relative URLs resolve against the originator's server
+                # which doesn't have this audio file (task #266).
+                _ext_url = os.environ.get('HEVOLVE_EXTERNAL_URL', '').rstrip('/')
+                if _ext_url:
+                    audio_url = f'{_ext_url}/tts/audio/{audio_filename}'
+                else:
+                    audio_url = f'/tts/audio/{audio_filename}'
                 app.logger.info(f"TTS async: publishing audio {audio_url} to pupit.{user_id}")
                 _tts_payload = {
                     'text': [text[:200]],

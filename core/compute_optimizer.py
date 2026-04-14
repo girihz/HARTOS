@@ -822,13 +822,49 @@ class ComputeOptimizer:
         return round(max(0.0, min(1.0, score)), 3)
 
     def trigger_optimization(self) -> Dict:
-        """Manually trigger an optimization check. Returns actions taken."""
+        """Manually trigger an optimization check. Returns actions taken.
+
+        Feeds attribution chain: health baseline → actions → final health score.
+        """
+        # Attribution: track this optimization cycle
+        attribution_id = None
+        try:
+            from integrations.agent_engine.agent_attribution import (
+                begin_action, record_step, complete_action,
+            )
+            attribution_id = begin_action(
+                agent_id='compute_optimizer',
+                action_type='optimization_cycle',
+                expected_outcome={'health_score_delta': 0.05},
+                acceptance_criteria=['health_score > baseline'],
+            )
+        except Exception:
+            pass
+
         snap = self.snapshot()
+        baseline_health = self.get_health_score(snap)
+        if attribution_id:
+            try:
+                record_step(attribution_id, 'baseline_snapshot',
+                            state={'cpu_pct': snap.cpu_percent, 'ram_pct': snap.ram_percent,
+                                   'health_score': baseline_health},
+                            decision='assess', confidence=1.0)
+            except Exception:
+                pass
+
         suggestions = self._suggest_optimizations(snap)
         results = []
         for action in suggestions:
             self._apply_optimization(action)
             results.append(action.to_dict())
+            if attribution_id:
+                try:
+                    record_step(attribution_id, f'applied:{action.action_type.value}',
+                                state={'target': action.target,
+                                       'result': action.to_dict().get('result', '')},
+                                decision=action.action_type.value, confidence=0.7)
+                except Exception:
+                    pass
 
         # If no threshold breached, still do a cache clean as maintenance
         if not results:
@@ -841,9 +877,25 @@ class ComputeOptimizer:
             self._apply_optimization(action)
             results.append(action.to_dict())
 
+        final_snap = self.snapshot()
+        final_health = self.get_health_score(final_snap)
+
+        # Attribution: complete with delta outcome
+        if attribution_id:
+            try:
+                complete_action(attribution_id, outcome={
+                    'status': 'completed',
+                    'baseline_health_score': baseline_health,
+                    'final_health_score': final_health,
+                    'health_score_delta': round(final_health - baseline_health, 4),
+                    'actions_applied': len(results),
+                })
+            except Exception:
+                pass
+
         return {
             'snapshot': snap.to_dict(),
-            'health_score': self.get_health_score(snap),
+            'health_score': final_health,
             'actions': results,
         }
 

@@ -98,7 +98,12 @@ class FlaskChannelIntegration:
                 fallback=(session.user_id if session and session.user_id
                           else self.default_user_id),
             )
-            prompt_id = session.prompt_id if session and session.prompt_id else self.default_prompt_id
+            # prompt_id priority: session (user override) > per-channel config > global default
+            prompt_id = (
+                (session.prompt_id if session and session.prompt_id else None)
+                or self._get_channel_prompt_id(message.channel)
+                or self.default_prompt_id
+            )
 
             # Track message in session history
             if session:
@@ -215,47 +220,107 @@ class FlaskChannelIntegration:
             )
         return fallback
 
+    def _get_channel_prompt_id(self, channel_type: str) -> Optional[int]:
+        """Read per-channel prompt_id from admin config (if set)."""
+        try:
+            from .admin.api import get_api
+            api = get_api()
+            config = api._channels.get(channel_type, {})
+            pid = config.get('prompt_id')
+            return int(pid) if pid else None
+        except Exception:
+            return None
+
+    # ── Adapter factory import paths ─────────────────────────────
+    # Maps channel_type → (module_path, factory_function_name).
+    # Core adapters live in integrations.channels, extensions in
+    # integrations.channels.extensions, hardware in .hardware.
+    _ADAPTER_FACTORIES: Dict[str, tuple] = {
+        'telegram':       ('.telegram_adapter',       'create_telegram_adapter'),
+        'discord':        ('.discord_adapter',        'create_discord_adapter'),
+        'whatsapp':       ('.whatsapp_adapter',       'create_whatsapp_adapter'),
+        'slack':          ('.slack_adapter',           'create_slack_adapter'),
+        'signal':         ('.signal_adapter',          'create_signal_adapter'),
+        'imessage':       ('.imessage_adapter',        'create_imessage_adapter'),
+        'google_chat':    ('.google_chat_adapter',     'create_google_chat_adapter'),
+        'web':            ('.web_adapter',             'create_web_adapter'),
+        # Extensions
+        'teams':          ('.extensions.teams_adapter',          'create_teams_adapter'),
+        'matrix':         ('.extensions.matrix_adapter',         'create_matrix_adapter'),
+        'mattermost':     ('.extensions.mattermost_adapter',     'create_mattermost_adapter'),
+        'nextcloud':      ('.extensions.nextcloud_adapter',      'create_nextcloud_adapter'),
+        'rocketchat':     ('.extensions.rocketchat_adapter',     'create_rocketchat_adapter'),
+        'messenger':      ('.extensions.messenger_adapter',      'create_messenger_adapter'),
+        'instagram':      ('.extensions.instagram_adapter',      'create_instagram_adapter'),
+        'twitter':        ('.extensions.twitter_adapter',        'create_twitter_adapter'),
+        'line':           ('.extensions.line_adapter',            'create_line_adapter'),
+        'viber':          ('.extensions.viber_adapter',           'create_viber_adapter'),
+        'wechat':         ('.extensions.wechat_adapter',         'create_wechat_adapter'),
+        'zalo':           ('.extensions.zalo_adapter',            'create_zalo_adapter'),
+        'twitch':         ('.extensions.twitch_adapter',          'create_twitch_adapter'),
+        'nostr':          ('.extensions.nostr_adapter',           'create_nostr_adapter'),
+        'tlon':           ('.extensions.tlon_adapter',            'create_tlon_adapter'),
+        'openprose':      ('.extensions.openprose_adapter',       'create_openprose_adapter'),
+        'telegram_user':  ('.extensions.telegram_user_adapter',   'create_telegram_user_adapter'),
+        'discord_user':   ('.extensions.discord_user_adapter',    'create_discord_user_adapter'),
+        'zalo_user':      ('.extensions.zalo_user_adapter',       'create_zalo_user_adapter'),
+        'bluebubbles':    ('.extensions.bluebubbles_adapter',     'create_bluebubbles_adapter'),
+        'email':          ('.extensions.email_adapter',            'create_email_adapter'),
+        'voice':          ('.extensions.voice_adapter',            'create_voice_adapter'),
+    }
+
+    # Env var fallbacks for token/credential per channel type
+    _ENV_FALLBACKS: Dict[str, str] = {
+        'telegram':  'TELEGRAM_BOT_TOKEN',
+        'discord':   'DISCORD_BOT_TOKEN',
+        'whatsapp':  'WHATSAPP_API_URL',
+        'slack':     'SLACK_BOT_TOKEN',
+        'signal':    'SIGNAL_CLI_URL',
+        'teams':     'TEAMS_BOT_TOKEN',
+    }
+
+    def register_channel(self, channel_type: str, token: str = None, **kwargs) -> bool:
+        """Register any channel adapter by type.
+
+        Generic factory — replaces per-channel register_* methods.
+        Falls back to env var if no token provided.  Returns True on success.
+        """
+        factory_info = self._ADAPTER_FACTORIES.get(channel_type)
+        if not factory_info:
+            logger.warning(f"Unknown channel type: {channel_type}")
+            return False
+
+        module_path, factory_name = factory_info
+        token = token or os.getenv(self._ENV_FALLBACKS.get(channel_type, ''))
+        if not token and channel_type not in ('web', 'imessage', 'openprose'):
+            # web/imessage/openprose don't need external tokens
+            logger.warning(f"{channel_type} token not provided, skipping")
+            return False
+
+        try:
+            import importlib
+            mod = importlib.import_module(module_path, package='integrations.channels')
+            factory_fn = getattr(mod, factory_name)
+            if token:
+                adapter = factory_fn(token=token, **kwargs)
+            else:
+                adapter = factory_fn(**kwargs)
+            self.registry.register(adapter)
+            logger.info(f"{channel_type} adapter registered")
+            return True
+        except Exception as e:
+            logger.warning(f"{channel_type} adapter registration failed: {e}")
+            return False
+
+    # Keep legacy methods as thin delegates for backward compat
     def register_telegram(self, token: str = None, **kwargs) -> None:
-        """Register Telegram adapter."""
-        from .telegram_adapter import create_telegram_adapter
-
-        token = token or os.getenv("TELEGRAM_BOT_TOKEN")
-        if not token:
-            logger.warning("Telegram token not provided, skipping registration")
-            return
-
-        adapter = create_telegram_adapter(token, **kwargs)
-        self.registry.register(adapter)
-        logger.info("Telegram adapter registered")
+        self.register_channel('telegram', token=token, **kwargs)
 
     def register_discord(self, token: str = None, **kwargs) -> None:
-        """Register Discord adapter."""
-        try:
-            from .discord_adapter import create_discord_adapter
-
-            token = token or os.getenv("DISCORD_BOT_TOKEN")
-            if not token:
-                logger.warning("Discord token not provided, skipping registration")
-                return
-
-            adapter = create_discord_adapter(token, **kwargs)
-            self.registry.register(adapter)
-            logger.info("Discord adapter registered")
-        except ImportError:
-            logger.warning("Discord adapter not available")
+        self.register_channel('discord', token=token, **kwargs)
 
     def register_whatsapp(self, api_url: str = None, **kwargs) -> None:
-        """Register WhatsApp adapter."""
-        from .whatsapp_adapter import create_whatsapp_adapter
-
-        api_url = api_url or os.getenv("WHATSAPP_API_URL")
-        if not api_url:
-            logger.warning("WHATSAPP_API_URL not set, skipping registration")
-            return
-
-        adapter = create_whatsapp_adapter(api_url, **kwargs)
-        self.registry.register(adapter)
-        logger.info("WhatsApp adapter registered")
+        self.register_channel('whatsapp', token=api_url, **kwargs)
 
     def set_user_session(
         self,

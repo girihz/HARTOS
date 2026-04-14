@@ -360,15 +360,34 @@ def delete_channel(channel_type: str):
 @admin_bp.route("/channels/<channel_type>/status", methods=["GET"])
 @api_response
 def get_channel_status(channel_type: str):
-    """Get channel connection status."""
+    """Get channel connection status from live registry."""
     api = get_api()
     if channel_type not in api._channels:
         raise FileNotFoundError(f"Channel {channel_type} not found")
 
+    # Query live adapter registry for actual status
+    live_status = "disconnected"
+    try:
+        from integrations.channels.registry import get_registry
+        registry = get_registry()
+        adapter = registry.get(channel_type)
+        if adapter:
+            status_info = adapter.get_status()
+            if isinstance(status_info, dict):
+                live_status = status_info.get('status', 'connected')
+            elif isinstance(status_info, str):
+                live_status = status_info
+            else:
+                live_status = 'connected'
+        else:
+            live_status = 'not_registered'
+    except Exception:
+        live_status = 'unknown'
+
     return ChannelStatusSchema(
         channel_type=channel_type,
         name=api._channels[channel_type].get("name", channel_type),
-        status="connected",
+        status=live_status,
         message_count=api._message_count,
     ).to_dict()
 
@@ -472,19 +491,20 @@ def activate_channel(channel_type: str):
         raise ValueError(f"Channel {channel_type} is disabled — enable it first")
 
     token = config.get('token') or config.get('api_key')
-    if not token:
-        raise ValueError(f"No token/api_key configured for {channel_type}")
 
     try:
         from integrations.channels.flask_integration import get_channel_integration
         integration = get_channel_integration()
-        register_fn = getattr(integration, f'register_{channel_type}', None)
-        if register_fn:
-            register_fn(token=token)
-            return {"channel": channel_type, "activated": True}
-        else:
-            return {"channel": channel_type, "activated": False,
-                    "error": f"No register_{channel_type}() method available"}
+        ok = integration.register_channel(channel_type, token=token)
+        # Non-web channels need WAMP for cross-process push.  At boot
+        # Nunba may have skipped the router to save RAM; wake it now.
+        if ok and channel_type != 'web':
+            try:
+                from wamp_router import ensure_wamp_running
+                ensure_wamp_running(reason=f"channel {channel_type} activated")
+            except Exception:
+                pass
+        return {"channel": channel_type, "activated": ok}
     except Exception as e:
         return {"channel": channel_type, "activated": False, "error": str(e)}
 

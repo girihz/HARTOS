@@ -684,6 +684,14 @@ class ResourceGovernor:
         Transitions modes based on combined signals.
         """
         while self._running:
+            # Heartbeat to watchdog — prevents false-positive FROZEN alerts
+            try:
+                from security.node_watchdog import get_watchdog
+                _wd = get_watchdog()
+                if _wd:
+                    _wd.heartbeat('resource_governor_monitor')
+            except Exception:
+                pass
             try:
                 cpu = self._get_cpu_usage()
                 mem = self._get_memory_pressure()
@@ -1017,6 +1025,14 @@ class ResourceGovernor:
         next_benchmark = now + _jitter(BENCHMARK_INTERVAL)
 
         while self._running:
+            # Heartbeat to watchdog each loop iteration
+            try:
+                from security.node_watchdog import get_watchdog
+                _wd = get_watchdog()
+                if _wd:
+                    _wd.heartbeat('resource_governor_proactive')
+            except Exception:
+                pass
             # Sleep in short increments, checking cancel event
             # Wait returns True if the event is set (cancel requested)
             cancelled = self._cancel_event.wait(timeout=5.0)

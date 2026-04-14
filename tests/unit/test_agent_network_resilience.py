@@ -547,11 +547,15 @@ class TestInternetLossAndRecovery:
 
         results = []
         for resp in responses:
-            with patch('integrations.social.peer_discovery.pooled_get',
-                        side_effect=resp if isinstance(resp, Exception) else None,
-                        return_value=None if isinstance(resp, Exception) else resp):
-                result = gossip._ping_peer('http://flaky:6777')
-                results.append(result)
+            if isinstance(resp, Exception):
+                with patch('integrations.social.peer_discovery.pooled_get',
+                            side_effect=resp):
+                    result = gossip._ping_peer('http://flaky:6777')
+            else:
+                with patch('integrations.social.peer_discovery.pooled_get',
+                            return_value=resp):
+                    result = gossip._ping_peer('http://flaky:6777')
+            results.append(result)
 
         # Expected: False, True, False, True
         assert results == [False, True, False, True]

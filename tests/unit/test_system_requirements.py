@@ -355,20 +355,20 @@ class TestTierOrdering:
 
 class TestLocalLLMFeatures:
 
-    def test_local_llm_requires_full_tier(self):
-        """local_llm (Ollama 7B) needs FULL tier (16 GB RAM, 8 GB VRAM)."""
-        assert FEATURE_TIER_MAP['local_llm'][0] == NodeTierLevel.FULL
+    def test_local_llm_tier(self):
+        """local_llm requires at least STANDARD tier (draft-first architecture)."""
+        tier = FEATURE_TIER_MAP['local_llm'][0]
+        assert tier in (NodeTierLevel.STANDARD, NodeTierLevel.FULL)
         assert FEATURE_TIER_MAP['local_llm'][1] == 'HEVOLVE_LOCAL_LLM_ENABLED'
 
         # FULL node → local_llm enabled
         hw_full = HardwareProfile(cpu_cores=8, ram_gb=16.0, disk_free_gb=50.0, gpu_vram_gb=8.0)
         enabled, disabled = resolve_features(NodeTierLevel.FULL, hw_full)
         assert 'local_llm' in enabled
-        # STANDARD node → local_llm disabled
+        # STANDARD node → local_llm now enabled (draft-first architecture)
         hw_std = HardwareProfile(cpu_cores=4, ram_gb=8.0, disk_free_gb=10.0)
         enabled, disabled = resolve_features(NodeTierLevel.STANDARD, hw_std)
-        assert 'local_llm' not in enabled
-        assert 'local_llm' in disabled
+        assert 'local_llm' in enabled
 
     def test_local_llm_large_requires_compute_host(self):
         """local_llm_large (Ollama 13B+) needs COMPUTE_HOST (32 GB RAM, 12 GB VRAM)."""

@@ -39,16 +39,13 @@ def fresh_catalog() -> ModelCatalog:
 class TestPopulateTtsCatalog:
     """Tests for populate_tts_catalog from integrations.channels.media.tts_router."""
 
-    # ENGINE_REGISTRY currently has 10 engines:
-    #   chatterbox_turbo, luxtts, cosyvoice3, f5_tts, indic_parler,
-    #   chatterbox_ml, pocket_tts, espeak, makeittalk, piper
-    EXPECTED_COUNT = 11
+    # ENGINE_REGISTRY currently has 10 engines (luxtts removed — poor naturalness):
+    #   chatterbox_turbo, cosyvoice3, f5_tts, indic_parler,
+    #   chatterbox_ml, pocket_tts, espeak, makeittalk, piper, kokoro
+    EXPECTED_COUNT = 10
 
-    # Every catalog ID produced by populate_tts_catalog
-    # (engine_id.replace("_", "-") prefixed with "tts-")
     EXPECTED_IDS = {
         'tts-chatterbox-turbo',
-        'tts-luxtts',
         'tts-cosyvoice3',
         'tts-f5-tts',
         'tts-indic-parler',
@@ -154,8 +151,8 @@ class TestPopulateTtsCatalog:
     # ── language_priority populated ──────────────────────────────────────────
 
     def test_english_preference_in_language_priority(self, populated):
-        """chatterbox_turbo, luxtts, pocket_tts should all have 'en' in language_priority."""
-        english_engines = ['tts-chatterbox-turbo', 'tts-luxtts', 'tts-pocket-tts']
+        """chatterbox_turbo, pocket_tts should all have 'en' in language_priority."""
+        english_engines = ['tts-chatterbox-turbo', 'tts-pocket-tts']
         for mid in english_engines:
             entry = populated.get(mid)
             assert entry is not None
@@ -525,7 +522,7 @@ class TestPopulateFromSubsystems:
         Total    : 31
     """
 
-    EXPECTED_TTS_COUNT = 11
+    EXPECTED_TTS_COUNT = 10
     EXPECTED_STT_COUNT = 11
     EXPECTED_VLM_COUNT = 5  # +1 for qwen08b caption model
     EXPECTED_VIDEOGEN_COUNT = 2

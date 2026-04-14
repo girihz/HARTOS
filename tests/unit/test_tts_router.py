@@ -101,7 +101,8 @@ class TestEngineSelection:
         candidates = router.select_engines("Hello", language='en')
         engine_ids = [c.engine.engine_id for c in candidates]
         assert 'chatterbox_turbo' in engine_ids
-        assert 'luxtts' in engine_ids
+        # luxtts removed from English ladder — kokoro is preferred GPU engine
+        assert 'kokoro' in engine_ids or 'chatterbox_turbo' in engine_ids
 
     @patch('integrations.channels.media.tts_router._get_gpu_info',
            return_value={'cuda_available': False})
@@ -390,7 +391,8 @@ class TestEngineStatus:
     def test_reports_all_engines(self, mock_inst, mock_gpu, router):
         statuses = router.get_engine_status()
         engine_ids = [s['engine'] for s in statuses]
-        assert 'luxtts' in engine_ids
+        # luxtts removed from English ladder — kokoro is preferred GPU engine
+        assert 'kokoro' in engine_ids or 'chatterbox_turbo' in engine_ids
         assert 'pocket_tts' in engine_ids
         assert 'espeak' in engine_ids
         assert 'chatterbox_turbo' in engine_ids
@@ -526,12 +528,12 @@ class TestEngineRegistry:
             # GPU voice-clone
             'chatterbox_turbo', 'chatterbox_ml', 'cosyvoice3', 'f5_tts',
             'indic_parler',
-            # CPU neural (between voice-clone and Piper on the fallback ladder)
+            # CPU neural
             'kokoro',
-            # CPU deterministic (Piper, the final English fallback)
+            # CPU deterministic
             'piper',
-            # Cloud / legacy fallbacks
-            'luxtts', 'pocket_tts', 'espeak', 'makeittalk',
+            # Fallbacks (luxtts removed — poor naturalness)
+            'pocket_tts', 'espeak', 'makeittalk',
         }
         assert set(ENGINE_REGISTRY.keys()) == expected
 

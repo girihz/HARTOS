@@ -154,6 +154,7 @@ class ModelEntry:
     enabled: bool = True
     auto_load: bool = False
     pinned: bool = False
+    purposes: List[str] = field(default_factory=list)  # e.g. ['draft', 'main', 'caption']
 
     def to_dict(self) -> dict:
         """Serialize to JSON-safe dict (excludes runtime state)."""
@@ -384,6 +385,68 @@ class ModelCatalog:
             entry.error = error
             entry.loaded = False
 
+    # ── Purpose assignment ──────────────────────────────────────
+
+    # Universal purpose list — every task Nunba supports.  A single model
+    # can serve ANY combination (e.g. Qwen3.5-0.8B → ['draft','caption',
+    # 'grounding']; Qwen3-4B-Omni → ['main','tts','stt']).
+    # Purposes are NOT gated by model_type — model capabilities drive it,
+    # not an artificial type label.
+    ALL_PURPOSES: List[str] = [
+        'draft',        # Fast classifier / speculative decode LLM
+        'main',         # Primary LLM for chat/reasoning
+        'vision',       # Image understanding (VLM — generic)
+        'caption',      # Image/video captioning (VLM)
+        'grounding',    # GUI element grounding (VLM — click targets)
+        'tts',          # Text-to-speech
+        'stt',          # Speech-to-text / ASR
+        'diarization',  # Speaker segmentation
+        'vad',          # Voice activity detection
+        'embedding',    # Text embeddings (retrieval, RAG)
+        'rerank',       # Cross-encoder reranking for retrieval
+        'ocr',          # Text extraction from images
+        'music',        # Music generation
+        'image-gen',    # Text-to-image
+        'video-gen',    # Text-to-video
+        'translate',    # Machine translation (when dedicated model)
+    ]
+
+    def get_by_purpose(self, purpose: str) -> Optional[ModelEntry]:
+        """Return the model assigned to *purpose*, or None."""
+        for entry in self._entries.values():
+            if purpose in entry.purposes and entry.enabled:
+                return entry
+        return None
+
+    def set_purpose(self, model_id: str, purpose: str, enabled: bool = True) -> bool:
+        """Toggle a purpose on/off for a model.
+
+        When enabling: clears the same purpose from any other model
+        (one model per purpose globally), then adds it.
+        When disabling: removes the purpose from this model.
+        Persists to disk.  Returns True on success.
+        """
+        with self._lock:
+            entry = self._entries.get(model_id)
+            if entry is None:
+                return False
+            if purpose not in self.ALL_PURPOSES:
+                return False
+            if enabled:
+                # Clear the same purpose from any other model
+                for other in self._entries.values():
+                    if other.id != model_id and purpose in other.purposes:
+                        other.purposes = [p for p in other.purposes if p != purpose]
+                if purpose not in entry.purposes:
+                    entry.purposes.append(purpose)
+            else:
+                entry.purposes = [p for p in entry.purposes if p != purpose]
+            self._dirty = True
+        self._save()
+        logger.info(f"Model {model_id} purpose {purpose!r} {'enabled' if enabled else 'disabled'} "
+                    f"→ purposes={entry.purposes}")
+        return True
+
     # ── Auto-populate from registered subsystem populators ─────────
 
     def populate_from_subsystems(self) -> int:
@@ -393,6 +456,9 @@ class ModelCatalog:
         existing entries (user edits via admin UI are preserved).
         Returns number of new entries added.
         """
+        # Snapshot IDs BEFORE populator run so we can detect stale auto-entries
+        ids_before = set(self._entries.keys())
+
         added = 0
         # Run application-registered populators (LLM, TTS, etc.)
         for name, fn in self._populators:
@@ -409,9 +475,36 @@ class ModelCatalog:
         added += self._populate_vlm_models()
         added += self._populate_videogen_models()
         added += self._populate_audiogen_models()
-        if added > 0:
+
+        # Cleanup: remove stale auto-entries that no populator emitted this boot.
+        # An entry is "auto-populated" if its ID starts with a known prefix and
+        # it wasn't modified by the user (no custom tags, no non-default purposes,
+        # not pinned).  Stale = prefix-matched but not re-registered this boot.
+        ids_after = set(self._entries.keys())
+        touched_this_boot = ids_after - ids_before  # new in this run
+        # For entries that existed before AND still exist, populator.register()
+        # would have overwritten them — so check timestamps on _entries that
+        # weren't touched but have auto-populatable prefixes.
+        AUTO_PREFIXES = ('tts-', 'stt-', 'vlm-', 'video_gen-', 'audio_gen-')
+        stale = []
+        for eid, entry in list(self._entries.items()):
+            if eid in touched_this_boot:
+                continue  # freshly registered this boot
+            if not any(eid.startswith(p) for p in AUTO_PREFIXES):
+                continue  # not an auto-prefix (e.g. llm-* user-registered)
+            if entry.pinned or entry.purposes or (entry.tags and set(entry.tags) - {'local', 'tts', 'stt', 'vision', 'cpu-friendly'}):
+                continue  # user customized — preserve
+            stale.append(eid)
+
+        if stale:
+            for eid in stale:
+                self._entries.pop(eid, None)
+                self._dirty = True
+            logger.info(f"Cleaned {len(stale)} stale auto-entries: {stale}")
+
+        if added > 0 or stale:
             self._save()
-            logger.info(f"Auto-populated {added} model entries from subsystems")
+            logger.info(f"Auto-populated {added} entries, cleaned {len(stale)} stale")
         return added
 
     def _populate_tts_models(self) -> int:
@@ -484,11 +577,11 @@ class ModelCatalog:
         added = 0
         if 'vlm-minicpm-v2' not in self._entries:
             entry = ModelEntry(
-                id='vlm-minicpm-v2', name='MiniCPM-V-2',
+                id='vlm-minicpm-v2', name='MiniCPM-V-2',  # 4GB VRAM → standard tier
                 model_type=ModelType.VLM, source='huggingface',
                 repo_id='openbmb/MiniCPM-V-2',
                 vram_gb=4.0, ram_gb=4.0, disk_gb=4.0,
-                min_capability_tier='full',
+                min_capability_tier='standard',  # 4GB VRAM = standard, not full
                 backend='sidecar', supports_gpu=True, supports_cpu=False,
                 idle_timeout_s=900,
                 capabilities={'image_input': True, 'video_input': False,

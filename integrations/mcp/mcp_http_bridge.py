@@ -25,6 +25,105 @@ logger = logging.getLogger('hartos_mcp')
 
 mcp_local_bp = Blueprint('mcp_local', __name__, url_prefix='/api/mcp/local')
 
+
+# ── Auth gate: local-loopback OR bearer token ─────────────────
+# The MCP bridge exposes HARTOS tools (social_query, dispatch_goal,
+# remember, seed_goals, Shell_Command, Create_Agent ...). If left
+# unauthenticated, ANY local process on the host can call them — on
+# shared Windows machines that is a cross-user privilege escalation
+# (attacker logged in as User B dumps User A's social DB, writes
+# poisoned entries to User A's memory graph, dispatches goals).
+#
+# Policy:
+#   - Flat tier (single-user desktop): 127.0.0.1 only is enough.
+#   - Regional/central: must present `Authorization: Bearer <token>`
+#     matching the Nunba admin token.
+# The token file lives at `%LOCALAPPDATA%/Nunba/mcp.token` (Windows)
+# or `~/.nunba/mcp.token` (Unix) — owned by the current user, 0600
+# on Unix.  Claude Code reads it and sends it as the bearer.
+_MCP_TOKEN_CACHE: Optional[str] = None
+
+
+def _mcp_token_path() -> str:
+    """Path to the per-install MCP token file."""
+    import os as _os
+    _base = _os.environ.get('LOCALAPPDATA')
+    if _base:
+        return _os.path.join(_base, 'Nunba', 'mcp.token')
+    return _os.path.join(_os.path.expanduser('~'), '.nunba', 'mcp.token')
+
+
+def _ensure_mcp_token() -> str:
+    """Read-or-create the MCP bearer token.  Idempotent."""
+    global _MCP_TOKEN_CACHE
+    if _MCP_TOKEN_CACHE:
+        return _MCP_TOKEN_CACHE
+    import os as _os
+    import secrets as _secrets
+    _path = _mcp_token_path()
+    try:
+        if _os.path.isfile(_path):
+            with open(_path, encoding='utf-8') as _f:
+                _MCP_TOKEN_CACHE = _f.read().strip()
+                if _MCP_TOKEN_CACHE:
+                    return _MCP_TOKEN_CACHE
+        # Create a new token
+        _os.makedirs(_os.path.dirname(_path), exist_ok=True)
+        _MCP_TOKEN_CACHE = _secrets.token_urlsafe(32)
+        with open(_path, 'w', encoding='utf-8') as _f:
+            _f.write(_MCP_TOKEN_CACHE)
+        try:
+            # 0600 on Unix (no-op on Windows, ACLs inherit user profile)
+            _os.chmod(_path, 0o600)
+        except OSError:
+            pass
+        return _MCP_TOKEN_CACHE
+    except OSError:
+        # Read-only fs — fall back to process-lifetime token
+        _MCP_TOKEN_CACHE = _secrets.token_urlsafe(32)
+        return _MCP_TOKEN_CACHE
+
+
+def _is_loopback_request() -> bool:
+    """True if the Flask request originates from 127.0.0.1/::1."""
+    from flask import request as _req
+    _addr = (_req.remote_addr or '').strip()
+    return _addr in ('127.0.0.1', '::1', 'localhost')
+
+
+@mcp_local_bp.before_request
+def _mcp_auth_gate():
+    """Reject any request that is neither local-loopback nor token-authenticated.
+    On shared-host setups even loopback is not enough — require the token."""
+    from flask import request as _req, jsonify as _jsonify
+    # Health endpoint is open — it returns only a tool count, no data, no mutation.
+    if _req.path.endswith('/health'):
+        return None
+    _auth = _req.headers.get('Authorization', '')
+    _bearer = _auth[7:].strip() if _auth.startswith('Bearer ') else ''
+    _expected = _ensure_mcp_token()
+    if _bearer and _secrets_compare(_bearer, _expected):
+        return None
+    # On a multi-user box loopback-only is NOT enough; always require token
+    # for mutating endpoints.  Read-only `/tools/list` is allowed via
+    # loopback to avoid breaking Claude Code's discovery phase while the
+    # user wires their client up (client reads `/tools/list`, then sees
+    # 403 on first `/tools/execute`, fetches the token from disk, retries).
+    if _req.path.endswith('/tools/list') and _is_loopback_request():
+        return None
+    return _jsonify({
+        'success': False,
+        'error': 'mcp: unauthorized — provide Authorization: Bearer <token> '
+                 'from %LOCALAPPDATA%/Nunba/mcp.token',
+    }), 403
+
+
+def _secrets_compare(a: str, b: str) -> bool:
+    """Constant-time string compare to defeat timing attacks."""
+    import hmac as _hmac
+    return _hmac.compare_digest(a.encode('utf-8'), b.encode('utf-8'))
+
+
 # ── Tool Registry ──────────────────────────────────────────────
 _local_tools: List[Dict[str, Any]] = []
 _tools_loaded = False

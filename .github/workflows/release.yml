@@ -53,6 +53,7 @@ jobs:
             tests/unit/ \
             tests/functional/ \
             --ignore=tests/unit/test_social_models.py \
+            --noconftest \
             -q --tb=line
 
   # ═══════════════════════════════════════════════════════════

@@ -592,6 +592,28 @@ class HiveBenchmarkProver:
             "Starting async benchmark [%s] run=%s",
             benchmark_name, run_id[:8])
 
+        # Attribution: track benchmark run as long-horizon action
+        attribution_id = None
+        try:
+            from integrations.agent_engine.agent_attribution import begin_action
+            # Expected outcome: beat baseline score for this benchmark
+            baseline_target = 0.0
+            for model, scores in KNOWN_BASELINES.items():
+                if benchmark_name in scores:
+                    baseline_target = max(baseline_target, scores[benchmark_name])
+            attribution_id = begin_action(
+                agent_id='benchmark_prover',
+                action_type=f'benchmark_run:{benchmark_name}',
+                goal_id=config.get('goal_id'),
+                expected_outcome={'score': baseline_target, 'status': 'completed'},
+                acceptance_criteria=[
+                    f'hive_score >= {baseline_target:.2f}',
+                    'all_shards_complete',
+                ],
+            )
+        except Exception:
+            pass
+
         # 1. Fetch benchmark problems
         problems = self._fetch_problems(benchmark_name, config)
         if not problems:
@@ -641,7 +663,19 @@ class HiveBenchmarkProver:
                 'total_shards': total_shards,
                 'completed_shards': 0,
                 'num_nodes': num_nodes,
+                'attribution_id': attribution_id,
             }
+
+        # Attribution: record dispatch step
+        if attribution_id:
+            try:
+                from integrations.agent_engine.agent_attribution import record_step
+                record_step(attribution_id, 'shards_dispatched',
+                            state={'num_nodes': num_nodes, 'total_shards': total_shards,
+                                   'problems': len(problems)},
+                            decision='dispatch_to_hive', confidence=0.8)
+            except Exception:
+                pass
 
         return run_id
 
@@ -688,6 +722,20 @@ class HiveBenchmarkProver:
             run_state['completed_shards'] = len(run_state['results'])
             all_done = (run_state['completed_shards']
                         >= run_state['total_shards'])
+            attribution_id = run_state.get('attribution_id')
+
+        # Attribution: record shard completion as intermediate step
+        if attribution_id:
+            try:
+                from integrations.agent_engine.agent_attribution import record_step
+                record_step(attribution_id, f'shard_completed:{task_id[:8]}',
+                            state={'score': result.get('score', 0.0),
+                                   'completed_shards': run_state['completed_shards'],
+                                   'total_shards': run_state['total_shards']},
+                            decision=status,
+                            confidence=float(result.get('score', 0.5)))
+            except Exception:
+                pass
 
         if all_done:
             return self.aggregate_run(run_id)
@@ -833,6 +881,22 @@ class HiveBenchmarkProver:
             "time=%.1fs, speedup=%.1fx",
             benchmark_name, run_id[:8], aggregated['score'],
             aggregated['num_nodes'], elapsed, aggregated['speedup'])
+
+        # Attribution: complete the benchmark run action with outcome
+        attribution_id = run_state.get('attribution_id')
+        if attribution_id:
+            try:
+                from integrations.agent_engine.agent_attribution import complete_action
+                complete_action(attribution_id, outcome={
+                    'status': 'completed',
+                    'score': aggregated['score'],
+                    'num_nodes': aggregated['num_nodes'],
+                    'speedup': aggregated.get('speedup', 1.0),
+                    'time_seconds': round(elapsed, 2),
+                    'ensemble_beats_single': aggregated.get('sum_beats_single'),
+                })
+            except Exception:
+                pass
 
         return aggregated
 
