@@ -198,14 +198,17 @@ class TestAdminEndpointAuthGate:
             f"{unauth.status_code} without Bearer token — admin routes "
             f"MUST be auth-gated on every tier, not just central."
         )
-        # A Bearer token (any shape) should get past the middleware.
-        ok = client.get('/api/admin/ping',
-                        headers={'Authorization': 'Bearer dummy'})
+        # A valid JWT-shaped Bearer token should get past the middleware.
+        # The middleware now does JWT decoding — "Bearer garbage" is rejected.
+        # Use a mock-valid JWT shape with patched decode.
+        from unittest.mock import patch
+        with patch('integrations.social.auth.decode_jwt',
+                   return_value={'user_id': 'test', 'tier': tier}):
+            ok = client.get('/api/admin/ping',
+                            headers={'Authorization': 'Bearer valid.jwt.shape'})
         assert ok.status_code == 200, (
-            f"Tier={tier}: Bearer token was rejected by the gate "
-            f"({ok.status_code}). Gate is supposed to accept any "
-            f"Bearer header shape at the middleware layer — deeper "
-            f"JWT validation happens inside the route."
+            f"Tier={tier}: Valid JWT was rejected by the gate "
+            f"({ok.status_code})."
         )
 
     def test_bundled_desktop_mode_skips_gate(self, monkeypatch):

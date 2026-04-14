@@ -536,7 +536,11 @@ class TestInternetLossAndRecovery:
             assert result is False
 
     def test_gradual_degradation_intermittent_failures(self):
-        """Mixed timeout/success sequence → handled gracefully."""
+        """Mixed timeout/success sequence → handled gracefully.
+
+        Note: _ping_peer uses backoff after failures, so we clear the
+        backoff between calls to test the pure ping logic.
+        """
         gossip = GossipProtocol()
         responses = [
             RequestsConnectionError("timeout"),
@@ -547,6 +551,11 @@ class TestInternetLossAndRecovery:
 
         results = []
         for resp in responses:
+            # Clear backoff state between each call to test pure ping outcome
+            if hasattr(gossip, '_peer_backoff'):
+                gossip._peer_backoff.clear()
+            if hasattr(gossip, '_peer_failures'):
+                gossip._peer_failures.clear()
             if isinstance(resp, Exception):
                 with patch('integrations.social.peer_discovery.pooled_get',
                             side_effect=resp):
@@ -557,7 +566,7 @@ class TestInternetLossAndRecovery:
                     result = gossip._ping_peer('http://flaky:6777')
             results.append(result)
 
-        # Expected: False, True, False, True
+        # Expected: False (timeout), True (200), False (timeout), True (200)
         assert results == [False, True, False, True]
 
     def test_federation_push_during_offline(self):
