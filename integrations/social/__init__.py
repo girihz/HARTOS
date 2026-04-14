@@ -200,9 +200,10 @@ def init_social(app):
     except Exception as e:
         logger.debug(f"Thought experiments blueprint skipped: {e}")
 
-    # NOTE: compute_pledge_bp (api_compute_pledge.py) was consolidated into tracker_bp.
-    # All pledge endpoints now live at /api/social/tracker/experiments/*/pledge*
-    # and /api/social/tracker/pledges/* — single source of truth.
+    # NOTE: compute_pledge_bp (api_compute_pledge.py) was consolidated into tracker_bp
+    # and the stale file deleted 2026-04-15. All pledge endpoints live at
+    # /api/social/tracker/experiments/*/pledge* and /api/social/tracker/pledges/*
+    # — single source of truth.
 
     # Initialize node keypair for integrity verification
     try:

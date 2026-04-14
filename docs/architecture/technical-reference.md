@@ -860,7 +860,7 @@ Cross-platform: Nix, Flatpak, AppImage, Windows (Wine), Android (binder/adb), ma
 | `api_gamification.py` | Badges, achievements, encounters, regions, marketplace (85 endpoints) |
 | `api_sharing.py` | OG images, embed cards, shareable links |
 | `api_thought_experiments.py` | Constitutional voting (13 endpoints) |
-| `api_compute_pledge.py` | Compute pledges for experiments (9 endpoints) |
+| `api_tracker.py` | Experiments + compute pledges (consolidated; pledge/insights/consume live here) |
 | `api_dashboard.py` | Agent dashboard, system health, topology |
 | `api_audit.py` | Agent timeline, daemon activity, compute routing |
 | `api_learning.py` | CCT management, gradient submission (9 endpoints) |
