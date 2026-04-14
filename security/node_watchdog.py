@@ -295,6 +295,52 @@ class NodeWatchdog:
                     info.status = 'frozen'
                     to_restart.append(name)
 
+        # Best-effort thread-stack dump BEFORE restart — capture the
+        # live frame state of the frozen thread so we can diagnose
+        # WHY it stalled.  Uses the same dumper wired to the startup
+        # watchdog (app.py _dump_all_thread_stacks) if available,
+        # falling back to an inline dump.  Dumps to
+        # ~/Documents/Nunba/logs/startup_trace.log (flushes
+        # immediately, survives GIL-held hangs).
+        if to_restart:
+            try:
+                _dumper = None
+                try:
+                    import __main__ as _m
+                    _dumper = getattr(_m, '_dump_all_thread_stacks', None)
+                except Exception:
+                    pass
+                if _dumper is None:
+                    try:
+                        import app as _app_mod
+                        _dumper = getattr(
+                            _app_mod, '_dump_all_thread_stacks', None,
+                        )
+                    except Exception:
+                        pass
+                if _dumper:
+                    _dumper(
+                        f"NodeWatchdog FROZEN restart: {','.join(to_restart)}",
+                    )
+                else:
+                    # Inline fallback if dumper isn't published
+                    import sys as _sys
+                    import traceback as _tb
+                    logger.error(
+                        "NodeWatchdog: dumping thread stacks before "
+                        "restart (inline fallback):",
+                    )
+                    for _tid, _frame in _sys._current_frames().items():
+                        try:
+                            _stack = ''.join(_tb.format_stack(_frame))
+                            logger.error(
+                                f"  Thread id={_tid}:\n{_stack}",
+                            )
+                        except Exception:
+                            pass
+            except Exception as _de:
+                logger.debug(f"Thread-stack dump failed: {_de}")
+
         # Restart outside the lock to avoid deadlocks
         for name in to_restart:
             self._restart_thread(name)
