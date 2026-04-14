@@ -1146,7 +1146,7 @@ _DEVICE_TO_COMPUTE: Dict[str, Tuple[bool, bool]] = {
     TTSDevice.CLOUD.value:          (False, False),
 }
 
-# DEPRECATED: VRAM specs now live in vram_manager.MODEL_BUDGETS (single
+# DEPRECATED: VRAM specs now live in vram_manager.VRAM_BUDGETS (single
 # source of truth). Use _engine_vram_gb(engine_id) helper below.
 # This dict is kept for backward compatibility but should NOT be edited.
 _ENGINE_VRAM_GB: Dict[str, float] = {}  # populated lazily by _engine_vram_gb
@@ -1155,21 +1155,29 @@ _ENGINE_VRAM_GB: Dict[str, float] = {}  # populated lazily by _engine_vram_gb
 def _engine_vram_gb(engine_id: str) -> float:
     """Single source of truth for engine VRAM requirement.
 
-    Reads from vram_manager.MODEL_BUDGETS — the canonical specs. Falls
-    back to 0.0 (assume CPU) if engine not registered.
+    Reads from vram_manager.VRAM_BUDGETS — the canonical specs.
+    The vram_manager key convention is 'tts_<engine_id>' (e.g. 'tts_indic_parler').
+    Returns 0.0 only if engine has no GPU requirement (CPU-only engine).
+    Logs a warning if engine is GPU-capable but missing from VRAM_BUDGETS
+    (catches drift between the two registries).
     """
     if engine_id in _ENGINE_VRAM_GB:
         return _ENGINE_VRAM_GB[engine_id]
     try:
-        from integrations.service_tools.vram_manager import MODEL_BUDGETS
-        # Engine 'indic_parler' → vram_manager key 'tts_indic_parler'
+        from integrations.service_tools.vram_manager import VRAM_BUDGETS
         key = f'tts_{engine_id}'
-        if key in MODEL_BUDGETS:
-            vram = MODEL_BUDGETS[key][0]  # (gpu_gb, cpu_gb)
-            _ENGINE_VRAM_GB[engine_id] = vram  # cache
+        if key in VRAM_BUDGETS:
+            vram = VRAM_BUDGETS[key][0]  # (gpu_gb, cpu_gb)
+            _ENGINE_VRAM_GB[engine_id] = vram
             return vram
+        # Engine not registered in vram_manager — log once, assume CPU
+        logger.debug(
+            "TTS engine %r has no VRAM_BUDGETS entry (key=%r) — "
+            "assuming CPU-only. Add to vram_manager.VRAM_BUDGETS if GPU-capable.",
+            engine_id, key,
+        )
     except ImportError:
-        pass
+        logger.debug("vram_manager unavailable, assuming CPU-only for %r", engine_id)
     _ENGINE_VRAM_GB[engine_id] = 0.0
     return 0.0
 

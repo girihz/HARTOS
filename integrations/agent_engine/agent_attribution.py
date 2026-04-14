@@ -140,13 +140,22 @@ class AgentAttributionOrchestrator:
             acceptance_criteria=acceptance_criteria or [],
         )
 
+        evicted_action = None
         with self._lock:
             # Evict oldest if at cap (force-complete with timeout outcome)
             if len(self._open_actions) >= MAX_OPEN_ACTIONS:
-                self._force_timeout_oldest()
+                evicted_action = self._force_timeout_oldest()
 
             self._open_actions[action_id] = action
             self._stats['total_begun'] += 1
+
+        # Submit evicted action to WMB OUTSIDE the lock (nested locks risk)
+        if evicted_action is not None:
+            try:
+                self._submit_to_world_model(evicted_action)
+                self._emit_completion_event(evicted_action)
+            except Exception as exc:
+                logger.debug("Evicted action submit failed: %s", exc)
 
         logger.debug(
             "Attribution: begin_action %s agent=%s type=%s goal=%s",
@@ -229,6 +238,8 @@ class AgentAttributionOrchestrator:
         """Force-complete actions older than TTL. Returns count timed out.
 
         Called periodically by the agent daemon tick.
+        complete_action handles submit + event emission + total_completed.
+        We additionally tag these as timed_out for stats distinction.
         """
         now = time.time()
         expired_ids = []
@@ -237,12 +248,16 @@ class AgentAttributionOrchestrator:
                 if now - action.started_at > ACTION_TTL_SECONDS:
                     expired_ids.append(aid)
 
+        timed_out = 0
         for aid in expired_ids:
-            self.complete_action(aid, outcome={'status': 'timeout'})
-            with self._lock:
-                self._stats['total_timed_out'] += 1
+            if self.complete_action(aid, outcome={'status': 'timeout'}):
+                timed_out += 1
 
-        return len(expired_ids)
+        if timed_out:
+            with self._lock:
+                self._stats['total_timed_out'] += timed_out
+
+        return timed_out
 
     # ─── Internal: attribution + WorldModelBridge routing ──────────
 
@@ -358,11 +373,12 @@ class AgentAttributionOrchestrator:
             if actual is None:
                 continue
             if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
-                # Numeric: within 10% tolerance
-                if expected == 0:
-                    if actual == 0:
-                        matched += 1
-                elif abs(actual - expected) / abs(expected) <= 0.1:
+                # Numeric: within 10% tolerance (relative) OR 0.05 absolute for small values.
+                # The absolute band catches cases like expected=0 + actual=0.03 (delta
+                # metrics), where pure relative tolerance would fail every near-zero case.
+                if abs(actual - expected) <= 0.05:
+                    matched += 1
+                elif expected != 0 and abs(actual - expected) / abs(expected) <= 0.1:
                     matched += 1
             elif actual == expected:
                 matched += 1
@@ -386,10 +402,15 @@ class AgentAttributionOrchestrator:
         except Exception:
             pass  # Best effort — never crash on observability
 
-    def _force_timeout_oldest(self) -> None:
-        """Force-complete the oldest open action when at cap. Caller holds _lock."""
+    def _force_timeout_oldest(self) -> Optional[AgentAction]:
+        """Force-complete the oldest open action when at cap.
+
+        Caller MUST hold _lock. Returns the evicted action so the caller
+        can submit it to WorldModelBridge OUTSIDE the lock (avoids nested
+        lock acquisition on WMB's internal lock).
+        """
         if not self._open_actions:
-            return
+            return None
         oldest_id = min(
             self._open_actions.keys(),
             key=lambda k: self._open_actions[k].started_at,
@@ -399,8 +420,7 @@ class AgentAttributionOrchestrator:
         oldest.outcome = {'status': 'evicted', 'reason': 'max_open_actions'}
         oldest.completed_at = time.time()
         self._stats['total_timed_out'] += 1
-        # Submit outside the lock to avoid nested locks on WMB
-        # (caller releases lock after this returns)
+        return oldest
 
     @staticmethod
     def _truncate_dict(d: Dict) -> Dict:
