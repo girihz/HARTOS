@@ -138,6 +138,80 @@ def _is_loopback_request() -> bool:
     return _addr in ('127.0.0.1', '::1', 'localhost')
 
 
+# ── Public API for cross-package consumers (Nunba) ──────────────────────
+# Pre-refactor Nunba reached into the private `_ensure_mcp_token` symbol
+# (underscore prefix = "do not import").  That coupled Nunba's release
+# cadence to HARTOS internal naming and broke the moment HARTOS renamed
+# anything.  These wrappers are the SUPPORTED contract — Nunba imports
+# them via `from integrations.mcp import get_mcp_token, rotate_mcp_token`.
+
+def get_mcp_token() -> str:
+    """Public accessor — return the current MCP bearer token.
+
+    Reads from the configured source (env var > env-pointed file > disk).
+    Idempotent + cached.  Safe to call on the request hot path.
+
+    This is the supported entry point for cross-package consumers.
+    Internal callers can keep using `_ensure_mcp_token` for one release;
+    new code MUST use this.
+    """
+    return _ensure_mcp_token()
+
+
+def rotate_mcp_token() -> str:
+    """Public rotator — generate a new token, persist it, invalidate cache.
+
+    Returns the new token string.  Any live MCP client using the old token
+    will start getting 403s on its next request — operators MUST re-paste
+    the new token into `.claude/settings.local.json` (or rebroadcast via
+    the configured secret-injection path).
+
+    Behaviour respects the same source-resolution order as
+    `_ensure_mcp_token`: if `HARTOS_MCP_TOKEN` is set, rotation is a
+    no-op (the env var is the source of truth and rotation must happen
+    upstream — at the orchestrator that injected the env var).
+    """
+    global _MCP_TOKEN_CACHE
+    import os as _os
+    import secrets as _secrets
+    # Env-var-pinned tokens cannot be rotated from inside the process —
+    # the upstream orchestrator owns the value.  Emit a warning so the
+    # operator sees WHY the rotate POST returned the same token.
+    if _os.environ.get('HARTOS_MCP_TOKEN', '').strip():
+        logger.warning(
+            "rotate_mcp_token: HARTOS_MCP_TOKEN env var is set — "
+            "rotation must happen upstream; returning existing token",
+        )
+        return _ensure_mcp_token()
+    new_token = _secrets.token_urlsafe(32)
+    path = _mcp_token_path()
+    try:
+        _os.makedirs(_os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_token)
+        try:
+            _os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except OSError as e:
+        logger.warning(
+            "rotate_mcp_token: failed to persist new token (%s) — "
+            "falling back to in-memory only", e,
+        )
+    _MCP_TOKEN_CACHE = new_token
+    return new_token
+
+
+def get_mcp_token_path() -> str:
+    """Public accessor for the on-disk token file path.
+
+    Nunba's `/api/admin/mcp/token/rotate` endpoint historically reached
+    into `_mcp_token_path` (also private).  This wrapper is the supported
+    contract.
+    """
+    return _mcp_token_path()
+
+
 @mcp_local_bp.before_request
 def _mcp_auth_gate():
     """Reject any request that is neither local-loopback nor token-authenticated.
