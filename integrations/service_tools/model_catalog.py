@@ -387,15 +387,28 @@ class ModelCatalog:
 
     # ── Purpose assignment ──────────────────────────────────────
 
-    # Universal purpose list.  A single model can serve ANY combination
-    # (e.g. Qwen3.5-0.8B is LLM+VLM → purposes=['draft','caption','grounding']).
-    # Purposes are NOT gated by model_type — the model's actual capabilities
-    # determine what it can do, not an artificial type label.
+    # Universal purpose list — every task Nunba supports.  A single model
+    # can serve ANY combination (e.g. Qwen3.5-0.8B → ['draft','caption',
+    # 'grounding']; Qwen3-4B-Omni → ['main','tts','stt']).
+    # Purposes are NOT gated by model_type — model capabilities drive it,
+    # not an artificial type label.
     ALL_PURPOSES: List[str] = [
-        'draft',       # Fast classifier / speculative decode
-        'main',        # Primary model for this capability
-        'caption',     # Image/video captioning (VLM)
-        'grounding',   # GUI element grounding (VLM)
+        'draft',        # Fast classifier / speculative decode LLM
+        'main',         # Primary LLM for chat/reasoning
+        'vision',       # Image understanding (VLM — generic)
+        'caption',      # Image/video captioning (VLM)
+        'grounding',    # GUI element grounding (VLM — click targets)
+        'tts',          # Text-to-speech
+        'stt',          # Speech-to-text / ASR
+        'diarization',  # Speaker segmentation
+        'vad',          # Voice activity detection
+        'embedding',    # Text embeddings (retrieval, RAG)
+        'rerank',       # Cross-encoder reranking for retrieval
+        'ocr',          # Text extraction from images
+        'music',        # Music generation
+        'image-gen',    # Text-to-image
+        'video-gen',    # Text-to-video
+        'translate',    # Machine translation (when dedicated model)
     ]
 
     def get_by_purpose(self, purpose: str) -> Optional[ModelEntry]:
