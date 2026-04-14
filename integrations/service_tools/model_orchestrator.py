@@ -880,12 +880,41 @@ class ModelOrchestrator:
         """Full system state for admin dashboard.
 
         Reconciles catalog flags with live loader state before returning,
-        so the UI always sees reality (not a stale snapshot).
+        so the UI always sees reality (not a stale snapshot).  Also tags
+        each entry with stale-state diagnostics (loader probe outcome,
+        worker health), so the UI can render warning pills.
         """
-        self.reconcile_live_state()
+        reconcile_changed = self.reconcile_live_state()
 
         cs = self._get_compute_state()
         entries = self._catalog.to_json()
+
+        # Per-entry stale-state annotation.  Four axes of suspicion:
+        #   1. loader_missing   — catalog claims a model_type with no loader
+        #   2. probe_failed     — is_loaded() raised (worker likely gone)
+        #   3. has_error        — entry.error is set (last load failed)
+        #   4. download_missing — entry marked downloaded but path absent
+        # The UI reads `stale` (truthy) + `stale_reasons` (user-facing list).
+        stale_total = 0
+        for e in entries:
+            reasons = []
+            mtype = e.get('model_type')
+            loader = self._loaders.get(mtype)
+            if loader is None:
+                reasons.append(f"no loader for type '{mtype}'")
+            else:
+                try:
+                    live = bool(loader.is_loaded(self._catalog.get(e['id'])))
+                    if live != bool(e.get('loaded')):
+                        reasons.append('catalog/loader state drift')
+                except Exception as ex:
+                    reasons.append(f'probe failed: {ex}')
+            if e.get('error'):
+                reasons.append(f"last error: {e['error']}")
+            e['stale'] = bool(reasons)
+            e['stale_reasons'] = reasons
+            if reasons:
+                stale_total += 1
 
         by_type = {}
         for e in entries:
@@ -900,6 +929,8 @@ class ModelOrchestrator:
             'total_models': len(entries),
             'loaded_count': len(loaded),
             'downloaded_count': len(downloaded),
+            'stale_count': stale_total,
+            'reconcile_changed': reconcile_changed,
             'models_by_type': by_type,
             'loaded_models': loaded,
             'all_models': entries,
