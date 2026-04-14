@@ -42,6 +42,8 @@ mcp_local_bp = Blueprint('mcp_local', __name__, url_prefix='/api/mcp/local')
 # or `~/.nunba/mcp.token` (Unix) — owned by the current user, 0600
 # on Unix.  Claude Code reads it and sends it as the bearer.
 _MCP_TOKEN_CACHE: Optional[str] = None
+# One-shot WARN emitter for HARTOS_MCP_DISABLE_AUTH=1 (see _mcp_auth_gate).
+_MCP_AUTH_DISABLED_WARNED: bool = False
 
 
 def _mcp_token_path() -> str:
@@ -53,13 +55,58 @@ def _mcp_token_path() -> str:
     return _os.path.join(_os.path.expanduser('~'), '.nunba', 'mcp.token')
 
 
+def _env_flag_true(val: Optional[str]) -> bool:
+    """Parse an env-var truthy flag: '1', 'true', 'yes', 'on' → True (case-insensitive)."""
+    if val is None:
+        return False
+    return val.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def _ensure_mcp_token() -> str:
-    """Read-or-create the MCP bearer token.  Idempotent."""
+    """Read-or-create the MCP bearer token.  Idempotent.
+
+    Source resolution order (first hit wins):
+      1. HARTOS_MCP_TOKEN        — literal token string (Docker/K8s secrets,
+                                   CI environments that inject directly)
+      2. HARTOS_MCP_TOKEN_FILE   — path to a file containing the token
+                                   (Vault/cert-manager/kubernetes secret
+                                   mounts, where the token rotates via a
+                                   file that we should re-read each time a
+                                   fresh cache is requested)
+      3. Default disk path       — `%LOCALAPPDATA%/Nunba/mcp.token` on
+                                   Windows, `~/.nunba/mcp.token` on Unix
+                                   (the original behaviour used by the
+                                   Nunba desktop install)
+    """
     global _MCP_TOKEN_CACHE
     if _MCP_TOKEN_CACHE:
         return _MCP_TOKEN_CACHE
     import os as _os
     import secrets as _secrets
+
+    # (1) Literal env-var token — highest priority, zero filesystem touch.
+    _env_tok = _os.environ.get('HARTOS_MCP_TOKEN', '').strip()
+    if _env_tok:
+        _MCP_TOKEN_CACHE = _env_tok
+        return _MCP_TOKEN_CACHE
+
+    # (2) Env-var-specified token FILE — for Vault/K8s mounted secrets.
+    _env_tok_file = _os.environ.get('HARTOS_MCP_TOKEN_FILE', '').strip()
+    if _env_tok_file:
+        try:
+            with open(_env_tok_file, encoding='utf-8') as _f:
+                _tok = _f.read().strip()
+                if _tok:
+                    _MCP_TOKEN_CACHE = _tok
+                    return _MCP_TOKEN_CACHE
+        except OSError as _e:
+            logger.warning(
+                "HARTOS_MCP_TOKEN_FILE=%s could not be read (%s) — "
+                "falling back to default disk path",
+                _env_tok_file, _e,
+            )
+
+    # (3) Default disk path — the original Nunba desktop behaviour.
     _path = _mcp_token_path()
     try:
         if _os.path.isfile(_path):
@@ -94,10 +141,31 @@ def _is_loopback_request() -> bool:
 @mcp_local_bp.before_request
 def _mcp_auth_gate():
     """Reject any request that is neither local-loopback nor token-authenticated.
-    On shared-host setups even loopback is not enough — require the token."""
+    On shared-host setups even loopback is not enough — require the token.
+
+    Env-var overrides (for HARTOS standalone / container / air-gapped
+    deployments that don't ship the Nunba desktop token-management UI):
+      - HARTOS_MCP_DISABLE_AUTH=1 → skip the auth gate entirely.  Only
+        safe on internal/air-gapped networks where the port is not
+        reachable by untrusted callers (e.g., container sidecars, isolated
+        K8s namespaces).  A single WARN is emitted on the first request.
+      - HARTOS_MCP_TOKEN, HARTOS_MCP_TOKEN_FILE → see `_ensure_mcp_token`
+        for how the token is sourced when auth is enabled.
+    """
     from flask import request as _req, jsonify as _jsonify
+    import os as _os
+    global _MCP_AUTH_DISABLED_WARNED
     # Health endpoint is open — it returns only a tool count, no data, no mutation.
     if _req.path.endswith('/health'):
+        return None
+    # Env-var bypass — for HARTOS standalone / Docker / K8s / air-gapped.
+    if _env_flag_true(_os.environ.get('HARTOS_MCP_DISABLE_AUTH')):
+        if not _MCP_AUTH_DISABLED_WARNED:
+            _MCP_AUTH_DISABLED_WARNED = True
+            logger.warning(
+                "MCP auth disabled via env — use only for internal/"
+                "air-gapped deployments"
+            )
         return None
     _auth = _req.headers.get('Authorization', '')
     _bearer = _auth[7:].strip() if _auth.startswith('Bearer ') else ''
