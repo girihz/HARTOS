@@ -1052,6 +1052,7 @@ class GossipProtocol:
                 #    This is the continuous audit - every node checks every other node.
                 for peer in active_peers:
                     self._audit_peer_guardrails(db, peer)
+                    self._heartbeat()
 
                 # 2. Deep challenge: cycle through challenge types across all peers.
                 #    Each peer gets a different challenge type per round (round-robin).
@@ -1065,6 +1066,7 @@ class GossipProtocol:
                             peer.url, challenge_type)
                     except Exception as e:
                         logger.debug(f"Challenge to {peer.node_id[:8]} failed: {e}")
+                    self._heartbeat()
                 try:
                     db.commit()
                 except Exception:
