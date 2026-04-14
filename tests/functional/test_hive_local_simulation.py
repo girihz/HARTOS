@@ -74,6 +74,8 @@ class TestMasterKeyAndCircuitBreaker:
 
     def test_circuit_breaker_initial_state(self):
         from security.hive_guardrails import HiveCircuitBreaker
+        # Reset class state — previous tests may have tripped the breaker
+        HiveCircuitBreaker._halted = False
         cb = HiveCircuitBreaker()
         assert not cb.is_halted()
 
