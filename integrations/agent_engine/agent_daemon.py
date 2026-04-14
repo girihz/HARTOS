@@ -230,13 +230,44 @@ class AgentDaemon:
 
         Runs alongside the main tick on a random 5-30 minute interval.
         All imports are lazy (try/except) so missing modules never crash the daemon.
+
+        Feeds dense attribution chain to WorldModelBridge via agent_attribution.
         """
         now = time.time()
+
+        # Attribution: track this tick as a long-horizon action
+        action_id = None
+        try:
+            from integrations.agent_engine.agent_attribution import (
+                begin_action, record_step, complete_action,
+            )
+            # Periodically clean expired actions (once per hour)
+            if int(now) % 3600 < 30:
+                from integrations.agent_engine.agent_attribution import get_attribution
+                get_attribution().cleanup_expired()
+            action_id = begin_action(
+                agent_id='agent_daemon',
+                action_type='proactive_hive_tick',
+                expected_outcome={'status': 'ok'},
+                acceptance_criteria=[
+                    'benchmark_prover_reachable',
+                    'optimizer_health_score > 0',
+                ],
+            )
+        except Exception:
+            pass  # Attribution is best-effort — never break the tick
 
         # ── 1. Random-interval hive exploration ──
         if now >= self._next_hive_explore_time:
             # Schedule next exploration (5-30 minutes from now)
             self._next_hive_explore_time = now + random.randint(300, 1800)
+            if action_id:
+                try:
+                    record_step(action_id, 'hive_exploration_scheduled',
+                                state={'next_in_s': self._next_hive_explore_time - now},
+                                decision='explore_now', confidence=0.9)
+                except Exception:
+                    pass
 
             # Check benchmark prover for active benchmark needs
             benchmark_needs = None
@@ -372,6 +403,17 @@ class AgentDaemon:
             pass  # compute_optimizer not available yet
         except Exception as e:
             logger.debug(f"Proactive hive: compute optimizer check failed: {e}")
+
+        # ── Attribution: complete action with outcome summary ──
+        if action_id:
+            try:
+                complete_action(action_id, outcome={
+                    'status': 'ok',
+                    'interval_seconds': self._interval,
+                    'completed_at': time.time(),
+                })
+            except Exception:
+                pass
 
     def _loop(self):
         # Boot grace period: let user chat have exclusive LLM access for 60s.
