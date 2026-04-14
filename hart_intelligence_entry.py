@@ -5273,7 +5273,15 @@ def _tts_synthesize_and_publish(text, user_id, request_id, language='en'):
                     pass
             if audio_path and os.path.isfile(audio_path):
                 audio_filename = os.path.basename(audio_path)
-                audio_url = f'/tts/audio/{audio_filename}'
+                # Use absolute URL if this node's external URL is known —
+                # required when the request was delegated from a remote peer,
+                # since relative URLs resolve against the originator's server
+                # which doesn't have this audio file (task #266).
+                _ext_url = os.environ.get('HEVOLVE_EXTERNAL_URL', '').rstrip('/')
+                if _ext_url:
+                    audio_url = f'{_ext_url}/tts/audio/{audio_filename}'
+                else:
+                    audio_url = f'/tts/audio/{audio_filename}'
                 app.logger.info(f"TTS async: publishing audio {audio_url} to pupit.{user_id}")
                 _tts_payload = {
                     'text': [text[:200]],
