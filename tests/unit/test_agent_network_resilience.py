@@ -552,10 +552,8 @@ class TestInternetLossAndRecovery:
         results = []
         for resp in responses:
             # Clear backoff state between each call to test pure ping outcome
-            if hasattr(gossip, '_peer_backoff'):
-                gossip._peer_backoff.clear()
-            if hasattr(gossip, '_peer_failures'):
-                gossip._peer_failures.clear()
+            if hasattr(gossip, '_peer_backoff') and hasattr(gossip._peer_backoff, '_entries'):
+                gossip._peer_backoff._entries.clear()
             if isinstance(resp, Exception):
                 with patch('integrations.social.peer_discovery.pooled_get',
                             side_effect=resp):

@@ -90,14 +90,12 @@ class TestRecordStep(unittest.TestCase):
         self.assertFalse(result)
 
     def test_confidence_clamped_to_range(self):
-        self.orch.record_step(self.aid, 's', confidence=2.0)
-        action = self.orch.get_action(self.aid)
-        self.assertIsNone(action)  # completed above? No — fresh action here
-        # Re-test with fresh action
+        # Use fresh action (self.aid is set up but reused — clamp test on fresh)
         aid2 = self.orch.begin_action('a', 't')
         self.orch.record_step(aid2, 's', confidence=2.0)
         self.orch.record_step(aid2, 's2', confidence=-0.5)
         action = self.orch.get_action(aid2)
+        self.assertIsNotNone(action)
         self.assertEqual(action.steps[0].confidence, 1.0)
         self.assertEqual(action.steps[1].confidence, 0.0)
 
