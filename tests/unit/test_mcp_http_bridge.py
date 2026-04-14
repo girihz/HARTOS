@@ -32,6 +32,24 @@ def app():
 
 @pytest.fixture
 def client(app):
+    """Test client that auto-injects the MCP bearer token on every request.
+
+    The bridge gates /tools/execute behind a bearer token. The token is
+    read-or-created lazily via _ensure_mcp_token. We grab it once and
+    inject it into every request via a custom test client subclass.
+    """
+    from integrations.mcp.mcp_http_bridge import _ensure_mcp_token
+    token = _ensure_mcp_token()
+
+    class _AuthClient(app.test_client_class or app.test_client().__class__):
+        def open(self, *args, **kwargs):
+            headers = kwargs.pop('headers', {}) or {}
+            if 'Authorization' not in headers:
+                headers['Authorization'] = f'Bearer {token}'
+            kwargs['headers'] = headers
+            return super().open(*args, **kwargs)
+
+    app.test_client_class = _AuthClient
     return app.test_client()
 
 
