@@ -441,6 +441,23 @@ def init_social(app):
         except Exception as e:
             logger.debug(f"Distributed worker loop start skipped: {e}")
 
+        # Hive benchmark prover — rotates model benchmarks every 6 hours
+        # and publishes baseline+score deltas into the ledger.
+        try:
+            from integrations.agent_engine.hive_benchmark_prover import (
+                get_benchmark_prover, _LOOP_INTERVAL_SECONDS as _hbp_interval,
+            )
+            _hbp = get_benchmark_prover()
+            _hbp.start_continuous_loop()
+            if _hbp._loop_running:
+                watchdog.register('hive_benchmark_prover',
+                                  expected_interval=_hbp_interval * 2,
+                                  restart_fn=_hbp.start_continuous_loop,
+                                  stop_fn=_hbp.stop)
+                logger.info("Hive benchmark prover started")
+        except Exception as e:
+            logger.debug(f"Hive benchmark prover start skipped: {e}")
+
         watchdog.start()
         logger.info(f"NodeWatchdog started: monitoring "
                     f"{len(watchdog._threads)} threads")
