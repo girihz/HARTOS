@@ -84,11 +84,10 @@ def register_all_blueprints(app) -> dict:
     ))
 
     # ── Robot Intelligence API ──
-    _try_register('robot_intelligence', lambda: (
-        __import__('integrations.robotics.intelligence_api',
-                   fromlist=['create_intelligence_blueprint'])
-        .create_intelligence_blueprint()
-    ))
+    # Canonical routes at /api/robotics/ai/* via robot_intelligence_bp
+    # (registered directly in hart_intelligence_entry.py). The previous
+    # create_intelligence_blueprint() entry was a duplicate /api/robotics/
+    # intelligence/{think,robots} subset — removed 2026-04-15.
 
     # ── Compute Optimizer ──
     def _register_optimizer():

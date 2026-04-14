@@ -993,52 +993,12 @@ def create_blueprint():
     return robot_intelligence_bp
 
 
-def create_intelligence_blueprint():
-    """Create the Flask Blueprint for the ``/api/robotics/intelligence/...`` routes.
-
-    These are the hive-wide intelligence endpoints that aggregate across
-    all robots, complementing the per-robot routes on ``create_blueprint()``.
-
-    Routes:
-        POST /api/robotics/intelligence/think   -- multi-intelligence fusion
-        GET  /api/robotics/intelligence/robots  -- registered robots
-    """
-    from flask import Blueprint, request, jsonify
-
-    intel_bp = Blueprint(
-        'robotics_intelligence', __name__,
-        url_prefix='/api/robotics/intelligence',
-    )
-
-    @intel_bp.route('/think', methods=['POST'])
-    def intel_think():
-        """POST /api/robotics/intelligence/think -- multi-intelligence fusion.
-
-        Body: {
-            "robot_id": "my-robot",
-            "sensors": {"camera": "<base64>", "imu": {"ax": 0.1}},
-            "context": "Fetch a glass of water",
-            "constraints": {},
-            "history": []
-        }
-        """
-        data = request.get_json(silent=True) or {}
-        if not data.get('robot_id'):
-            return jsonify({'error': 'robot_id is required'}), 400
-        api = get_robot_api()
-        result = api.think(data)
-        return jsonify(result)
-
-    @intel_bp.route('/robots', methods=['GET'])
-    def intel_robots():
-        """GET /api/robotics/intelligence/robots -- all registered robots."""
-        api = get_robot_api()
-        return jsonify({
-            'robots': api.list_robots(),
-            'stats': api.get_hive_stats(),
-        })
-
-    return intel_bp
+# Removed 2026-04-15: create_intelligence_blueprint() and robotics_intelligence_bp.
+# This was a dual-export orphan — routes (/api/robotics/intelligence/think and
+# /robots) were a strict subset of the canonical robot_intelligence_bp routes at
+# /api/robotics/ai/* (think, register, <id>/status, list, <id>/sensors,
+# hive/stats) which is registered in hart_intelligence_entry.py. No caller ever
+# imported robotics_intelligence_bp — deleting eliminates the parallel path.
 
 
 # Module-level blueprint for import convenience.
@@ -1048,12 +1008,6 @@ try:
 except ImportError:
     # Flask not installed -- blueprint unavailable but class still works
     robot_intelligence_bp = None
-
-# Unified intelligence blueprint at /api/robotics/intelligence/...
-try:
-    robotics_intelligence_bp = create_intelligence_blueprint()
-except ImportError:
-    robotics_intelligence_bp = None
 
 
 # ---------------------------------------------------------------------------
