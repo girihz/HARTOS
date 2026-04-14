@@ -596,11 +596,18 @@ class HiveBenchmarkProver:
         attribution_id = None
         try:
             from integrations.agent_engine.agent_attribution import begin_action
-            # Expected outcome: beat baseline score for this benchmark
+            # Expected outcome: beat baseline score for this benchmark.
+            # For ensemble benchmarks (ensemble_mmlu, etc.), look up the BASE
+            # benchmark name in KNOWN_BASELINES — baselines are keyed by
+            # base names (mmlu_mini, humaneval_mini, etc.), not ensemble names.
+            baseline_lookup_key = benchmark_name
+            spec = BUILTIN_BENCHMARKS.get(benchmark_name, {})
+            if spec.get('type') == 'ensemble':
+                baseline_lookup_key = spec.get('base_benchmark', benchmark_name)
             baseline_target = 0.0
             for model, scores in KNOWN_BASELINES.items():
-                if benchmark_name in scores:
-                    baseline_target = max(baseline_target, scores[benchmark_name])
+                if baseline_lookup_key in scores:
+                    baseline_target = max(baseline_target, scores[baseline_lookup_key])
             attribution_id = begin_action(
                 agent_id='benchmark_prover',
                 action_type=f'benchmark_run:{benchmark_name}',
