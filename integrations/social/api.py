@@ -1562,26 +1562,12 @@ def review_report(report_id):
     return _ok(report.to_dict())
 
 
-@social_bp.route('/moderation/ban/<user_id>', methods=['POST'])
-@require_admin
-def ban_user(user_id):
-    user = UserService.get_by_id(g.db, user_id)
-    if not user:
-        return _err("User not found", 404)
-    user.is_banned = True
-    g.db.flush()
-    return _ok({'banned': True})
-
-
-@social_bp.route('/moderation/ban/<user_id>', methods=['DELETE'])
-@require_admin
-def unban_user(user_id):
-    user = UserService.get_by_id(g.db, user_id)
-    if not user:
-        return _err("User not found", 404)
-    user.is_banned = False
-    g.db.flush()
-    return _ok({'unbanned': True})
+# Removed 2026-04-15: orphaned public /moderation/ban/<user_id> POST+DELETE routes.
+# No frontend caller; duplicate of admin routes at /admin/users/<user_id>/ban (below).
+# Ban/unban is strictly an admin action — a user cannot ban themselves, and these
+# non-admin-namespaced routes made no product sense. Canonical endpoints:
+#   POST   /api/social/admin/users/<user_id>/ban   (admin_ban_user)
+#   DELETE /api/social/admin/users/<user_id>/ban   (admin_unban_user)
 
 
 # ═══════════════════════════════════════════════════════════════
