@@ -831,14 +831,23 @@ class SpeculativeDispatcher:
 
     def _deliver_expert_response(self, user_id: str, prompt_id: str,
                                   speculation_id: str, response: str):
-        """Dual-channel async delivery: Crossbar + Rasa HTTP."""
-        # Publish via canonical publish_async (MessageBus → Crossbar)
+        """Dual-channel async delivery: Crossbar chat topic + TTS pupit topic."""
+        # 1. Publish text via canonical publish_async (MessageBus → Crossbar)
         try:
             from hart_intelligence import publish_async
             topic = f'com.hertzai.hevolve.chat.{user_id}'
             publish_async(topic, response)
         except Exception:
             pass
+
+        # 2. Synthesize TTS and publish to pupit audio topic — ensures speculative
+        #    expert improvements get the SAME audio treatment as regular replies
+        #    (users on TTS-enabled sessions hear the improved response).
+        try:
+            from hart_intelligence_entry import _tts_synthesize_and_publish
+            _tts_synthesize_and_publish(response, str(user_id), speculation_id)
+        except Exception as e:
+            logger.debug(f"Expert TTS publish skipped: {e}")
 
         logger.info(f"Expert enhancement delivered: spec={speculation_id}, "
                      f"user={user_id}")
