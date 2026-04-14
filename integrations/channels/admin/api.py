@@ -496,6 +496,14 @@ def activate_channel(channel_type: str):
         from integrations.channels.flask_integration import get_channel_integration
         integration = get_channel_integration()
         ok = integration.register_channel(channel_type, token=token)
+        # Non-web channels need WAMP for cross-process push.  At boot
+        # Nunba may have skipped the router to save RAM; wake it now.
+        if ok and channel_type != 'web':
+            try:
+                from wamp_router import ensure_wamp_running
+                ensure_wamp_running(reason=f"channel {channel_type} activated")
+            except Exception:
+                pass
         return {"channel": channel_type, "activated": ok}
     except Exception as e:
         return {"channel": channel_type, "activated": False, "error": str(e)}
