@@ -35,12 +35,30 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # ─── Storage path ───────────────────────────────────────────────────────
-_DATA_DIR = os.path.join(
-    os.environ.get('HART_INSTALL_DIR',
-                   os.path.dirname(os.path.dirname(os.path.dirname(
-                       os.path.abspath(__file__))))),
-    'agent_data',
-)
+# Must be user-writable.  Previously resolved to the HART_INSTALL_DIR
+# fallback which in bundled Nunba builds is `C:\Program Files (x86)\
+# HevolveAI\Nunba` — read-only for non-admin users, causing every
+# `_save()` to fail with `[Errno 13] Permission denied` (task #250
+# regression found by runtime-log-watcher on 2026-04-15).  Use the
+# platform-standard user data dir: `~/Documents/Nunba/data/agent_data`
+# on all OSes, matching MemoryGraph + every other Nunba data path.
+def _resolve_data_dir() -> str:
+    try:
+        from core.platform_paths import get_data_dir as _gdd
+        _base = _gdd()
+    except Exception:
+        _base = os.path.join(
+            os.path.expanduser('~'), 'Documents', 'Nunba', 'data',
+        )
+    _dir = os.path.join(_base, 'agent_data')
+    try:
+        os.makedirs(_dir, exist_ok=True)
+    except OSError:
+        pass
+    return _dir
+
+
+_DATA_DIR = _resolve_data_dir()
 _TASKS_FILE = os.path.join(_DATA_DIR, 'hive_tasks.json')
 
 
