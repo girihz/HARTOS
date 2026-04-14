@@ -443,6 +443,9 @@ class ModelCatalog:
         existing entries (user edits via admin UI are preserved).
         Returns number of new entries added.
         """
+        # Snapshot IDs BEFORE populator run so we can detect stale auto-entries
+        ids_before = set(self._entries.keys())
+
         added = 0
         # Run application-registered populators (LLM, TTS, etc.)
         for name, fn in self._populators:
@@ -459,9 +462,36 @@ class ModelCatalog:
         added += self._populate_vlm_models()
         added += self._populate_videogen_models()
         added += self._populate_audiogen_models()
-        if added > 0:
+
+        # Cleanup: remove stale auto-entries that no populator emitted this boot.
+        # An entry is "auto-populated" if its ID starts with a known prefix and
+        # it wasn't modified by the user (no custom tags, no non-default purposes,
+        # not pinned).  Stale = prefix-matched but not re-registered this boot.
+        ids_after = set(self._entries.keys())
+        touched_this_boot = ids_after - ids_before  # new in this run
+        # For entries that existed before AND still exist, populator.register()
+        # would have overwritten them — so check timestamps on _entries that
+        # weren't touched but have auto-populatable prefixes.
+        AUTO_PREFIXES = ('tts-', 'stt-', 'vlm-', 'video_gen-', 'audio_gen-')
+        stale = []
+        for eid, entry in list(self._entries.items()):
+            if eid in touched_this_boot:
+                continue  # freshly registered this boot
+            if not any(eid.startswith(p) for p in AUTO_PREFIXES):
+                continue  # not an auto-prefix (e.g. llm-* user-registered)
+            if entry.pinned or entry.purposes or (entry.tags and set(entry.tags) - {'local', 'tts', 'stt', 'vision', 'cpu-friendly'}):
+                continue  # user customized — preserve
+            stale.append(eid)
+
+        if stale:
+            for eid in stale:
+                self._entries.pop(eid, None)
+                self._dirty = True
+            logger.info(f"Cleaned {len(stale)} stale auto-entries: {stale}")
+
+        if added > 0 or stale:
             self._save()
-            logger.info(f"Auto-populated {added} model entries from subsystems")
+            logger.info(f"Auto-populated {added} entries, cleaned {len(stale)} stale")
         return added
 
     def _populate_tts_models(self) -> int:
