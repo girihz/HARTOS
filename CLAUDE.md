@@ -161,3 +161,224 @@ Critical pinned versions:
 - `pydantic==1.10.9` (requires Python 3.10)
 - `autogen` (multi-agent framework)
 - `chromadb==0.3.23` (vector store)
+
+---
+
+## Change Protocol — Standing Rules for EVERY Edit
+
+**Applies to every change: bug fix, feature, refactor, test, doc, build
+config.  No exceptions.  This section is the standing contract that
+overrides ship-mode urgency.  When the user asks for a fix, the 9-gate
+protocol below is what we do, in order, before a single character is
+written to disk.**
+
+Cross-references — these memory files are authoritative companions:
+- `feedback_engineering_principles.md` — DRY / SRP / no parallel paths
+- `feedback_frozen_build_pitfalls.md` — cx_Freeze rules, new-module discipline
+- `feedback_review_checklist.md` — the `/review` skill's checklist
+- `feedback_multi_os_review.md` — Win/macOS/Linux compat gates
+- `feedback_verify_imports.md` — `ast.parse` is syntax-only; import-check too
+- `feedback_no_coauthor.md` — commit-message hygiene
+
+### Gate 0 — Intent Before Edit (BLOCKING)
+
+Before typing any edit, answer in writing (in chat or internal
+reasoning):
+
+1. **What is the user actually asking for?** (State back the success
+   criterion they'd verify against.)
+2. **What does the existing code do, and WHY does it exist that way?**
+   Read the function, its docstring, its callers, and at least one
+   adjacent test.  If there's no test, that's a data point.
+3. **What will break if I change it?**  Enumerate downstream effects.
+4. **Is there already a canonical helper / constant / abstraction for
+   this concern?**  If yes, use it — do NOT create a second.  If no,
+   decide where the canonical home should live BEFORE writing code.
+
+Skipping Gate 0 is the #1 source of this codebase's DRY / parallel-
+path regressions.  **Never edit on autopilot.**
+
+### Gate 1 — Caller Audit (BLOCKING)
+
+For any function / class / constant / file being modified, enumerate
+ALL callers before the edit:
+
+```bash
+# Full-tree grep across both repos — substitute <symbol>
+grep -rn "<symbol>" \
+  C:/Users/sathi/PycharmProjects/HARTOS/ \
+  C:/Users/sathi/PycharmProjects/Nunba-HART-Companion/ \
+  --include="*.py" --include="*.js" --include="*.jsx" \
+  | grep -v ".venv\|__pycache__\|python-embed\|node_modules\|build/"
+```
+
+Record each caller.  If the signature / return shape / side-effect
+changes, EVERY caller's test must pass afterwards — no "only the
+happy-path caller was updated".
+
+Special cases requiring extra audit:
+- Module-level constants / frozensets → grep for `import <name>` AND
+  for usage sites (iterations, membership tests).
+- Decorators / wrapper classes → every call site of the decorated fn.
+- HTTP routes → every frontend `fetch` + backend call in staging
+  probe script.
+- WAMP topics → every publisher + every subscriber across Nunba/HARTOS.
+- cx_Freeze-bundled modules → every `import X` in app.py, main.py,
+  routes/, and `scripts/setup_freeze_nunba.py:packages[]`.
+
+### Gate 2 — DRY Gate (BLOCKING)
+
+Before introducing ANY new:
+- Constant / frozenset / dict / list literal with domain meaning
+- Helper function with "save X", "load X", "format X", "validate X"
+- Class with "Manager", "Handler", "Registry", "Wrapper"
+- Configuration default
+
+…run a search for existing equivalents:
+
+```bash
+# Example: checking for existing "language constants" before adding a new one
+grep -rn "SUPPORTED_LANG\|_LANGS\|LANGUAGES" \
+  core/ integrations/ --include="*.py" | head -20
+```
+
+If ≥ 1 equivalent exists, EXTEND THE EXISTING OR IMPORT FROM IT.
+Never create a parallel literal "just for this file's convenience."
+
+Violations seen this session:
+- 4 separate `frozenset({...})` for "non-Latin script langs" across
+  speculative_dispatcher, hart_intelligence_entry (x2), tts_engine.
+- 3 inline thread-dump implementations before `core.diag` consolidated.
+- 2 `_ensure_mcp_token` call sites (one inside HARTOS, one from Nunba
+  reaching into the underscore-private symbol).
+
+### Gate 3 — SRP Gate (BLOCKING)
+
+Every function SHOULD do exactly one thing.  If the function's name
+has "and" in it, or its docstring lists > 1 responsibility, or it
+performs both a pure computation AND an I/O side-effect, split it.
+
+Canonical split pattern:
+- `pure_compute(x) -> result` — no I/O
+- `persist(result) -> bool` — atomic write only
+- `on_change_callback(subscribers, old, new)` — event dispatch only
+
+Violations seen this session:
+- `_persist_language` originally did: validate + check-if-exists +
+  write + evict-draft — 4 jobs.  Split via `core.user_lang` module
+  (writer) + `model_lifecycle` subscriber (eviction).
+
+### Gate 4 — Parallel-Path Gate (BLOCKING)
+
+A parallel path = "second implementation of a concept that already
+has a canonical one."  Parallel paths always drift.  Enforce by:
+
+1. One writer per persisted value (e.g., `hart_language.json` has
+   exactly one writer: `core.user_lang.set_preferred_lang`).
+2. One source of truth per conceptual constant (e.g.,
+   `NON_LATIN_SCRIPT_LANGS` lives in `core.constants` — everyone
+   else imports).
+3. One dispatch path per verb (e.g., chat response = single
+   dispatcher, NOT main-LLM vs draft-LLM divergent logic).
+
+If a parallel path is TEMPORARILY unavoidable (e.g., migrating old
+users), document it with a TODO that names the deletion date.  Never
+ship a parallel path silently.
+
+### Gate 5 — Test-First for Non-Trivial Changes (BLOCKING)
+
+If the change:
+- Alters a public contract, OR
+- Adds a new abstraction / module, OR
+- Fixes a regression that slipped through static review
+
+…write the test FIRST.  Run it; confirm it fails.  Then implement.
+Then confirm it passes.  This is the mandate from `feedback_frozen_
+build_pitfalls.md` Rule 4 — static review alone missed the `core.diag`
+bundling crash; only an invariant test would have caught it.
+
+Tests that belong in every refactor:
+- AST-level "no inline duplicate" check (catches DRY regressions)
+- Behavioral test for the change's intent
+- Boundary test (ENOSPC, empty input, malformed input)
+- Regression test for any bug the change is fixing
+
+### Gate 6 — cx_Freeze Bundle Accounting (BLOCKING for new modules)
+
+If the change adds a new `.py` file under `core/`, `integrations/`,
+or any other HARTOS-Nunba-shared package:
+
+1. Add it to `Nunba-HART-Companion/scripts/setup_freeze_nunba.py`
+   `packages[]` explicitly (cx_Freeze tracer misses runtime-dynamic
+   imports; see `feedback_frozen_build_pitfalls.md`).
+2. Confirm `__init__.py` exists in every package dir (implicit
+   namespace packages break under cx_Freeze).
+3. Verify no name collision with HARTOS's own package tree — Nunba
+   must NOT have its own `core/`, `integrations/`, `security/`, or
+   `models/` directory with the same name.
+
+Skipping Gate 6 = `ModuleNotFoundError` at the installed .exe's
+first boot.  Ask the user; don't assume the module will be picked up.
+
+### Gate 7 — Multi-OS / Multi-Topology Surface Check
+
+Every change touching filesystem paths, subprocess, env vars, or IPC
+must be validated against:
+- OS: Windows (primary desktop), macOS (secondary), Linux (server)
+- Topology: flat (desktop), regional (edge), central (cloud)
+
+Specifically:
+- `os.popen` / `os.system` without timeout → BANNED (Rule 5 of
+  frozen-build pitfalls).  Use `subprocess.run(timeout=N)`.
+- Hard-coded `C:\\` paths → wrap in `sys.platform` check or use
+  `pathlib.Path.home()`.
+- `requests.get/post` / `urllib.urlopen` / `socket.connect` → MUST
+  have explicit timeout + exception handler.
+- Writes to `C:\Program Files` → always fail on non-admin; route to
+  `~/Documents/Nunba/data/` via `core.platform_paths`.
+
+### Gate 8 — Review Perspectives Before Commit
+
+Before pushing, mentally run the change past these specialist lenses
+(or spawn the agent if the change is large):
+
+- **architect**: does it match the existing package structure? Any
+  layering violations (integrations → core OK; core → integrations
+  BANNED)?
+- **reviewer**: DRY, SRP, parallel-path, missing tests.
+- **ciso / ethical-hacker**: does it expose a new ingress? Handle
+  untrusted input? Log secrets?
+- **sre**: failure mode on disk-full / OOM / network-down?
+- **performance-engineer**: budget impact on hot path (chat: 1.5s,
+  draft: 300ms, cache: <1ms)?
+- **product-owner**: what does the user see differently?
+- **test-generator**: FT + NFT coverage added?
+
+The `/review` skill automates most of this — use it on large diffs.
+
+### Gate 9 — Commit Discipline
+
+- **Atomic**: one commit = one logical change.  If a refactor spans
+  HARTOS + Nunba, TWO commits (one per repo).
+- **Title**: conventional-commits (`fix(lang): …`, `refactor(core): …`,
+  `feat(admin): …`).  Under 72 chars.
+- **Body**: what was narrow, what became broad.  Cite the violation
+  pattern and the canonical home.  Reference the test file that
+  guards regression.
+- **No `Co-Authored-By: Claude`** (see `feedback_no_coauthor.md`).
+- **Never force-push to main**.  Never `--no-verify`.
+- Push each commit to origin immediately after local tests pass —
+  enables the build-validator + CI to catch bundle / import issues
+  the local env didn't.
+
+---
+
+## When the User Says "Just Fix It"
+
+Do all 10 gates anyway.  Explain briefly what you're doing; don't
+ask permission for each gate.  Ship slower but correctly.
+
+The pattern "user asks → claude rushes → introduces parallel path →
+user asks again → claude rushes again" is the enemy.  Honor the
+protocol even when urgency seems to reward skipping it; the urgency
+is almost always caused by a prior skipped gate.
