@@ -2981,6 +2981,19 @@ def get_tools(req_tool, is_first: bool = False):
         except ImportError:
             pass
 
+        # System Introspection Tools: agent self-awareness — GPU tier,
+        # active models, TTS backend, boot-decision rationale.  Lets the
+        # LLM answer "what model is running?", "why is speculation off?",
+        # "do I have a GPU?" from real live admin-API data instead of
+        # hallucinating.
+        try:
+            from integrations.service_tools.system_introspect_tool import (
+                get_langchain_tools as _get_introspect_tools,
+            )
+            tool += _get_introspect_tools()
+        except ImportError:
+            pass
+
         # HART Skills: Ingest agent skills (Claude Code, Markdown, GitHub)
         try:
             from integrations.skills import skill_registry
