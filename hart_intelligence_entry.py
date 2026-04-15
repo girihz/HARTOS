@@ -4803,11 +4803,31 @@ def get_ans(casual_conv, req_tool, user_id, query, custom_prompt, preferred_lang
     except Exception:
         pass
 
+    # Strong language directive — Qwen3.5-4B (and many multilingual
+    # models) will ignore a weak "respond in English" when the system
+    # prompt mentions Indian/Asian cultural traits or the user's email/
+    # name hints at a regional origin.  Seen on 2026-04-15: English
+    # user input "hi" → "Vanakkam! Nan ungal nanban. Hevolve-va romba
+    # nalla tool, na idea build pannura help pannu..." (Romanised Tamil).
+    # Fix: explicit script + policy block, placed AFTER identity +
+    # tone so it wins by recency.
+    _lang_directive = (
+        f"\n\nRESPONSE LANGUAGE POLICY (STRICT):\n"
+        f"- Respond in {language} only.  Match the script the USER wrote in.\n"
+        f"- If the user writes in Latin/English script, respond in Latin/"
+        f"English script — do NOT transliterate other languages into "
+        f"Latin letters (no Romanised Tamil/Hindi/etc).\n"
+        f"- Cultural references are welcome, but the response body must be "
+        f"in {language}.\n"
+        if (language or '').lower() == 'english' else ''
+    )
+
     prefix = f"""{_fast_identity}
         Answer questions accurately and respond as quickly as possible in {language}.
         {_tone_block}{_resonance_block}
         Keep responses under 200 words. Be colloquial and natural - don't always greet or use the user's name.
         IMPORTANT: Do NOT re-introduce yourself if you already did in the conversation history below. Continue naturally.
+        {_lang_directive}
 
         User details: {user_details}
         Context: {custom_prompt}
