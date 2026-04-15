@@ -5166,109 +5166,15 @@ _HART_LANG_PATH = os.path.join(
 
 
 def _persist_language(lang: str) -> bool:
-    """Write hart_language.json so next startup loads the right TTS voice
-    AND the right draft-boot decision (see llama_config.should_boot_draft
-    cohort gate).
+    """Thin shim for backward compatibility.  Real implementation is in
+    core.user_lang.set_preferred_lang — atomic write + on_lang_change
+    subscriber bus (for draft eviction etc.).
 
-    Returns True on success, False on failure (logged silently).
-    Called from three sites now:
-      - initial preferred_lang resolution in /chat handler (line ~5525)
-      - draft-detected language_change signal (line ~5802)
-      - (new) anytime the user explicitly switches language via UI
-
-    Validates lang against SUPPORTED_LANG_DICT to prevent garbage writes.
-
-    HISTORICAL BUGS removed here (2026-04-15):
-      1. Caller gated on ``!= 'en'`` — meant switching Tamil→English never
-         persisted, so hart_language.json kept saying "ta" after user
-         explicitly switched to English.  Dropped.
-      2. Caller gated on ``not os.path.exists`` — meant once ANY language
-         was saved, subsequent switches silently no-oped.  Dropped.
-      3. ``_lang_persisted`` in-memory flag capped writes to one per
-         process lifetime.  Dropped — language can change multiple times
-         per session (multilingual household / translation workflow).
-      4. Non-atomic write — ``open('w').write`` truncates then writes.
-         Mid-write ENOSPC leaves the file zero-byte → next boot reads
-         empty JSON → falls back to 'en' default → wrong draft decision.
-         Now uses tmp + os.replace for crash-safety.
-
-    NEW behavior: on language change to a script the 0.8B draft can't
-    handle (Indic / CJK / RTL / SEA), signal the model_lifecycle to
-    evict the draft so its ~1.2GB VRAM is freed for the Indic TTS
-    engine that's about to be needed.  Non-blocking — eviction happens
-    in a daemon thread so the /chat handler isn't stalled.
-    """
-    if not lang or lang[:2] not in SUPPORTED_LANG_DICT:
-        return False
-    # Read current value to avoid redundant writes (disk + cache churn)
-    try:
-        if os.path.isfile(_HART_LANG_PATH):
-            with open(_HART_LANG_PATH, encoding='utf-8') as _fr:
-                _current = (json.load(_fr) or {}).get('language')
-            if _current == lang:
-                return True  # already the right value, skip write
-    except Exception:
-        pass  # on any read failure, fall through and write fresh
-    try:
-        os.makedirs(os.path.dirname(_HART_LANG_PATH), exist_ok=True)
-        # Atomic write — tmp + os.replace.  Prevents zero-byte files
-        # on mid-write ENOSPC (seen in this session's disk-full debug).
-        _tmp = _HART_LANG_PATH + '.tmp'
-        with open(_tmp, 'w', encoding='utf-8') as _f:
-            json.dump({'language': lang}, _f)
-            _f.flush()
-            try:
-                os.fsync(_f.fileno())
-            except OSError:
-                pass
-        os.replace(_tmp, _HART_LANG_PATH)
-    except Exception:
-        # Cleanup tmp if replace never ran
-        try:
-            if os.path.isfile(_HART_LANG_PATH + '.tmp'):
-                os.remove(_HART_LANG_PATH + '.tmp')
-        except OSError:
-            pass
-        return False
-
-    # ── Draft eviction signal on non-English switch ──
-    # Matches speculative_dispatcher.py's _skip_draft_langs set (kept
-    # in sync by convention — both lists cover non-Latin-script langs).
-    # When user switches TO a script the 0.8B can't handle, the draft
-    # process's ~1.2GB VRAM is dead weight; freeing it lets Indic
-    # Parler (~2GB) fit on 8GB GPUs with room for main LLM.
-    _indic_or_script = frozenset({
-        'ta', 'hi', 'bn', 'te', 'mr', 'gu', 'kn', 'ml', 'pa',
-        'or', 'as', 'sa', 'sd', 'ur', 'ne',
-        'zh', 'ja', 'ko', 'ar', 'he', 'fa',
-        'th', 'lo', 'km', 'my',
-    })
-    if lang[:2].lower() in _indic_or_script:
-        import threading as _th
-
-        def _evict_draft_async():
-            try:
-                from integrations.service_tools.model_lifecycle import (
-                    get_model_lifecycle_manager,
-                )
-                _mgr = get_model_lifecycle_manager()
-                # request_swap is pressure-eviction; it's safe to call
-                # even if nothing to evict (no-op).  Tag 'draft' so the
-                # manager evicts the 0.8B specifically, not the main 4B.
-                if _mgr and hasattr(_mgr, 'request_swap'):
-                    _mgr.request_swap(
-                        target='draft',
-                        reason=f'language_switch_to_{lang[:2]}',
-                    )
-            except Exception:
-                pass  # best-effort; eviction is a nice-to-have not a must
-
-        _th.Thread(
-            target=_evict_draft_async, daemon=True,
-            name=f'draft-evict-on-{lang[:2]}',
-        ).start()
-
-    return True
+    Kept as a named function here because older code in this file +
+    downstream refs import it; new code should call the core API
+    directly."""
+    from core.user_lang import set_preferred_lang
+    return set_preferred_lang(lang)
 
 
 def _chat_reply(user_id, request_id, response_text: str, **payload):
@@ -5866,8 +5772,10 @@ def chat():
     # Skip draft-first for non-Latin-script languages — the 0.8B can't produce
     # correct native script (outputs garbled Kannada for Tamil, etc.). Going
     # straight to the 4B avoids wasted compute on a useless standby reply.
-    _NON_LATIN_LANGS = {'ta','hi','bn','te','mr','gu','kn','ml','pa','or',
-                        'ar','he','th','ko','ja','zh','ru','uk','el','ne'}
+    # Skip draft-first for non-Latin-script languages.  Canonical set
+    # lives in core.constants — see also the dispatcher's own guard at
+    # dispatch_draft_first (belt + suspenders).
+    from core.constants import NON_LATIN_SCRIPT_LANGS as _NON_LATIN_LANGS
     _skip_draft_for_lang = preferred_lang and preferred_lang[:2] in _NON_LATIN_LANGS
     if draft_first and not _skip_draft_for_lang and prompt and user_id and not _is_agentic_orchestration:
         try:

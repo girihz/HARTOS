@@ -226,28 +226,16 @@ class SpeculativeDispatcher:
                 'expert_pending': False,
             }
 
-        # ── Language guard: skip 0.8B draft for non-English scripts ──
-        # Qwen3.5-0.8B-UD-Q4_K_XL has poor Unicode-script coverage for
-        # Indic / CJK / RTL / SEA scripts.  When told "respond in Tamil"
-        # it falls back to Latin transliteration ("Vanakkam! Nan ungal
-        # nanban...") — unusable for TTS, wrong UX.  The 4B main has
-        # native Unicode coverage via Qwen's multilingual training.
-        #
-        # Boot-time cohort gate (llama_config.should_boot_draft) already
-        # avoids BOOTING draft for non-English on 8GB.  But once a user
-        # switches mid-session (boot lang='en', UI now='ta'), the
-        # running 0.8B stays alive and the dispatcher would keep routing
-        # to it.  This runtime gate catches that case — skip draft,
-        # fall through to 4B for correct-script output.
-        _skip_draft_langs = frozenset({
-            'ta', 'hi', 'bn', 'te', 'mr', 'gu', 'kn', 'ml', 'pa',
-            'or', 'as', 'sa', 'sd', 'ur', 'ne',
-            'zh', 'ja', 'ko',
-            'ar', 'he', 'fa',
-            'th', 'lo', 'km', 'my',
-        })
+        # ── Language guard: skip 0.8B draft for non-Latin scripts ──
+        # Qwen3.5-0.8B-UD-Q4_K_XL has weak Unicode coverage for the
+        # scripts listed in core.constants.NON_LATIN_SCRIPT_LANGS —
+        # falls back to Latin-transliterated output ("Vanakkam! Nan
+        # ungal nanban..." for Tamil) which is unusable for TTS + UX.
+        # The 4B main has native Unicode coverage.  Canonical set lives
+        # in core.constants; this file imports rather than duplicates.
+        from core.constants import NON_LATIN_SCRIPT_LANGS
         _lang_key = (preferred_lang or 'en').split('-')[0].lower()
-        if _lang_key and _lang_key != 'en' and _lang_key in _skip_draft_langs:
+        if _lang_key and _lang_key != 'en' and _lang_key in NON_LATIN_SCRIPT_LANGS:
             logger.info(
                 f"Skipping 0.8B draft for preferred_lang={_lang_key!r} "
                 f"(weak Unicode script coverage); routing direct to 4B.",
