@@ -226,6 +226,38 @@ class SpeculativeDispatcher:
                 'expert_pending': False,
             }
 
+        # ── Language guard: skip 0.8B draft for non-English scripts ──
+        # Qwen3.5-0.8B-UD-Q4_K_XL has poor Unicode-script coverage for
+        # Indic / CJK / RTL / SEA scripts.  When told "respond in Tamil"
+        # it falls back to Latin transliteration ("Vanakkam! Nan ungal
+        # nanban...") — unusable for TTS, wrong UX.  The 4B main has
+        # native Unicode coverage via Qwen's multilingual training.
+        #
+        # Boot-time cohort gate (llama_config.should_boot_draft) already
+        # avoids BOOTING draft for non-English on 8GB.  But once a user
+        # switches mid-session (boot lang='en', UI now='ta'), the
+        # running 0.8B stays alive and the dispatcher would keep routing
+        # to it.  This runtime gate catches that case — skip draft,
+        # fall through to 4B for correct-script output.
+        _skip_draft_langs = frozenset({
+            'ta', 'hi', 'bn', 'te', 'mr', 'gu', 'kn', 'ml', 'pa',
+            'or', 'as', 'sa', 'sd', 'ur', 'ne',
+            'zh', 'ja', 'ko',
+            'ar', 'he', 'fa',
+            'th', 'lo', 'km', 'my',
+        })
+        _lang_key = (preferred_lang or 'en').split('-')[0].lower()
+        if _lang_key and _lang_key != 'en' and _lang_key in _skip_draft_langs:
+            logger.info(
+                f"Skipping 0.8B draft for preferred_lang={_lang_key!r} "
+                f"(weak Unicode script coverage); routing direct to 4B.",
+            )
+            return {
+                'response': '', 'speculation_id': speculation_id,
+                'delegate': 'none', 'error': 'draft_skipped_non_english',
+                'expert_pending': False,
+            }
+
         # ── 2. Gate checks (constitutional + circuit breaker + draft server probe)
         gate_error = self._check_draft_first_gates(prompt)
         if gate_error is not None:
