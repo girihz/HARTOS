@@ -264,6 +264,263 @@ def get_boot_decision() -> Dict[str, Any]:
         }
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Decision-logic RAG — agent reads its own code
+# ═══════════════════════════════════════════════════════════════════
+#
+# Curated registry of "why did Nunba do X?" questions → the exact
+# module + symbol that decides it.  `explain_decision(topic)` uses
+# inspect.getsource() to return the live source, so the agent can
+# explain itself by quoting the actual rules, not a copy-pasted
+# paraphrase that drifts over time.
+
+_DECISION_REGISTRY: Dict[str, Dict[str, str]] = {
+    'draft_gate': {
+        'question': "Why did Nunba enable/disable the draft (0.8B) speculative-decoding model?",
+        'module': 'llama.llama_config',
+        'symbol': 'should_boot_draft',
+        'description': (
+            "Cohort-aware VRAM gate.  ≥10GB → always on.  8-10GB → on "
+            "ONLY when lang=en AND active_tts ∈ {kokoro,piper} (the "
+            "cohort fast-path, commit 12c9304).  <8GB or Indic/heavy-TTS "
+            "users in 8-10GB band → off so voice has VRAM headroom."
+        ),
+    },
+    'tts_lang_ladder': {
+        'question': "Which TTS engine does Nunba pick for a given language?",
+        'module': 'tts.tts_engine',
+        'symbol': '_FALLBACK_LANG_ENGINE_PREFERENCE',
+        'description': (
+            "Per-language engine preference list.  Engine chosen by "
+            "walking the list and taking the first one that fits in "
+            "current VRAM.  English: Chatterbox Turbo → F5 → Indic "
+            "Parler → Kokoro → Piper.  Indic langs: Indic Parler only."
+        ),
+    },
+    'tts_lang_capability': {
+        'question': "Which backends can actually speak a given language (vs mumble the wrong phonemes)?",
+        'module': 'tts.tts_engine',
+        'symbol': '_LANG_CAPABLE_BACKENDS',
+        'description': (
+            "Safety allowlist: if no capable backend fits, synth returns "
+            "None and publishes com.hertzai.hevolve.tts.lang_unsupported "
+            "instead of letting CosyVoice mumble Tamil in English "
+            "phonemes (commit 9064554)."
+        ),
+    },
+    'gpu_tier_thresholds': {
+        'question': "What GPU VRAM tiers does Nunba recognize?",
+        'module': 'core.gpu_tier',
+        'symbol': 'TIER_THRESHOLDS',
+        'description': (
+            "Canonical tier table.  ultra≥24GB, full≥10GB, standard≥4GB, "
+            "none<4GB.  Single source of truth consumed by backend "
+            "/backend/health AND frontend GpuTierBadge via /api/v1/"
+            "system/tiers (architect refactor 57e820b)."
+        ),
+    },
+    'mcp_auth': {
+        'question': "How does Nunba authenticate MCP /api/mcp/local requests?",
+        'module': 'integrations.mcp.mcp_http_bridge',
+        'symbol': '_mcp_auth_gate',
+        'description': (
+            "Bearer token from %LOCALAPPDATA%/Nunba/mcp.token (or "
+            "HARTOS_MCP_TOKEN env).  /health open, /tools/list loopback-"
+            "ok, /tools/execute requires bearer.  HARTOS_MCP_DISABLE_AUTH "
+            "=1 bypasses for air-gapped deploys (commits f5b99d8, 49d829d)."
+        ),
+    },
+    'hf_install_gates': {
+        'question': "Why did Nunba reject an HF model install?",
+        'module': 'main',
+        'symbol': 'admin_models_hub_install',
+        'description': (
+            "4 supply-chain gates: (1) NFKC-normalize hf_id + reject "
+            "non-ASCII (homoglyph defense), (2) trusted-org allowlist "
+            "(unknown orgs need confirm_unverified=true), (3) 5s timeout "
+            "on list_repo_files, (4) reject pickle-only repos — require "
+            "safetensors variant (commits 7b0e312, 86c44aa, 48d6752)."
+        ),
+    },
+    'hub_allowlist': {
+        'question': "Which HF organizations does Nunba trust by default?",
+        'module': 'core.hub_allowlist',
+        'symbol': 'HubAllowlist',
+        'description': (
+            "Runtime-editable list at ~/.nunba/hub_allowlist.json. "
+            "Default seeded from code (google, microsoft, Qwen, "
+            "ai4bharat, etc.).  Admin API: GET/POST/DELETE "
+            "/api/admin/hub/allowlist (architect refactor 48d6752)."
+        ),
+    },
+    'vram_swap': {
+        'question': "Why did Nunba evict an idle model?",
+        'module': 'integrations.service_tools.model_lifecycle',
+        'symbol': 'request_swap',
+        'description': (
+            "Pressure-eviction: when requested model can't fit, evict "
+            "oldest idle non-ACTIVE non-LLM worker and retry load.  Guards "
+            "against evicting pinned models (draft 0.8B) and active "
+            "inferences (commit fe45daf)."
+        ),
+    },
+    'language_detection': {
+        'question': "How does Nunba decide what language the user is speaking?",
+        'module': 'hart_intelligence_entry',
+        'symbol': '_read_preferred_lang',
+        'description': (
+            "Reads ~/Documents/Nunba/data/hart_language.json written by "
+            "the frontend language selector.  Falls back to 'en' if "
+            "missing.  Passed through to whisper.transcribe(language=) "
+            "on STT path so short Tamil utterances aren't misrouted as "
+            "English (commit 07da0fb)."
+        ),
+    },
+    'watchdog': {
+        'question': "What happens if a HARTOS daemon freezes?",
+        'module': 'security.node_watchdog',
+        'symbol': 'NodeWatchdog',
+        'description': (
+            "Per-thread heartbeat monitor.  If heartbeat missed for "
+            ">threshold (default 300s), dumps all thread stacks via "
+            "core.diag, marks thread 'frozen', restarts.  Caps at 5 "
+            "restarts in 5min then marks dormant (commit eb05d0f)."
+        ),
+    },
+    'wamp_lifecycle': {
+        'question': "When does Nunba start the WAMP router?",
+        'module': 'wamp_router',
+        'symbol': 'ensure_wamp_running',
+        'description': (
+            "Deferred-start: NOT at boot (saves ~100MB).  Started on "
+            "first non-web channel activation OR first peer upgrade.  "
+            "Protected by threading.Lock so concurrent ensure calls can't "
+            "double-start (commits 48854dc, 852f4ac, 1a8c8e6)."
+        ),
+    },
+}
+
+
+def explain_decision(topic: str = '') -> Dict[str, Any]:
+    """Return the SOURCE CODE of a decision-making function/variable so
+    the agent can explain itself by quoting the live rules, not a stale
+    paraphrase.
+
+    Use this when the user asks "why did you do X?", "explain your
+    reasoning for Y", "show me the logic that decides Z".  Covers the
+    major decision points: draft gate, TTS ladder, GPU tiers, MCP
+    auth, HF gates, VRAM eviction, language detection, watchdog, WAMP.
+
+    If `topic` matches a known key (see list_decisions) returns the
+    full source.  If `topic` is empty, returns the list of all topics
+    so the agent can pick the right one for the user's question.
+    """
+    import inspect
+    import importlib
+
+    topic = (topic or '').strip().lower()
+    if not topic:
+        return {
+            'available': True,
+            'topics': sorted(_DECISION_REGISTRY.keys()),
+            'summary': (
+                'Known decision topics: '
+                + ', '.join(sorted(_DECISION_REGISTRY.keys()))
+                + '.  Call explain_decision(topic=<name>) to get the '
+                  'source code + rationale.'
+            ),
+        }
+
+    # Exact match first, then fuzzy prefix match
+    entry = _DECISION_REGISTRY.get(topic)
+    if not entry:
+        for k in _DECISION_REGISTRY:
+            if k.startswith(topic) or topic in k:
+                entry = _DECISION_REGISTRY[k]
+                topic = k
+                break
+
+    if not entry:
+        return {
+            'available': False,
+            'summary': (
+                f"Unknown decision topic '{topic}'.  Known topics: "
+                + ', '.join(sorted(_DECISION_REGISTRY.keys()))
+            ),
+        }
+
+    # Try to import the module and grab the source
+    try:
+        mod = importlib.import_module(entry['module'])
+        obj = getattr(mod, entry['symbol'], None)
+        if obj is None:
+            return {
+                'available': False,
+                'question': entry['question'],
+                'description': entry['description'],
+                'module': entry['module'],
+                'symbol': entry['symbol'],
+                'summary': (
+                    f"Module '{entry['module']}' imported but symbol "
+                    f"'{entry['symbol']}' not found.  Description: "
+                    + entry['description']
+                ),
+            }
+        try:
+            src = inspect.getsource(obj)
+        except (OSError, TypeError):
+            # Variable (not a function) — render its repr
+            src = f"{entry['symbol']} = {obj!r}"
+        # Truncate to keep LLM context usable
+        if len(src) > 4000:
+            src = src[:4000] + '\n... (truncated)'
+        return {
+            'available': True,
+            'topic': topic,
+            'question': entry['question'],
+            'description': entry['description'],
+            'module': entry['module'],
+            'symbol': entry['symbol'],
+            'source': src,
+            'summary': (
+                f"{entry['question']}\n\n"
+                f"Rationale: {entry['description']}\n\n"
+                f"Source ({entry['module']}.{entry['symbol']}):\n{src}"
+            ),
+        }
+    except ImportError as e:
+        return {
+            'available': False,
+            'question': entry['question'],
+            'description': entry['description'],
+            'summary': (
+                f"Cannot import {entry['module']}: {e!s}.  "
+                f"Rationale-only: {entry['description']}"
+            ),
+        }
+
+
+def list_decisions() -> Dict[str, Any]:
+    """List all decision topics the agent can explain via
+    explain_decision().  Use this when the user asks a general "how
+    does Nunba decide X?" question and you need to pick the right
+    topic."""
+    return {
+        'available': True,
+        'topics': [
+            {'name': k, 'question': v['question'], 'description': v['description']}
+            for k, v in sorted(_DECISION_REGISTRY.items())
+        ],
+        'summary': (
+            f"{len(_DECISION_REGISTRY)} decision topic(s):\n"
+            + '\n'.join(
+                f"  - {k}: {v['question']}"
+                for k, v in sorted(_DECISION_REGISTRY.items())
+            )
+        ),
+    }
+
+
 def get_system_health() -> Dict[str, Any]:
     """Top-level system health — combines GPU tier + Flask liveness.
 
@@ -299,6 +556,8 @@ _TOOL_FUNCTIONS: List[Callable[..., Dict[str, Any]]] = [
     get_tier_thresholds,
     get_boot_decision,
     get_system_health,
+    list_decisions,     # agent picks the right topic for user's "why" question
+    explain_decision,   # agent reads its own source code (code-RAG)
 ]
 
 
@@ -323,20 +582,31 @@ def get_langchain_tools() -> List[Any]:
             logger.debug("langchain not importable — system_introspect tools unavailable")
             return []
 
+    import inspect as _inspect
+
     tools = []
     for fn in _TOOL_FUNCTIONS:
-        def _make_runner(_fn: Callable) -> Callable[[str], str]:
-            # LangChain Tool.func receives a single string.  Our
-            # functions take no args — just call and return the summary.
-            def _run(_ignored_query: str = '') -> str:
-                result = _fn()
+        # Functions that take a real argument (explain_decision(topic))
+        # get the LangChain string passed through as the first positional
+        # arg.  Argless functions ignore it.  Introspection-based so
+        # future additions auto-pick the right calling convention.
+        _sig = _inspect.signature(fn)
+        _takes_arg = any(
+            p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+            and p.default is not p.empty
+            for p in _sig.parameters.values()
+        )
+
+        def _make_runner(_fn: Callable, _takes: bool) -> Callable[[str], str]:
+            def _run(query: str = '') -> str:
+                result = _fn(query) if _takes and query else _fn()
                 return result.get('summary') or str(result)
             _run.__name__ = _fn.__name__
             return _run
 
         tools.append(Tool(
             name=fn.__name__,
-            func=_make_runner(fn),
+            func=_make_runner(fn, _takes_arg),
             description=(fn.__doc__ or fn.__name__).strip().split('\n')[0],
         ))
     return tools
@@ -379,6 +649,8 @@ __all__ = [
     'get_tier_thresholds',
     'get_boot_decision',
     'get_system_health',
+    'list_decisions',
+    'explain_decision',
     'get_tool_functions',
     'get_langchain_tools',
     'register_autogen',
