@@ -145,57 +145,85 @@ _SELF_AWARENESS_MAP = {
 _REGIONAL_TONE_DATA = {
     # ── Indic languages (Nunba TTS + Hevolve Android) ──────────────────
     'ta': ('Tamil', 'full', (
-        'REGISTER PROGRESSION (follow this):\n'
-        '- NEW USER (first few messages): Respectful — use -nga suffix: "sollunga" (tell), '
-        '"vaanga" (come), "pannunga" (do). Address: "neenga" (you-respectful).\n'
-        '  Example: "Vanakkam! Nan ungal nanban. Enna help venum sollunga, na paathukren."\n'
-        '- AFTER RAPPORT (user uses casual Tamil or says "da/machan"): Switch to casual — '
-        '"sollu", "vaa", "pannu", "da/di", "machan/macha", "nanba" (friend/buddy).\n'
-        '  Example: "Seri nanba, na check pannuren — romba easy fix."\n'
-        '- MATCH THE USER: If they write formally, stay formal. If casual, go casual.\n'
-        'WORDS: "nanba/nanban" (friend), "seri" (okay), "romba" (very), "nalla" (good), '
-        '"paravala" (no problem), "enna" (what), "epdi" (how), "semma" (super), '
-        '"konjam" (a bit), "pakalam" (let\'s see)\n'
-        'GRAMMAR: Say "na" (I), never "naanga" (we). SOV word order. '
-        'Don\'t half-mix: "na fix pannuren" OR "I\'ll fix it" — never "na will pannuren".\n'
-        'IDENTITY: Your name in Tamil is நண்பா (Nanba) meaning friend. '
-        'NEVER write நும்பா or நூன்பா — those are wrong transliterations. '
-        'Always say நண்பா (Nanba), never Nunba in Tamil script.')),
+        'OUTPUT MUST BE FULLY IN TAMIL SCRIPT (தமிழ்).  Loanwords from '
+        'English — "code", "fix", "check", product names — are kept but '
+        'WRITTEN PHONETICALLY IN TAMIL SCRIPT: "code" → "கோட்", "fix" → '
+        '"ஃபிக்ஸ்", "check" → "செக்", "install" → "இன்ஸ்டால்".  Do NOT '
+        'emit Latin letters in the reply body — Indic Parler TTS can '
+        'only synthesise Tamil script.  Mixed-script like "நான் code '
+        'செக் பண்றேன்" is WRONG; say "நான் கோட் செக் பண்றேன்".\n'
+        'REGISTER PROGRESSION:\n'
+        '- NEW USER (first messages): Respectful — -ங்க suffix: '
+        '"சொல்லுங்க" (tell), "வாங்க" (come), "பண்ணுங்க" (do).  '
+        'Address: "நீங்க" (you-respectful).\n'
+        '  Example: "வணக்கம்! நான் உங்க நண்பன். என்ன ஹெல்ப் வேணும் '
+        'சொல்லுங்க, நா பாத்துக்கிறேன்."\n'
+        '- AFTER RAPPORT (user says "டா/மச்சான்"): Casual — "சொல்லு", '
+        '"வா", "பண்ணு", "டா/டி", "மச்சான்/மச்சா", "நண்பா".\n'
+        '  Example: "சரி நண்பா, நா செக் பண்றேன் — ரொம்ப ஈஸி ஃபிக்ஸ்."\n'
+        '- MATCH THE USER: formal → stay formal; casual → go casual.\n'
+        'VOCABULARY (Tamil script | roman hint for you only): '
+        'நண்பா|nanba (friend), சரி|seri (okay), ரொம்ப|romba (very), '
+        'நல்ல|nalla (good), பரவால|paravala (no problem), '
+        'என்ன|enna (what), எப்படி|epdi (how), செம்ம|semma (super), '
+        'கொஞ்சம்|konjam (a bit), பாக்கலாம்|pakalam (let\'s see)\n'
+        'GRAMMAR: Say "நான்" (I), not "நாங்க" (we).  SOV order.\n'
+        'IDENTITY: Your name is நண்பா.  Never write நும்பா, நூன்பா, '
+        'or "Nanba" in Latin — always நண்பா.')),
     'hi': ('Hindi', 'full', (
+        'OUTPUT MUST BE FULLY IN DEVANAGARI (हिन्दी).  English loanwords '
+        'written phonetically in Devanagari: "code" → "कोड", "fix" → '
+        '"फ़िक्स", "check" → "चेक", "install" → "इंस्टॉल".  No Latin '
+        'letters in the reply body.\n'
         'REGISTER PROGRESSION:\n'
-        '- NEW USER: Respectful — "aap" (you-formal), "kahiye" (please say), "zaroor" (certainly).\n'
-        '  Example: "Namaste! Aap batayiye, main help kar deta hoon."\n'
-        '- AFTER RAPPORT: Casual — "tu/tum", "yaar", "bhai", "chal", "dekh".\n'
-        '  Example: "Acha bhai, main check karta hoon — simple fix hai."\n'
+        '- NEW USER: Respectful — "आप" (formal you), "कहिए", "ज़रूर".\n'
+        '  Example: "नमस्ते! आप बताइए, मैं हेल्प कर देता हूँ।"\n'
+        '- AFTER RAPPORT: Casual — "तू/तुम", "यार", "भाई", "चल", "देख".\n'
+        '  Example: "अच्छा भाई, मैं चेक करता हूँ — सिंपल फ़िक्स है।"\n'
         '- MATCH THE USER\'s register.\n'
-        'WORDS: "acha" (okay), "theek hai" (alright), "mast" (cool), "pakka" (sure), '
-        '"bas" (enough), "koi na" (no worries), "sahi hai" (right), "ekdum" (totally)\n'
-        'GRAMMAR: Say "main" (I), never "hum" (we). SOV order. '
-        'Don\'t half-mix verbs.')),
+        'VOCABULARY (Devanagari | roman hint): अच्छा|acha (okay), '
+        'ठीक है|theek hai (alright), मस्त|mast (cool), पक्का|pakka (sure), '
+        'बस|bas (enough), कोई ना|koi na (no worries), '
+        'सही है|sahi hai (right), एकदम|ekdum (totally)\n'
+        'GRAMMAR: Say "मैं" (I), not "हम" (we).  SOV order.')),
     'bn': ('Bengali', 'full', (
+        'OUTPUT MUST BE FULLY IN BENGALI SCRIPT (বাংলা).  English '
+        'loanwords written phonetically: "code" → "কোড", "fix" → '
+        '"ফিক্স", "check" → "চেক".  No Latin letters in the reply body.\n'
         'REGISTER PROGRESSION:\n'
-        '- NEW USER: Respectful — "apni" (you-formal), "bolun" (please say).\n'
-        '  Example: "Nomoshkar! Ki dorkar bolun, ami help korbo."\n'
-        '- AFTER RAPPORT: Casual — "tumi/tui", "dada/didi", "ki re".\n'
-        '  Example: "Shon re, ami check korchi — ektu wait kor."\n'
-        'WORDS: "bhaloi" (good), "hobe" (will happen), "ektu" (a bit), "darun" (awesome)\n'
-        'GRAMMAR: Say "ami" (I), never "amra" (we). SOV order.')),
+        '- NEW USER: Respectful — "আপনি" (formal you), "বলুন".\n'
+        '  Example: "নমস্কার! কী দরকার বলুন, আমি হেল্প করবো।"\n'
+        '- AFTER RAPPORT: Casual — "তুমি/তুই", "দাদা/দিদি", "কি রে".\n'
+        '  Example: "শোন রে, আমি চেক করছি — একটু ওয়েট কর।"\n'
+        'VOCABULARY (Bengali | roman hint): ভালোই|bhaloi (good), '
+        'হবে|hobe (will happen), একটু|ektu (a bit), দারুণ|darun (awesome)\n'
+        'GRAMMAR: Say "আমি" (I), not "আমরা" (we).  SOV order.')),
     'te': ('Telugu', 'full', (
+        'OUTPUT MUST BE FULLY IN TELUGU SCRIPT (తెలుగు).  English '
+        'loanwords written phonetically: "code" → "కోడ్", "fix" → '
+        '"ఫిక్స్", "check" → "చెక్".  No Latin letters in the reply body.\n'
         'REGISTER PROGRESSION:\n'
-        '- NEW USER: Respectful — "-andi" suffix, "meeru" (you-formal).\n'
-        '  Example: "Namaskaram! Enti kavali cheppandi, nenu chustanu."\n'
-        '- AFTER RAPPORT: Casual — "ra/ri", "enti ra", "chudu".\n'
-        '  Example: "Chudu ra, nenu check chestanu — super easy fix."\n'
-        'WORDS: "baaga" (well), "parledu" (no problem), "super ga" (superb), "em" (what)\n'
-        'GRAMMAR: Say "nenu" (I), never "memu" (we). SOV order.')),
+        '- NEW USER: Respectful — "-అండి" suffix, "మీరు" (formal you).\n'
+        '  Example: "నమస్కారం! ఏంటి కావాలి చెప్పండి, నేను చూస్తాను."\n'
+        '- AFTER RAPPORT: Casual — "రా/రి", "ఏంటి రా", "చూడు".\n'
+        '  Example: "చూడు రా, నేను చెక్ చేస్తాను — సూపర్ ఈజీ ఫిక్స్."\n'
+        'VOCABULARY (Telugu | roman hint): బాగా|baaga (well), '
+        'పర్లేదు|parledu (no problem), సూపర్ గా|super ga (superb), '
+        'ఏం|em (what)\n'
+        'GRAMMAR: Say "నేను" (I), not "మేము" (we).  SOV order.')),
     'mr': ('Marathi', 'full', (
+        'OUTPUT MUST BE FULLY IN DEVANAGARI (मराठी).  English loanwords '
+        'written phonetically: "code" → "कोड", "fix" → "फिक्स", '
+        '"check" → "चेक".  No Latin letters in the reply body.\n'
         'REGISTER PROGRESSION:\n'
-        '- NEW USER: Respectful — "tumhi" (you-formal), "sanga" (please tell).\n'
-        '  Example: "Namaskar! Kay madatit sanga, mi baghto."\n'
-        '- AFTER RAPPORT: Casual — "tu", "re/ga", "bagh".\n'
-        '  Example: "Bagh re, mi check karto — ekdum simple fix ahe."\n'
-        'WORDS: "kay" (what), "mast" (awesome), "barobar" (correct), "ekdum" (totally)\n'
-        'GRAMMAR: Say "mi" (I), never "amhi" (we). SOV order.')),
+        '- NEW USER: Respectful — "तुम्ही" (formal you), "सांगा".\n'
+        '  Example: "नमस्कार! काय मदतीत सांगा, मी बघतो."\n'
+        '- AFTER RAPPORT: Casual — "तू", "रे/गा", "बघ".\n'
+        '  Example: "बघ रे, मी चेक करतो — एकदम सिंपल फिक्स आहे."\n'
+        'VOCABULARY (Marathi | roman hint): काय|kay (what), '
+        'मस्त|mast (awesome), बरोबर|barobar (correct), '
+        'एकदम|ekdum (totally)\n'
+        'GRAMMAR: Say "मी" (I), not "आम्ही" (we).  SOV order.')),
     'gu': ('Gujarati', 'light', (
         'REGISTER: NEW→"tamey" (formal you), RAPPORT→"tu". '
         '"bhai" (bro), "kem cho" (how are you), "majama" (great), '
@@ -429,25 +457,73 @@ def _build_tone_prompt(lang_code: str) -> str:
     }
     _script_note = ''
     if lang_code in _NON_LATIN_SCRIPTS:
+        # Monoscript rule: when the UI-selected language is a non-Latin
+        # script, the entire reply body — including English loanwords —
+        # must be in that script.  Indic Parler / CosyVoice / Kokoro
+        # TTS backends synthesise from script (they can't pronounce
+        # Latin-transliterated Tamil); emitting mixed-script makes the
+        # audio either skip or mangle the Latin tokens.
+        # The "user wrote romanised, mirror them" path is NOT a prompt
+        # instruction — it's a separate TTS-side transliteration bridge
+        # (Latin → target script) invoked before audio synth so the
+        # chat bubble preserves the user's style while the TTS still
+        # gets native-script input.  The LLM always emits native script.
         _script_note = (
-            f'SCRIPT: By default write in {_NON_LATIN_SCRIPTS[lang_code]} script. '
-            f'If the user writes in romanized Latin, match their style and respond romanized. '
+            f'SCRIPT: Reply entirely in {_NON_LATIN_SCRIPTS[lang_code]} — '
+            f'every word, including English loanwords (write "code" as a '
+            f'phonetic transliteration in the target script, not as Latin '
+            f'letters).  No mixed-script.  The TTS backend expects native '
+            f'script input; Latin letters cannot be synthesised. '
+        )
+    # Grammar rule varies by script family.  For non-Latin languages the
+    # "natural English portions" guidance from the Latin-script path
+    # would contradict SCRIPT: monoscript; rephrase to match.
+    if lang_code in _NON_LATIN_SCRIPTS:
+        _grammar_rule = (
+            f'GRAMMAR: Use grammatically correct {lang_name} — no broken '
+            f'sentences, no made-up words.  English loanwords you do want '
+            f'to use must be written phonetically in {lang_name} script '
+            f'("code" → native-script transliteration), never as Latin '
+            f'letters.  If unsure of the {lang_name} spelling of a word, '
+            f'use a well-known native {lang_name} equivalent instead of '
+            f'guessing.'
+        )
+    else:
+        _grammar_rule = (
+            f'GRAMMAR: Use grammatically correct {lang_name} — no broken '
+            f'sentences, no made-up words, no garbled text.  When code-'
+            f'mixing with English, keep {lang_name} portions grammatically '
+            f'proper and English portions natural.  If unsure of a '
+            f'{lang_name} word, use the English word instead of guessing.'
         )
     _rules = (
         f'{_script_note}'
         'Say "I" not "we". Start respectful with new users, '
         'naturally shift to casual as rapport builds. Match user\'s register. '
-        f'GRAMMAR: Use grammatically correct {lang_name} — no broken sentences, '
-        f'no made-up words, no garbled text. When code-mixing with English, '
-        f'keep {lang_name} portions grammatically proper and English portions natural. '
-        f'If unsure of a {lang_name} word, use the English word instead of guessing.'
+        f'{_grammar_rule}'
     )
+
+    # Tech-term trailer: for Latin-script full-tier languages, Python/
+    # JSON/API names stay in English because they appear in English
+    # worldwide.  For non-Latin-script languages this would undermine
+    # the monoscript SCRIPT: directive — so the tech-term trailer is
+    # replaced with a "transliterate phonetically" reinforcement.
+    if lang_code in _NON_LATIN_SCRIPTS:
+        _tech_trailer = (
+            f'Tech terms: transliterate phonetically into '
+            f'{_NON_LATIN_SCRIPTS[lang_code]} script — never leave '
+            f'them in Latin letters.'
+        )
+        _tone_header = f'{lang_name}, warm and natural, native-script only.'
+    else:
+        _tech_trailer = 'Tech terms in English.'
+        _tone_header = f'{lang_name}-English, warm and natural.'
 
     if tier == 'full':
         return f"""
-TONE: {lang_name}-English, warm and natural. {_rules}
+TONE: {_tone_header} {_rules}
 {phrases}
-Tech terms in English."""
+{_tech_trailer}"""
     elif tier == 'light':
         return f"""
 TONE: Friendly {lang_name} filler in English. {_rules}
