@@ -126,6 +126,60 @@ _whisper_model_name = None
 _faster_whisper_model = None
 _faster_whisper_model_size = None
 
+# Backoff + circuit-breaker for the model-load retry storm.
+# Symptom #10 (Stage-A, 2026-04-16): frozen_debug.log showed ~2Hz
+# 'faster-whisper transcription failed: HF_HUB_OFFLINE' spam because
+# every realtime transcribe call re-hit the network. Now:
+#   - backoff: 1s -> 2s -> 4s -> ... capped at 300s
+#   - breaker: after 5 consecutive model-load failures, OPEN for 300s
+# The backoff is KEYED by model_size so changing size resets the timer.
+# The breaker is a process-wide single instance (one faster-whisper
+# model at a time in this module).
+try:
+    from core.circuit_breaker import CircuitBreaker, PeerBackoff
+    _whisper_load_backoff = PeerBackoff(initial=1.0, maximum=300.0)
+    _whisper_load_breaker = CircuitBreaker(
+        name='faster_whisper_load', threshold=5, cooldown=300.0,
+    )
+except ImportError:  # dev tree without HARTOS core — defense-in-depth
+    _whisper_load_backoff = None
+    _whisper_load_breaker = None
+
+# Track the last user-visible error so /api/admin/stt/status can
+# surface it instead of the UI silently limping along. This is the
+# 'visible error to the user' half of the symptom #10 mandate.
+_whisper_last_error: Optional[str] = None
+
+
+def get_whisper_last_error() -> Optional[str]:
+    """Return the most recent faster-whisper failure reason, or None.
+
+    Exposed so the admin/status UI can show a concrete error to the
+    user instead of letting the retry storm accumulate silently in
+    the log. Cleared on the next successful load or transcribe.
+    """
+    return _whisper_last_error
+
+
+def _record_whisper_failure(reason: str) -> None:
+    """Record a whisper failure across backoff + breaker + last-error."""
+    global _whisper_last_error
+    _whisper_last_error = reason
+    if _whisper_load_breaker is not None:
+        _whisper_load_breaker.record_failure()
+    if _whisper_load_backoff is not None:
+        _whisper_load_backoff.record_failure('faster_whisper')
+
+
+def _record_whisper_success() -> None:
+    """Reset backoff + breaker + clear last-error on success."""
+    global _whisper_last_error
+    _whisper_last_error = None
+    if _whisper_load_breaker is not None:
+        _whisper_load_breaker.record_success()
+    if _whisper_load_backoff is not None:
+        _whisper_load_backoff.record_success('faster_whisper')
+
 
 # ═══════════════════════════════════════════════════════════════
 # faster-whisper (primary engine)
@@ -145,14 +199,46 @@ def _get_faster_whisper_model(model_size: str = "base"):
 
     Device selection:
       - NVIDIA GPU (CUDA): CTranslate2 uses its own CUDA runtime (not torch)
-      - AMD GPU: CTranslate2 doesn't support ROCm/Vulkan → CPU fallback
+      - AMD GPU: CTranslate2 doesn't support ROCm/Vulkan -> CPU fallback
       - CPU: int8 quantization for speed
+
+    Retry semantics (Symptom #10, 2026-04-16):
+      - Backoff-gated: if the last load failed, refuses to retry until
+        the exponential backoff window elapses.
+      - Circuit-breaker-gated: after 5 consecutive failures, the
+        breaker OPENS for 300s; calls raise RuntimeError instead of
+        hitting the network on every streaming chunk.
+      - Raises on refusal so the caller can log ONCE and skip the
+        realtime path cleanly instead of absorbing the exception 2x
+        per second.
     """
     global _faster_whisper_model, _faster_whisper_model_size
     if _faster_whisper_model is not None and _faster_whisper_model_size == model_size:
         return _faster_whisper_model
 
-    from faster_whisper import WhisperModel
+    # Gate 1: circuit breaker. If OPEN, refuse without even importing.
+    if _whisper_load_breaker is not None and _whisper_load_breaker.is_open():
+        raise RuntimeError(
+            f"faster-whisper circuit breaker OPEN (stats="
+            f"{_whisper_load_breaker.get_stats()}, last_error="
+            f"{_whisper_last_error!r})"
+        )
+
+    # Gate 2: exponential backoff keyed by model name. If recently
+    # failed, refuse until the window elapses. Caller gets a clear
+    # single log line per refusal, not 2Hz spam.
+    if (_whisper_load_backoff is not None
+            and _whisper_load_backoff.is_backed_off('faster_whisper')):
+        raise RuntimeError(
+            f"faster-whisper load is backed off (last_error="
+            f"{_whisper_last_error!r})"
+        )
+
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as e:
+        _record_whisper_failure(f"faster_whisper import failed: {e}")
+        raise
 
     # Detect if CUDA is available for CTranslate2 (separate from torch CUDA)
     device = "cpu"
@@ -167,11 +253,18 @@ def _get_faster_whisper_model(model_size: str = "base"):
         pass
 
     logger.info(f"Loading faster-whisper model '{model_size}' on {device} ({compute_type})...")
-    _faster_whisper_model = WhisperModel(
-        model_size, device=device, compute_type=compute_type
-    )
+    try:
+        _faster_whisper_model = WhisperModel(
+            model_size, device=device, compute_type=compute_type
+        )
+    except Exception as e:
+        reason = f"WhisperModel({model_size}, {device}, {compute_type}) failed: {e}"
+        logger.warning(reason)
+        _record_whisper_failure(reason)
+        raise
     _faster_whisper_model_size = model_size
     logger.info(f"faster-whisper model '{model_size}' loaded on {device}")
+    _record_whisper_success()
 
     # Register with central lifecycle tracker via orchestrator
     try:
@@ -185,20 +278,41 @@ def _get_faster_whisper_model(model_size: str = "base"):
 
 
 def _faster_whisper_transcribe(audio_path: str, language: str = None) -> Optional[str]:
-    """Transcribe using faster-whisper. Returns JSON string or None on failure."""
+    """Transcribe using faster-whisper. Returns JSON string or None on failure.
+
+    Symptom #10 guard (2026-04-16): each call is gated by the module
+    circuit breaker, so after N consecutive load failures we refuse
+    silently (one log every cooldown window, not 2Hz spam). The
+    backoff is shared with _get_faster_whisper_model so a model-load
+    refusal here shortcircuits the full transcribe path too.
+    """
+    # Fast-path refusal: if breaker is OPEN, skip the whole try block.
+    if _whisper_load_breaker is not None and _whisper_load_breaker.is_open():
+        return None
+
     try:
         model = _get_faster_whisper_model(_FASTER_WHISPER_MODEL_SIZE)
+    except Exception as e:
+        # _get_faster_whisper_model already records the failure +
+        # emits one warning. Don't re-log at 2Hz here.
+        logger.debug(f"faster-whisper unavailable: {e}")
+        return None
+
+    try:
         kwargs = {"beam_size": 5}
         if language:
             kwargs["language"] = language
         segments, info = model.transcribe(audio_path, **kwargs)
         text = " ".join(seg.text for seg in segments).strip()
+        _record_whisper_success()
         return json.dumps({
             "text": text,
             "language": info.language if info.language else "unknown",
         })
     except Exception as e:
+        reason = f"transcribe({audio_path}) failed: {e}"
         logger.warning(f"faster-whisper transcription failed: {e}")
+        _record_whisper_failure(reason)
         return None
 
 
