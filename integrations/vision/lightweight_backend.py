@@ -434,7 +434,20 @@ class Qwen08BBackend(VisionBackend):
                '--n-gpu-layers', '99', '--threads', '4', '--flash-attn', 'on']
         log_path = os.path.join(os.environ.get('TEMP', '/tmp'), f'llama_{self._port}.log')
         try:
-            _kw = dict(stdout=open(log_path, 'w'), stderr=subprocess.STDOUT)
+            # APPEND mode — caption-server can crash + respawn; each
+            # restart's truncation erased the previous crash evidence.
+            # Root-cause class: truncate-on-restart log loss.
+            _log_fh = open(log_path, 'a')
+            try:
+                import datetime as _lb_dt
+                _log_fh.write(
+                    f"\n===== llama-caption (lightweight) session "
+                    f"{_lb_dt.datetime.now().isoformat()} port={self._port} =====\n"
+                )
+                _log_fh.flush()
+            except Exception:
+                pass
+            _kw = dict(stdout=_log_fh, stderr=subprocess.STDOUT)
             if os.name == 'nt':
                 _kw['creationflags'] = subprocess.CREATE_NO_WINDOW
             subprocess.Popen(cmd, **_kw)
@@ -516,7 +529,18 @@ class Qwen08BBackend(VisionBackend):
                    '--port', str(self._port), '--ctx-size', '512',
                    '--n-gpu-layers', '99', '--threads', '4', '--flash-attn', 'on']
             log_path = os.path.join(os.environ.get('TEMP', '/tmp'), f'llama_{self._port}.log')
-            log_fh = open(log_path, 'w')
+            # APPEND mode — same root-cause class as the caption-server
+            # launch above.  Preserves prior run's log across restarts.
+            log_fh = open(log_path, 'a')
+            try:
+                import datetime as _lb_dt
+                log_fh.write(
+                    f"\n===== llama-caption (standalone) session "
+                    f"{_lb_dt.datetime.now().isoformat()} port={self._port} =====\n"
+                )
+                log_fh.flush()
+            except Exception:
+                pass
             _kw = dict(stdout=log_fh, stderr=subprocess.STDOUT)
             if os.name == 'nt':
                 _kw['creationflags'] = subprocess.CREATE_NO_WINDOW
