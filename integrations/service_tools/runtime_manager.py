@@ -345,6 +345,22 @@ class RuntimeToolManager:
         if not script or not os.path.exists(script):
             return {'error': f'Server script not found: {script}'}
 
+        # Fail-early VRAM check: if the tool has a GPU offload mode and
+        # the budget won't fit, refuse to spawn the proc rather than
+        # letting it OOM mid-load. cpu_only offload mode bypasses this
+        # check (CPU-only inference has no VRAM budget).
+        if offload_mode != 'cpu_only' and not self.vram.can_fit(tool_name):
+            free_gb = self.vram.get_free_vram()
+            logger.warning(
+                f"Refusing to start {tool_name}: won't fit "
+                f"(free={free_gb:.1f}GB, offload={offload_mode})"
+            )
+            return {
+                'error': f'Insufficient VRAM for {tool_name} '
+                         f'(free={free_gb:.1f}GB); try cpu_only',
+                'oom': True,
+            }
+
         # Set environment for the child process
         env = os.environ.copy()
         model_dir = str(self.storage.get_tool_dir(tool_name))
@@ -385,8 +401,14 @@ class RuntimeToolManager:
                 self._processes[tool_name] = proc
                 self._ports[tool_name] = port
 
-            # Allocate VRAM
-            self.vram.allocate(tool_name)
+            # Allocate VRAM — if rejected here the proc grabbed VRAM
+            # concurrently (race), so we keep the proc but log the
+            # inconsistency so the operator can re-check.
+            if not self.vram.allocate(tool_name):
+                logger.warning(
+                    f"VRAM.allocate({tool_name}) returned False even "
+                    f"though can_fit passed pre-spawn — concurrent race"
+                )
 
             # Register with service_tool_registry
             self._register_tool_at_port(tool_name, port)
@@ -407,8 +429,15 @@ class RuntimeToolManager:
             try:
                 from .whisper_tool import WhisperTool, select_whisper_model
                 model_name = select_whisper_model()
+                # For in-process whisper, VRAM is eagerly consumed by
+                # faster-whisper on first call — honor the bool here so
+                # a refusal is logged alongside the success path.
                 WhisperTool.register_functions()
-                self.vram.allocate(tool_name)
+                if not self.vram.allocate(tool_name):
+                    logger.warning(
+                        f"Whisper in-process registered but VRAM budget "
+                        f"refused — running in CPU fallback mode"
+                    )
                 logger.info(f"Whisper registered in-process (model: {model_name})")
                 # Resolve catalog_id dynamically from selected model size
                 self._sync_catalog(tool_name, device='cpu',
