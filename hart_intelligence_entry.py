@@ -5510,7 +5510,19 @@ def chat():
             'response': None,
         }), 413
 
-    preferred_lang = data.get('preferred_lang', 'en')
+    # Fall back to the canonical hart_language.json when frontend omits
+    # preferred_lang.  Previously defaulted to 'en' which bypassed the
+    # draft skip-gate for Tamil (hart_language.json says 'ta' but /chat
+    # never read it).  Single source of truth: core.user_lang.
+    _req_lang = data.get('preferred_lang') or data.get('language')
+    if _req_lang and _req_lang.strip():
+        preferred_lang = _req_lang.strip()
+    else:
+        try:
+            from core.user_lang import get_preferred_lang
+            preferred_lang = get_preferred_lang()
+        except Exception:
+            preferred_lang = 'en'
 
     # Persist language preference so next startup warm-up loads the right
     # TTS + right draft-boot decision (see llama_config.should_boot_draft
