@@ -571,20 +571,28 @@ class ModelOrchestrator:
         return self._CATALOG_TO_VRAM_KEY.get(entry.id, entry.id)
 
     def _register_vram(self, entry: ModelEntry, run_mode: str) -> bool:
+<<<<<<< HEAD
         """Register VRAM allocation via VRAMManager.can_fit + allocate.
 
         Returns True if allocated, False if rejected.
         Uses the existing VRAMManager API — no parallel capacity logic.
         """
+=======
+        """Register VRAM allocation. Returns False if GPU is full."""
+>>>>>>> 15ed427 (fix(vram): _register_vram now uses VRAMManager.can_fit + allocate)
         if run_mode != 'gpu' or entry.vram_gb <= 0:
             return True
         try:
             from integrations.service_tools.vram_manager import vram_manager
+<<<<<<< HEAD
             tool_key = self._vram_key(entry)
             if not vram_manager.can_fit(tool_key):
                 logger.warning(f"VRAM rejected: {tool_key} ({entry.vram_gb}GB) won't fit")
                 return False
             return vram_manager.allocate(tool_key)
+=======
+            return vram_manager.allocate(self._vram_key(entry))
+>>>>>>> 15ed427 (fix(vram): _register_vram now uses VRAMManager.can_fit + allocate)
         except ImportError:
             return True
 
