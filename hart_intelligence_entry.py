@@ -6602,6 +6602,24 @@ def agent_approval():
             return jsonify({'status': 'error', 'reason': 'invalid decision'}), 400
         approved = decision in ('approve', 'approved', 'allow', 'yes')
         if not approved:
+            # Stage-C (Symptom #6): publish the deny event on WAMP too
+            # so subscribers (VisionService, UI) can tear down cleanly
+            # without inspecting HTTP responses.
+            try:
+                _cu_d = data.get('user_id') or data.get('userId') or 'local'
+                publish_async(
+                    f'com.hertzai.hevolve.vision.{_cu_d}',
+                    json.dumps({
+                        'type': 'consent',
+                        'user_id': _cu_d,
+                        'agent_id': agent_id,
+                        'action': action,
+                        'decision': 'denied',
+                        'ts': int(time.time()),
+                    }),
+                )
+            except Exception as _pub_exc:
+                app.logger.debug(f"agent_approval deny WAMP publish failed: {_pub_exc}")
             app.logger.info(f'agent_approval: agent={agent_id} action={action} DENIED')
             return jsonify({'status': 'denied', 'action': action}), 200
 
@@ -6637,6 +6655,35 @@ def agent_approval():
                 cfg.audio_enabled = True
             api._save_config()
             _apply_embodied_toggle(feed, True, cfg)
+            # Stage-C (Symptom #6, 2026-04-16) — publish the consent
+            # event on Crossbar WAMP so subscribers (VisionService,
+            # frontend, mobile) never have to poll or watch a raw WS
+            # for the decision. House-rule 6: 'ALL realtime push uses
+            # Crossbar WAMP'. Topic format matches the existing
+            # com.hertzai.hevolve.* convention.
+            try:
+                _cu = data.get('user_id') or data.get('userId') or 'local'
+                _consent_topic = f'com.hertzai.hevolve.vision.{_cu}'
+                _consent_payload = {
+                    'type': 'consent',
+                    'user_id': _cu,
+                    'agent_id': agent_id,
+                    'action': action,
+                    'feed': feed,
+                    'decision': 'approved',
+                    'ts': int(time.time()),
+                }
+                publish_async(_consent_topic, json.dumps(_consent_payload))
+                app.logger.info(
+                    f"agent_approval: WAMP consent published to "
+                    f"{_consent_topic} feed={feed}"
+                )
+            except Exception as _pub_exc:
+                # Publish failure MUST NOT roll back the approval.
+                # The HTTP response still tells the caller the feed
+                # was applied — the WAMP channel is for notification,
+                # not authorization.
+                app.logger.debug(f"agent_approval WAMP publish failed: {_pub_exc}")
             app.logger.info(f'agent_approval: agent={agent_id} action={action} '
                             f'APPROVED → feed={feed} started')
             return jsonify({'status': 'approved', 'action': action,
