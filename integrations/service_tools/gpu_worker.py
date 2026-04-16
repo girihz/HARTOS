@@ -1013,7 +1013,11 @@ class ToolWorker:
             if self._worker is None or not self._worker.is_alive():
                 # Allocate VRAM INSIDE the lock so concurrent call()
                 # invocations don't double-count. T138 fix (c).
-                self._allocate_vram()
+                # If allocate() returns False (GPU full), try evicting
+                # LRU workers first, then retry. If still False after
+                # eviction, the spawn will proceed but on CPU fallback
+                # path (subprocess self-detects VRAM at _load time).
+                allocated = self._allocate_vram()
 
                 # Cross-worker VRAM eviction: if our budget won't fit
                 # in current free VRAM, stop LRU other workers to make
@@ -1021,6 +1025,10 @@ class ToolWorker:
                 # the new subprocess while older idle workers hold
                 # memory they're not actively using.
                 self._ensure_vram_headroom()
+
+                # Retry allocate after eviction so the budget is tracked.
+                if not allocated:
+                    self._allocate_vram()
 
                 cli_args = [self.tool_module]
                 if self.variant:
@@ -1072,12 +1080,22 @@ class ToolWorker:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def _allocate_vram(self) -> None:
+    def _allocate_vram(self) -> bool:
+        """Attempt to reserve VRAM. Returns True on success, False if
+        the allocation was refused (caller may fall back to CPU).
+
+        This honors the vram_manager.allocate contract: False means
+        'won't fit', not 'error'. Exceptions during import/allocation
+        are treated as 'unknown state -> allow', matching prior
+        default-allow behavior while still surfacing real refusals.
+        """
         try:
             from integrations.service_tools.vram_manager import get_vram_manager
-            get_vram_manager().allocate(self.vram_budget)
-        except (ImportError, Exception):
-            pass
+            return bool(get_vram_manager().allocate(self.vram_budget))
+        except ImportError:
+            return True
+        except Exception:
+            return True
 
     def _release_vram(self) -> None:
         try:
