@@ -240,9 +240,13 @@ class VRAMManager:
         return self.get_free_vram() >= min_vram
 
     def allocate(self, tool_name: str) -> bool:
-        """Reserve VRAM for a tool. Returns True if allocated."""
+        """Reserve VRAM for a tool. Returns False if it won't fit."""
         if tool_name in self._allocations:
             return True
+        if not self.can_fit(tool_name):
+            logger.warning(f"VRAM rejected: {tool_name} won't fit "
+                           f"(free={self.get_free_vram():.1f}GB)")
+            return False
         budget = VRAM_BUDGETS.get(tool_name)
         model_gb = budget[1] if budget else 0.0
         self._allocations[tool_name] = model_gb
