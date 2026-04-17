@@ -1717,3 +1717,44 @@ def get_model_lifecycle_manager() -> ModelLifecycleManager:
             if _lifecycle_manager is None:
                 _lifecycle_manager = ModelLifecycleManager()
     return _lifecycle_manager
+
+
+# ═══════════════════════════════════════════════════════════════
+# Draft eviction on user-language change
+# ═══════════════════════════════════════════════════════════════
+# When the user switches TO a script the 0.8B draft can't handle
+# (NON_LATIN_SCRIPT_LANGS), the running draft's ~1.2GB VRAM is dead
+# weight — speculative_dispatcher's language guard will never route
+# to it.  Evict so Indic Parler (~2GB) can fit alongside main 4B on
+# 8GB GPUs.  Subscribes to core.user_lang.on_lang_change — runs in a
+# daemon thread (fired by the subscriber bus), /chat hot path not
+# stalled.
+
+def _evict_draft_on_non_latin_switch(old_lang, new_lang) -> None:
+    """on_lang_change subscriber — evicts 0.8B draft when the user
+    moves to a non-Latin script.  No-op otherwise."""
+    try:
+        from core.constants import NON_LATIN_SCRIPT_LANGS
+    except ImportError:
+        return
+    _new_key = (new_lang or '').split('-')[0].lower()[:2]
+    if not _new_key or _new_key not in NON_LATIN_SCRIPT_LANGS:
+        return
+    try:
+        _mgr = get_model_lifecycle_manager()
+        if _mgr and hasattr(_mgr, 'request_swap'):
+            _mgr.request_swap(
+                target='draft',
+                reason=f'language_switch_to_{_new_key}',
+            )
+    except Exception:
+        pass
+
+
+try:
+    from core.user_lang import on_lang_change as _on_lang_change
+    _on_lang_change(_evict_draft_on_non_latin_switch)
+except ImportError:
+    # user_lang unavailable standalone (e.g., isolated test env);
+    # callers may still invoke request_swap directly.
+    pass

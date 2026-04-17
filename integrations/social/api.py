@@ -148,7 +148,20 @@ _RECOVERY_WORDS = (
 @social_bp.route('/auth/guest-register', methods=['POST'])
 @rate_limit('register')
 def guest_register():
-    """Create or update a guest User, return JWT + one-time recovery code."""
+    """Create or update a guest User, return JWT + one-time recovery code.
+
+    IDEMPOTENCE ON device_id (2026-04-15 fix for chat-persistence bug):
+    If the client supplies `device_id` AND a guest User already has a
+    GuestRecovery row with that same device_id, RETURN the existing
+    User with a fresh JWT — do NOT create a new user.  Previously every
+    call created a new User, so relaunching Nunba (which refreshes the
+    expired JWT via this endpoint) lost the user's prior agents + chat
+    history.  The user's 6-word recovery_code is NOT reissued on the
+    idempotent path (their saved code still works).
+
+    Back-compat: calls without `device_id` behave as before (always
+    create new user).
+    """
     import secrets
     from .auth import hash_password, generate_api_token, generate_jwt
     from .models import GuestRecovery
@@ -161,7 +174,33 @@ def guest_register():
 
     db = get_db()
     try:
-        # Create guest user (username = sanitised guest_name + random suffix)
+        # ── Idempotent path: existing user for this device ──
+        if device_id:
+            existing = (
+                db.query(GuestRecovery)
+                .filter(GuestRecovery.device_id == device_id)
+                .order_by(GuestRecovery.id.desc())
+                .first()
+            )
+            if existing:
+                existing_user = (
+                    db.query(User).filter_by(id=existing.user_id).first()
+                )
+                if existing_user and existing_user.user_type == 'guest':
+                    # Fresh JWT — client likely re-registered because
+                    # the old one expired.  No new recovery code (would
+                    # invalidate their saved one).
+                    token = generate_jwt(
+                        existing_user.id, existing_user.username, 'guest',
+                    )
+                    return _ok({
+                        'user': existing_user.to_dict(),
+                        'token': token,
+                        'recovery_code': None,
+                        'existing': True,
+                    }, status=200)
+
+        # ── Genuine create path (unchanged behavior) ──
         suffix = secrets.token_hex(3)
         username = f"guest_{guest_name.replace(' ', '_').lower()}_{suffix}"
         user = User(
@@ -1562,26 +1601,12 @@ def review_report(report_id):
     return _ok(report.to_dict())
 
 
-@social_bp.route('/moderation/ban/<user_id>', methods=['POST'])
-@require_admin
-def ban_user(user_id):
-    user = UserService.get_by_id(g.db, user_id)
-    if not user:
-        return _err("User not found", 404)
-    user.is_banned = True
-    g.db.flush()
-    return _ok({'banned': True})
-
-
-@social_bp.route('/moderation/ban/<user_id>', methods=['DELETE'])
-@require_admin
-def unban_user(user_id):
-    user = UserService.get_by_id(g.db, user_id)
-    if not user:
-        return _err("User not found", 404)
-    user.is_banned = False
-    g.db.flush()
-    return _ok({'unbanned': True})
+# Removed 2026-04-15: orphaned public /moderation/ban/<user_id> POST+DELETE routes.
+# No frontend caller; duplicate of admin routes at /admin/users/<user_id>/ban (below).
+# Ban/unban is strictly an admin action — a user cannot ban themselves, and these
+# non-admin-namespaced routes made no product sense. Canonical endpoints:
+#   POST   /api/social/admin/users/<user_id>/ban   (admin_ban_user)
+#   DELETE /api/social/admin/users/<user_id>/ban   (admin_unban_user)
 
 
 # ═══════════════════════════════════════════════════════════════

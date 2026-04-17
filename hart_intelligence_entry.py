@@ -2981,6 +2981,19 @@ def get_tools(req_tool, is_first: bool = False):
         except ImportError:
             pass
 
+        # System Introspection Tools: agent self-awareness — GPU tier,
+        # active models, TTS backend, boot-decision rationale.  Lets the
+        # LLM answer "what model is running?", "why is speculation off?",
+        # "do I have a GPU?" from real live admin-API data instead of
+        # hallucinating.
+        try:
+            from integrations.service_tools.system_introspect_tool import (
+                get_langchain_tools as _get_introspect_tools,
+            )
+            tool += _get_introspect_tools()
+        except ImportError:
+            pass
+
         # HART Skills: Ingest agent skills (Claude Code, Markdown, GitHub)
         try:
             from integrations.skills import skill_registry
@@ -4790,11 +4803,31 @@ def get_ans(casual_conv, req_tool, user_id, query, custom_prompt, preferred_lang
     except Exception:
         pass
 
+    # Strong language directive — Qwen3.5-4B (and many multilingual
+    # models) will ignore a weak "respond in English" when the system
+    # prompt mentions Indian/Asian cultural traits or the user's email/
+    # name hints at a regional origin.  Seen on 2026-04-15: English
+    # user input "hi" → "Vanakkam! Nan ungal nanban. Hevolve-va romba
+    # nalla tool, na idea build pannura help pannu..." (Romanised Tamil).
+    # Fix: explicit script + policy block, placed AFTER identity +
+    # tone so it wins by recency.
+    _lang_directive = (
+        f"\n\nRESPONSE LANGUAGE POLICY (STRICT):\n"
+        f"- Respond in {language} only.  Match the script the USER wrote in.\n"
+        f"- If the user writes in Latin/English script, respond in Latin/"
+        f"English script — do NOT transliterate other languages into "
+        f"Latin letters (no Romanised Tamil/Hindi/etc).\n"
+        f"- Cultural references are welcome, but the response body must be "
+        f"in {language}.\n"
+        if (language or '').lower() == 'english' else ''
+    )
+
     prefix = f"""{_fast_identity}
         Answer questions accurately and respond as quickly as possible in {language}.
         {_tone_block}{_resonance_block}
         Keep responses under 200 words. Be colloquial and natural - don't always greet or use the user's name.
         IMPORTANT: Do NOT re-introduce yourself if you already did in the conversation history below. Continue naturally.
+        {_lang_directive}
 
         User details: {user_details}
         Context: {custom_prompt}
@@ -5133,21 +5166,15 @@ _HART_LANG_PATH = os.path.join(
 
 
 def _persist_language(lang: str) -> bool:
-    """Write hart_language.json so next startup loads the right TTS voice.
+    """Thin shim for backward compatibility.  Real implementation is in
+    core.user_lang.set_preferred_lang — atomic write + on_lang_change
+    subscriber bus (for draft eviction etc.).
 
-    Returns True on success, False on failure (logged silently).
-    Called from two sites: initial preferred_lang and draft language_change.
-    Validates lang against SUPPORTED_LANG_DICT to prevent garbage writes.
-    """
-    if not lang or lang[:2] not in SUPPORTED_LANG_DICT:
-        return False
-    try:
-        os.makedirs(os.path.dirname(_HART_LANG_PATH), exist_ok=True)
-        with open(_HART_LANG_PATH, 'w') as _f:
-            json.dump({'language': lang}, _f)
-        return True
-    except Exception:
-        return False
+    Kept as a named function here because older code in this file +
+    downstream refs import it; new code should call the core API
+    directly."""
+    from core.user_lang import set_preferred_lang
+    return set_preferred_lang(lang)
 
 
 def _chat_reply(user_id, request_id, response_text: str, **payload):
@@ -5196,7 +5223,16 @@ def _chat_reply(user_id, request_id, response_text: str, **payload):
     """
     if response_text:
         try:
-            _lang = payload.get('preferred_lang', 'en')
+            # preferred_lang resolution must match the chat entry path:
+            # body/kwarg → canonical persisted reader → 'en'.  Bare
+            # 'en' default forced English Piper on Tamil replies.
+            _lang = payload.get('preferred_lang') or payload.get('language')
+            if not _lang:
+                try:
+                    from core.user_lang import get_preferred_lang
+                    _lang = get_preferred_lang() or 'en'
+                except Exception:
+                    _lang = 'en'
             _tts_synthesize_and_publish(response_text, user_id, request_id, language=_lang)
         except Exception as e:
             # Never let a TTS failure block delivery of the text reply.
@@ -5483,14 +5519,41 @@ def chat():
             'response': None,
         }), 413
 
-    preferred_lang = data.get('preferred_lang', 'en')
+    # Fall back to the canonical hart_language.json when frontend omits
+    # preferred_lang.  Previously defaulted to 'en' which bypassed the
+    # draft skip-gate for Tamil (hart_language.json says 'ta' but /chat
+    # never read it).  Single source of truth: core.user_lang.
+    _req_lang = data.get('preferred_lang') or data.get('language')
+    if _req_lang and _req_lang.strip():
+        preferred_lang = _req_lang.strip()
+    else:
+        try:
+            from core.user_lang import get_preferred_lang
+            preferred_lang = get_preferred_lang()
+        except Exception:
+            preferred_lang = 'en'
 
-    # Persist language preference so next startup warm-up loads the right TTS.
-    # Lazy one-time write — avoids disk I/O on every chat request.
-    if preferred_lang and preferred_lang != 'en' and not getattr(chat, '_lang_persisted', False):
-        if not os.path.exists(_HART_LANG_PATH):
-            if _persist_language(preferred_lang):
-                chat._lang_persisted = True
+    # Persist language preference so next startup warm-up loads the right
+    # TTS + right draft-boot decision (see llama_config.should_boot_draft
+    # cohort gate, commit 12c9304).
+    #
+    # PREVIOUS BUGGY LOGIC (removed 2026-04-15):
+    #   if preferred_lang != 'en' and not _lang_persisted and not file_exists:
+    #       _persist_language(...)
+    #
+    # The 3 guards caused "hart_language.json stuck at whatever was first
+    # written" — explicitly:
+    #   - `!= 'en'` skipped English switches (user moves Tamil → English,
+    #     nothing persists, next boot reads stale 'ta')
+    #   - `not file_exists` meant after ANY write, subsequent switches
+    #     no-op (user's Tamil selection never overwrote stale 'en' from
+    #     first-run default)
+    #   - `_lang_persisted` one-shot flag capped to one write per process
+    #
+    # `_persist_language` now read-first-skips-if-unchanged internally,
+    # so calling it every request is cheap (~10us stat call).
+    if preferred_lang:
+        _persist_language(preferred_lang)
     request_id = data.get('request_id', None)
     req_tool = data.get('tools', None)
     file_id = data.get('file_id', None)
@@ -5730,8 +5793,10 @@ def chat():
     # Skip draft-first for non-Latin-script languages — the 0.8B can't produce
     # correct native script (outputs garbled Kannada for Tamil, etc.). Going
     # straight to the 4B avoids wasted compute on a useless standby reply.
-    _NON_LATIN_LANGS = {'ta','hi','bn','te','mr','gu','kn','ml','pa','or',
-                        'ar','he','th','ko','ja','zh','ru','uk','el','ne'}
+    # Skip draft-first for non-Latin-script languages.  Canonical set
+    # lives in core.constants — see also the dispatcher's own guard at
+    # dispatch_draft_first (belt + suspenders).
+    from core.constants import NON_LATIN_SCRIPT_LANGS as _NON_LATIN_LANGS
     _skip_draft_for_lang = preferred_lang and preferred_lang[:2] in _NON_LATIN_LANGS
     if draft_first and not _skip_draft_for_lang and prompt and user_id and not _is_agentic_orchestration:
         try:
@@ -6546,6 +6611,24 @@ def agent_approval():
             return jsonify({'status': 'error', 'reason': 'invalid decision'}), 400
         approved = decision in ('approve', 'approved', 'allow', 'yes')
         if not approved:
+            # Stage-C (Symptom #6): publish the deny event on WAMP too
+            # so subscribers (VisionService, UI) can tear down cleanly
+            # without inspecting HTTP responses.
+            try:
+                _cu_d = data.get('user_id') or data.get('userId') or 'local'
+                publish_async(
+                    f'com.hertzai.hevolve.vision.{_cu_d}',
+                    json.dumps({
+                        'type': 'consent',
+                        'user_id': _cu_d,
+                        'agent_id': agent_id,
+                        'action': action,
+                        'decision': 'denied',
+                        'ts': int(time.time()),
+                    }),
+                )
+            except Exception as _pub_exc:
+                app.logger.debug(f"agent_approval deny WAMP publish failed: {_pub_exc}")
             app.logger.info(f'agent_approval: agent={agent_id} action={action} DENIED')
             return jsonify({'status': 'denied', 'action': action}), 200
 
@@ -6581,6 +6664,35 @@ def agent_approval():
                 cfg.audio_enabled = True
             api._save_config()
             _apply_embodied_toggle(feed, True, cfg)
+            # Stage-C (Symptom #6, 2026-04-16) — publish the consent
+            # event on Crossbar WAMP so subscribers (VisionService,
+            # frontend, mobile) never have to poll or watch a raw WS
+            # for the decision. House-rule 6: 'ALL realtime push uses
+            # Crossbar WAMP'. Topic format matches the existing
+            # com.hertzai.hevolve.* convention.
+            try:
+                _cu = data.get('user_id') or data.get('userId') or 'local'
+                _consent_topic = f'com.hertzai.hevolve.vision.{_cu}'
+                _consent_payload = {
+                    'type': 'consent',
+                    'user_id': _cu,
+                    'agent_id': agent_id,
+                    'action': action,
+                    'feed': feed,
+                    'decision': 'approved',
+                    'ts': int(time.time()),
+                }
+                publish_async(_consent_topic, json.dumps(_consent_payload))
+                app.logger.info(
+                    f"agent_approval: WAMP consent published to "
+                    f"{_consent_topic} feed={feed}"
+                )
+            except Exception as _pub_exc:
+                # Publish failure MUST NOT roll back the approval.
+                # The HTTP response still tells the caller the feed
+                # was applied — the WAMP channel is for notification,
+                # not authorization.
+                app.logger.debug(f"agent_approval WAMP publish failed: {_pub_exc}")
             app.logger.info(f'agent_approval: agent={agent_id} action={action} '
                             f'APPROVED → feed={feed} started')
             return jsonify({'status': 'approved', 'action': action,

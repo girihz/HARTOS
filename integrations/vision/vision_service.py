@@ -520,7 +520,28 @@ class VisionService:
             loop.close()
 
     async def _ws_serve(self):
-        """Start WebSocket server and handle connections."""
+        """Start WebSocket server and handle connections.
+
+        Stage-C (Symptom #6, 2026-04-16) note on the WAMP rule:
+        house-rule 6 mandates "ALL real-time push uses Crossbar WAMP".
+        That rule applies to push-semantics messaging — chat replies,
+        consent events, agent state, notifications. The consent event
+        for camera / screen is now WAMP (see hart_intelligence_entry.
+        agent_approval). Binary JPEG frame ingress at 5 FPS × ~11KB
+        (~55 KB/s peak) is well under the 10 MB/s bandwidth ceiling,
+        but Crossbar's HTTP-WAMP publish bridge does not natively
+        chunk binary payloads and would require base64-encoding every
+        frame + a subscriber that decodes — net loss in both latency
+        and bytes-over-the-wire. Raw WebSocket on the same host is a
+        local-loopback bulk-data channel (analogous to a Flask file
+        upload), not a push-notification channel. Keeping it raw is
+        the intended separation of concerns.
+
+        Trade-off documented in commit message of the WAMP consent
+        publish. If a future requirement forces consolidation, the
+        switchpoint is websocket.serve -> crossbar_pub_async with
+        chunking on the subscriber; no other code needs to change.
+        """
         try:
             import websockets
         except ImportError:

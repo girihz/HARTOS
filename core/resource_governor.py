@@ -513,8 +513,18 @@ class ResourceGovernor:
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
-    def start(self) -> None:
-        """Start the governor background monitor and proactive stream."""
+    def start(self, defer_memory_limit: bool = False) -> None:
+        """Start the governor background monitor and proactive stream.
+
+        Args:
+            defer_memory_limit: If True, apply priority + CPU caps now but
+                skip the Job Object / cgroup memory limit.  The caller is
+                responsible for calling apply_memory_limit() later (after
+                the heavy import spike is over).  This prevents Windows
+                from terminating the process during the boot-time memory
+                peak (autogen + flaml + llmlingua + transformers + 96
+                expert agents all imported before webview.start).
+        """
         with self._lock:
             if self._running:
                 return
@@ -525,7 +535,15 @@ class ResourceGovernor:
         # Apply hard OS-level resource caps at startup
         try:
             enforcer = get_enforcer()
-            enforcer.enforce(cpu_fraction=0.75, ram_fraction=0.75, gpu_fraction=0.75)
+            if defer_memory_limit:
+                # Priority + CPU only — memory cap deferred to avoid
+                # SIGKILL on boot-time spike (see app.py comment block).
+                enforcer._set_process_priority()
+                enforcer._enforce_cpu(0.75, max(1, int((os.cpu_count() or 4) * 0.75)), os.cpu_count() or 4)
+                enforcer._enforced = True  # mark so update_caps doesn't re-enforce
+                logger.info("ResourceEnforcer: priority + CPU applied (memory deferred)")
+            else:
+                enforcer.enforce(cpu_fraction=0.75, ram_fraction=0.75, gpu_fraction=0.75)
         except Exception as e:
             logger.warning("ResourceEnforcer failed at startup: %s", e)
 
@@ -545,6 +563,21 @@ class ResourceGovernor:
 
         logger.info("ResourceGovernor started (idle threshold=%.0fs)",
                      self._idle_threshold_seconds)
+
+    def apply_memory_limit(self) -> None:
+        """Apply the deferred RAM limit — call AFTER boot-time spike is over.
+
+        Pairs with start(defer_memory_limit=True).  Safe to call multiple
+        times (idempotent via enforcer._enforce_ram's Job Object update).
+        """
+        try:
+            enforcer = get_enforcer()
+            total_ram_gb = enforcer._get_total_ram_gb()
+            usable_ram_gb = max(0.5, total_ram_gb * 0.75 - SYSTEM_BUFFER_RAM_GB)
+            enforcer._enforce_ram(usable_ram_gb)
+            logger.info("ResourceEnforcer: memory cap now active (%.1fGB)", usable_ram_gb)
+        except Exception as e:
+            logger.warning("ResourceEnforcer: deferred memory cap failed: %s", e)
 
     def stop(self) -> None:
         """Stop the governor, release all throttles."""

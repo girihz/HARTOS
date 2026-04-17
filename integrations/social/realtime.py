@@ -33,8 +33,71 @@ def _get_publisher():
     return _publisher
 
 
+# Topics that may fan out to all authenticated subscribers (public feed,
+# aggregate counters, community rooms the user has joined).  Anything
+# else MUST be per-user — the topic string must end with the user_id
+# so the WAMP router can gate subscriptions via role-based authorizer.
+_PUBLIC_TOPIC_PREFIXES = (
+    'community.feed',
+    'community.message',
+    'social.post.',       # post-scoped (aggregate vote counts)
+    'social.comment.',    # comment-scoped
+    'social.user.',       # user-scoped (public profile fan-out)
+    'chat.social',        # per-user, user_id threaded via data
+    'dm.',                # per-conversation, gated elsewhere
+    'presence.',          # per-user presence
+    'game.',              # game session id in the topic
+    'setup_progress',     # boot-time setup progress (pre-auth, no user_id)
+    'setup.',             # boot-time setup (broader)
+    'system.',            # system-wide events (catalog/orchestrator)
+    'catalog.',           # model catalog updates
+    'model.',             # per-model lifecycle
+    'tts.',               # per-user audio-ready event (audio URL per request)
+    'admin.',             # admin-console broadcasts
+)
+
+
+def _authorize_topic_for_user_id(topic: str, user_id: str) -> bool:
+    """Validate that `topic` is publishable for `user_id`.
+
+    A topic is considered owned-by-user_id iff:
+      - it is in the public prefix whitelist above (community / aggregate), OR
+      - it ends with `.{user_id}` or `/{user_id}` (per-user fanout topic).
+
+    Returns True when the pair is OK, False when a cross-user publish
+    is being attempted.  Callers log + refuse on False so the WAMP
+    router's subscribe-side authorizer has a defense-in-depth pair
+    enforcing the same invariant at the publish site.
+    """
+    if not topic:
+        return False
+    # Public / aggregate — every authenticated user may receive.
+    for pref in _PUBLIC_TOPIC_PREFIXES:
+        if topic == pref or topic.startswith(pref):
+            return True
+    # Per-user topic must end with the publisher's user_id.
+    if user_id:
+        if topic.endswith(f'.{user_id}') or topic.endswith(f'/{user_id}'):
+            return True
+    return False
+
+
 def publish_event(topic: str, data: dict, user_id: str = ''):
-    """Publish via MessageBus (LOCAL + PEERLINK + CROSSBAR). Falls back to direct HTTP."""
+    """Publish via MessageBus (LOCAL + PEERLINK + CROSSBAR). Falls back to direct HTTP.
+
+    Authorization guard: cross-user topic publish is refused at this
+    entry so a compiled-in bug that emits e.g. user A's notification
+    to topic `...social.B` is caught here instead of leaking to B's
+    subscribe channel.  The WAMP router's role-based subscribe
+    authorizer (when configured) enforces the same invariant on the
+    receive side — defense in depth.
+    """
+    if not _authorize_topic_for_user_id(topic, user_id):
+        logger.warning(
+            f"WAMP publish refused: user_id={user_id!r} cannot publish "
+            f"to topic={topic!r} (cross-user topic subscribe guard)"
+        )
+        return
     try:
         from core.peer_link.message_bus import get_message_bus
         bus = get_message_bus()

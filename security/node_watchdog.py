@@ -297,38 +297,41 @@ class NodeWatchdog:
 
         # Best-effort thread-stack dump BEFORE restart — capture the
         # live frame state of the frozen thread so we can diagnose
-        # WHY it stalled.  Uses the same dumper wired to the startup
-        # watchdog (app.py _dump_all_thread_stacks) if available,
-        # falling back to an inline dump.  Dumps to
-        # ~/Documents/Nunba/logs/startup_trace.log (flushes
-        # immediately, survives GIL-held hangs).
+        # WHY it stalled.  Uses the unified `core.diag.dump_all_thread_stacks`
+        # canonical helper (refactor: replaces a 30-line module-lookup +
+        # inline-fallback that silently dropped dumps in some bundle layouts).
+        # The dump goes to BOTH the logger AND startup_trace.log
+        # (flushes immediately, survives GIL-held hangs).
         if to_restart:
             try:
                 _dumper = None
+                # Preferred: direct import from Nunba's core package (works in
+                # dev + most frozen layouts because Nunba's `core/` is on the
+                # default sys.path).
                 try:
-                    import __main__ as _m
-                    _dumper = getattr(_m, '_dump_all_thread_stacks', None)
+                    from core.diag import dump_all_thread_stacks as _dumper
                 except Exception:
                     pass
+                # Fallback: builtin published by core.diag at import time
+                # (`builtins._nunba_dump_threads`).  Guarantees the dumper is
+                # reachable from any frozen-bundle topology where direct
+                # import paths break.
                 if _dumper is None:
-                    try:
-                        import app as _app_mod
-                        _dumper = getattr(
-                            _app_mod, '_dump_all_thread_stacks', None,
-                        )
-                    except Exception:
-                        pass
+                    import builtins as _b
+                    _dumper = getattr(_b, '_nunba_dump_threads', None)
                 if _dumper:
                     _dumper(
                         f"NodeWatchdog FROZEN restart: {','.join(to_restart)}",
                     )
                 else:
-                    # Inline fallback if dumper isn't published
+                    # Last-resort fallback if even the builtin is missing
+                    # (e.g., HARTOS standalone, no Nunba in process).  Keep
+                    # this minimal — the unified path is the supported one.
                     import sys as _sys
                     import traceback as _tb
                     logger.error(
                         "NodeWatchdog: dumping thread stacks before "
-                        "restart (inline fallback):",
+                        "restart (core.diag unavailable):",
                     )
                     for _tid, _frame in _sys._current_frames().items():
                         try:

@@ -226,6 +226,26 @@ class SpeculativeDispatcher:
                 'expert_pending': False,
             }
 
+        # ── Language guard: skip 0.8B draft for non-Latin scripts ──
+        # Qwen3.5-0.8B-UD-Q4_K_XL has weak Unicode coverage for the
+        # scripts listed in core.constants.NON_LATIN_SCRIPT_LANGS —
+        # falls back to Latin-transliterated output ("Vanakkam! Nan
+        # ungal nanban..." for Tamil) which is unusable for TTS + UX.
+        # The 4B main has native Unicode coverage.  Canonical set lives
+        # in core.constants; this file imports rather than duplicates.
+        from core.constants import NON_LATIN_SCRIPT_LANGS
+        _lang_key = (preferred_lang or 'en').split('-')[0].lower()
+        if _lang_key and _lang_key != 'en' and _lang_key in NON_LATIN_SCRIPT_LANGS:
+            logger.info(
+                f"Skipping 0.8B draft for preferred_lang={_lang_key!r} "
+                f"(weak Unicode script coverage); routing direct to 4B.",
+            )
+            return {
+                'response': '', 'speculation_id': speculation_id,
+                'delegate': 'none', 'error': 'draft_skipped_non_english',
+                'expert_pending': False,
+            }
+
         # ── 2. Gate checks (constitutional + circuit breaker + draft server probe)
         gate_error = self._check_draft_first_gates(prompt)
         if gate_error is not None:
