@@ -5223,7 +5223,16 @@ def _chat_reply(user_id, request_id, response_text: str, **payload):
     """
     if response_text:
         try:
-            _lang = payload.get('preferred_lang', 'en')
+            # preferred_lang resolution must match the chat entry path:
+            # body/kwarg → canonical persisted reader → 'en'.  Bare
+            # 'en' default forced English Piper on Tamil replies.
+            _lang = payload.get('preferred_lang') or payload.get('language')
+            if not _lang:
+                try:
+                    from core.user_lang import get_preferred_lang
+                    _lang = get_preferred_lang() or 'en'
+                except Exception:
+                    _lang = 'en'
             _tts_synthesize_and_publish(response_text, user_id, request_id, language=_lang)
         except Exception as e:
             # Never let a TTS failure block delivery of the text reply.
