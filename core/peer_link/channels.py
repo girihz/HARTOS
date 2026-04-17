@@ -89,6 +89,13 @@ CHANNEL_REGISTRY = {
         'reliable': False,
         'description': 'Sensor frames — camera, screen, audio for HevolveAI learning',
     },
+    'messages': {
+        'id': 0x09,
+        'data_class': DataClass.PRIVATE,  # DMs are always private
+        'priority': 1,   # Interactive — chat latency must feel instant
+        'reliable': True,
+        'description': 'P2P DMs, channel messages, reactions, read receipts, edits',
+    },
 }
 
 # Reverse lookup: id -> name
