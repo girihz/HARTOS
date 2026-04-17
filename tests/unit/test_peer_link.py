@@ -504,10 +504,10 @@ class TestLinkManager(unittest.TestCase):
 class TestChannels(unittest.TestCase):
     """Channel registry, DataClass, ChannelDispatcher."""
 
-    def test_all_nine_channels_in_registry(self):
+    def test_all_channels_in_registry(self):
         expected = {
             'control', 'compute', 'dispatch', 'gossip', 'federation',
-            'hivemind', 'events', 'ralt', 'sensor',
+            'hivemind', 'events', 'ralt', 'sensor', 'messages',
         }
         self.assertEqual(set(CHANNEL_REGISTRY.keys()), expected)
 
