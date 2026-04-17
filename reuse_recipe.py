@@ -2893,6 +2893,25 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
                             pass
                 gc.messages = _GraphHookedList(gc.messages, _make_graph_hook())
 
+    # ── System Introspection Tools ─────────────────────────────────
+    # Register self-awareness tools (GPU tier, active models, TTS
+    # backend, boot-decision rationale) so the assistant can answer
+    # "what model is running?" / "why is speculation off?" from live
+    # admin-API state.  Caller = helper (the agent that CAN call
+    # tools); executor = assistant (the agent that RUNS the call).
+    try:
+        from integrations.service_tools.system_introspect_tool import (
+            register_autogen as _register_introspect,
+        )
+        _n = _register_introspect(helper, assistant)
+        current_app.logger.info(
+            f"Registered {_n} system-introspect tool(s) for self-awareness",
+        )
+    except Exception as _ie:
+        current_app.logger.warning(
+            f"system_introspect autogen registration failed: {_ie}",
+        )
+
     return assistant, user_proxy, group_chat, manager, helper, multi_role_agent, time_agent, time_user, group_chat_1, manager_1, chat_instructor, visual_agent_group
 
 

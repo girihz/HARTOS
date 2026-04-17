@@ -238,7 +238,9 @@ class ModelOrchestrator:
 
         # Allocate VRAM BEFORE load so other models see the reservation.
         # Rolled back on failure.
-        self._register_vram(entry, fit)
+        if not self._register_vram(entry, fit):
+            logger.warning(f"Skipping {model_id}: VRAM full")
+            return None
         try:
             success = self._dispatch_load(entry, fit)
             if success:
@@ -568,17 +570,15 @@ class ModelOrchestrator:
             return 'llm'
         return self._CATALOG_TO_VRAM_KEY.get(entry.id, entry.id)
 
-    def _register_vram(self, entry: ModelEntry, run_mode: str) -> None:
-        """Register VRAM allocation — idempotent (same key = overwrite, not stack)."""
+    def _register_vram(self, entry: ModelEntry, run_mode: str) -> bool:
+        """Register VRAM allocation. Returns False if GPU is full."""
         if run_mode != 'gpu' or entry.vram_gb <= 0:
-            return
+            return True
         try:
             from integrations.service_tools.vram_manager import vram_manager
-            tool_key = self._vram_key(entry)
-            vram_manager._allocations[tool_key] = entry.vram_gb
-            logger.info(f"VRAM allocated: {tool_key} = {entry.vram_gb}GB")
+            return vram_manager.allocate(self._vram_key(entry))
         except ImportError:
-            pass
+            return True
 
     def _release_vram(self, entry: ModelEntry) -> None:
         """Release VRAM allocation."""

@@ -40,7 +40,6 @@ from integrations.robotics.hardware_bridge import (
 from integrations.robotics.intelligence_api import (
     RobotIntelligenceAPI,
     get_robot_api,
-    create_intelligence_blueprint,
     INTELLIGENCE_TYPES,
     _FUSION_PRIORITY,
     _classify_intent,
@@ -1065,31 +1064,11 @@ class TestGetRobotAPISingleton(unittest.TestCase):
 
 
 # ===================================================================
-# 10. create_intelligence_blueprint
+# 10. (removed) create_intelligence_blueprint — duplicate blueprint deleted
+# 2026-04-15; canonical blueprint is create_blueprint() tested via
+# TestCreateBlueprint above. The orphaned /api/robotics/intelligence/*
+# subset was never wired to callers.
 # ===================================================================
-
-
-class TestCreateIntelligenceBlueprint(unittest.TestCase):
-    """create_intelligence_blueprint() returns a Flask Blueprint."""
-
-    def test_returns_blueprint(self):
-        try:
-            from flask import Blueprint
-        except ImportError:
-            self.skipTest('Flask not installed')
-        bp = create_intelligence_blueprint()
-        self.assertIsNotNone(bp)
-        self.assertIsInstance(bp, Blueprint)
-
-    def test_has_deferred_functions(self):
-        try:
-            from flask import Blueprint
-        except ImportError:
-            self.skipTest('Flask not installed')
-        bp = create_intelligence_blueprint()
-        # Flask blueprints defer route registration via deferred_functions.
-        # At least the /think and /robots routes should be registered.
-        self.assertGreater(len(bp.deferred_functions), 0)
 
 
 # ===================================================================

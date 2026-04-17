@@ -49,6 +49,15 @@ class VRAMManager:
         # Poll every 120s not 30s to reduce subprocess overhead.
         _bundled = os.environ.get('NUNBA_BUNDLED') == '1'
         self._refresh_ttl: float = 120.0 if _bundled else 30.0
+        # Serializes allocate() + can_fit() so two concurrent model loads
+        # can't both pass can_fit() and overcommit the GPU.  Previously
+        # an atomic-less read-modify-write across _allocations on hot
+        # path (TOCTOU: read free → read budget → mutate dict).  Under
+        # a cold startup with parallel LLM + TTS + VLM spawns, both
+        # could see 5GB free, both think 4GB fits, both allocate → 8GB
+        # claimed on a 5GB device → CUDA OOM.
+        import threading as _threading  # noqa: E402  (runtime deferred)
+        self._alloc_lock = _threading.RLock()
 
     # ── GPU Detection ────────────────────────────────────────────
 
@@ -240,20 +249,32 @@ class VRAMManager:
         return self.get_free_vram() >= min_vram
 
     def allocate(self, tool_name: str) -> bool:
-        """Reserve VRAM for a tool. Returns True if allocated."""
-        if tool_name in self._allocations:
+        """Reserve VRAM for a tool. Returns False if it won't fit.
+
+        Lock-serialized: check-then-mutate must be atomic so two
+        parallel allocations can't both win can_fit().  can_fit is
+        called under the same RLock so the 'free' read sees prior
+        pending allocations, not raw GPU stats.
+        """
+        with self._alloc_lock:
+            if tool_name in self._allocations:
+                return True
+            if not self.can_fit(tool_name):
+                logger.warning(f"VRAM rejected: {tool_name} won't fit "
+                               f"(free={self.get_free_vram():.1f}GB)")
+                return False
+            budget = VRAM_BUDGETS.get(tool_name)
+            model_gb = budget[1] if budget else 0.0
+            self._allocations[tool_name] = model_gb
+            logger.info(f"Allocated {model_gb} GB VRAM for {tool_name}")
             return True
-        budget = VRAM_BUDGETS.get(tool_name)
-        model_gb = budget[1] if budget else 0.0
-        self._allocations[tool_name] = model_gb
-        logger.info(f"Allocated {model_gb} GB VRAM for {tool_name}")
-        return True
 
     def release(self, tool_name: str) -> None:
         """Release VRAM reservation for a tool."""
-        freed = self._allocations.pop(tool_name, 0.0)
-        if freed:
-            logger.info(f"Released {freed} GB VRAM from {tool_name}")
+        with self._alloc_lock:
+            freed = self._allocations.pop(tool_name, 0.0)
+            if freed:
+                logger.info(f"Released {freed} GB VRAM from {tool_name}")
 
     def get_allocations(self) -> Dict[str, float]:
         """Return current VRAM allocations {tool → GB}."""

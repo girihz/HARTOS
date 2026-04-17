@@ -42,6 +42,8 @@ mcp_local_bp = Blueprint('mcp_local', __name__, url_prefix='/api/mcp/local')
 # or `~/.nunba/mcp.token` (Unix) — owned by the current user, 0600
 # on Unix.  Claude Code reads it and sends it as the bearer.
 _MCP_TOKEN_CACHE: Optional[str] = None
+# One-shot WARN emitter for HARTOS_MCP_DISABLE_AUTH=1 (see _mcp_auth_gate).
+_MCP_AUTH_DISABLED_WARNED: bool = False
 
 
 def _mcp_token_path() -> str:
@@ -53,13 +55,58 @@ def _mcp_token_path() -> str:
     return _os.path.join(_os.path.expanduser('~'), '.nunba', 'mcp.token')
 
 
+def _env_flag_true(val: Optional[str]) -> bool:
+    """Parse an env-var truthy flag: '1', 'true', 'yes', 'on' → True (case-insensitive)."""
+    if val is None:
+        return False
+    return val.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def _ensure_mcp_token() -> str:
-    """Read-or-create the MCP bearer token.  Idempotent."""
+    """Read-or-create the MCP bearer token.  Idempotent.
+
+    Source resolution order (first hit wins):
+      1. HARTOS_MCP_TOKEN        — literal token string (Docker/K8s secrets,
+                                   CI environments that inject directly)
+      2. HARTOS_MCP_TOKEN_FILE   — path to a file containing the token
+                                   (Vault/cert-manager/kubernetes secret
+                                   mounts, where the token rotates via a
+                                   file that we should re-read each time a
+                                   fresh cache is requested)
+      3. Default disk path       — `%LOCALAPPDATA%/Nunba/mcp.token` on
+                                   Windows, `~/.nunba/mcp.token` on Unix
+                                   (the original behaviour used by the
+                                   Nunba desktop install)
+    """
     global _MCP_TOKEN_CACHE
     if _MCP_TOKEN_CACHE:
         return _MCP_TOKEN_CACHE
     import os as _os
     import secrets as _secrets
+
+    # (1) Literal env-var token — highest priority, zero filesystem touch.
+    _env_tok = _os.environ.get('HARTOS_MCP_TOKEN', '').strip()
+    if _env_tok:
+        _MCP_TOKEN_CACHE = _env_tok
+        return _MCP_TOKEN_CACHE
+
+    # (2) Env-var-specified token FILE — for Vault/K8s mounted secrets.
+    _env_tok_file = _os.environ.get('HARTOS_MCP_TOKEN_FILE', '').strip()
+    if _env_tok_file:
+        try:
+            with open(_env_tok_file, encoding='utf-8') as _f:
+                _tok = _f.read().strip()
+                if _tok:
+                    _MCP_TOKEN_CACHE = _tok
+                    return _MCP_TOKEN_CACHE
+        except OSError as _e:
+            logger.warning(
+                "HARTOS_MCP_TOKEN_FILE=%s could not be read (%s) — "
+                "falling back to default disk path",
+                _env_tok_file, _e,
+            )
+
+    # (3) Default disk path — the original Nunba desktop behaviour.
     _path = _mcp_token_path()
     try:
         if _os.path.isfile(_path):
@@ -91,13 +138,108 @@ def _is_loopback_request() -> bool:
     return _addr in ('127.0.0.1', '::1', 'localhost')
 
 
+# ── Public API for cross-package consumers (Nunba) ──────────────────────
+# Pre-refactor Nunba reached into the private `_ensure_mcp_token` symbol
+# (underscore prefix = "do not import").  That coupled Nunba's release
+# cadence to HARTOS internal naming and broke the moment HARTOS renamed
+# anything.  These wrappers are the SUPPORTED contract — Nunba imports
+# them via `from integrations.mcp import get_mcp_token, rotate_mcp_token`.
+
+def get_mcp_token() -> str:
+    """Public accessor — return the current MCP bearer token.
+
+    Reads from the configured source (env var > env-pointed file > disk).
+    Idempotent + cached.  Safe to call on the request hot path.
+
+    This is the supported entry point for cross-package consumers.
+    Internal callers can keep using `_ensure_mcp_token` for one release;
+    new code MUST use this.
+    """
+    return _ensure_mcp_token()
+
+
+def rotate_mcp_token() -> str:
+    """Public rotator — generate a new token, persist it, invalidate cache.
+
+    Returns the new token string.  Any live MCP client using the old token
+    will start getting 403s on its next request — operators MUST re-paste
+    the new token into `.claude/settings.local.json` (or rebroadcast via
+    the configured secret-injection path).
+
+    Behaviour respects the same source-resolution order as
+    `_ensure_mcp_token`: if `HARTOS_MCP_TOKEN` is set, rotation is a
+    no-op (the env var is the source of truth and rotation must happen
+    upstream — at the orchestrator that injected the env var).
+    """
+    global _MCP_TOKEN_CACHE
+    import os as _os
+    import secrets as _secrets
+    # Env-var-pinned tokens cannot be rotated from inside the process —
+    # the upstream orchestrator owns the value.  Emit a warning so the
+    # operator sees WHY the rotate POST returned the same token.
+    if _os.environ.get('HARTOS_MCP_TOKEN', '').strip():
+        logger.warning(
+            "rotate_mcp_token: HARTOS_MCP_TOKEN env var is set — "
+            "rotation must happen upstream; returning existing token",
+        )
+        return _ensure_mcp_token()
+    new_token = _secrets.token_urlsafe(32)
+    path = _mcp_token_path()
+    try:
+        _os.makedirs(_os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_token)
+        try:
+            _os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except OSError as e:
+        logger.warning(
+            "rotate_mcp_token: failed to persist new token (%s) — "
+            "falling back to in-memory only", e,
+        )
+    _MCP_TOKEN_CACHE = new_token
+    return new_token
+
+
+def get_mcp_token_path() -> str:
+    """Public accessor for the on-disk token file path.
+
+    Nunba's `/api/admin/mcp/token/rotate` endpoint historically reached
+    into `_mcp_token_path` (also private).  This wrapper is the supported
+    contract.
+    """
+    return _mcp_token_path()
+
+
 @mcp_local_bp.before_request
 def _mcp_auth_gate():
     """Reject any request that is neither local-loopback nor token-authenticated.
-    On shared-host setups even loopback is not enough — require the token."""
+    On shared-host setups even loopback is not enough — require the token.
+
+    Env-var overrides (for HARTOS standalone / container / air-gapped
+    deployments that don't ship the Nunba desktop token-management UI):
+      - HARTOS_MCP_DISABLE_AUTH=1 → skip the auth gate entirely.  Only
+        safe on internal/air-gapped networks where the port is not
+        reachable by untrusted callers (e.g., container sidecars, isolated
+        K8s namespaces).  A single WARN is emitted on the first request.
+      - HARTOS_MCP_TOKEN, HARTOS_MCP_TOKEN_FILE → see `_ensure_mcp_token`
+        for how the token is sourced when auth is enabled.
+    """
     from flask import request as _req, jsonify as _jsonify
+    import os as _os
+    global _MCP_AUTH_DISABLED_WARNED
     # Health endpoint is open — it returns only a tool count, no data, no mutation.
     if _req.path.endswith('/health'):
+        return None
+    # Env-var bypass — for HARTOS standalone / Docker / K8s / air-gapped.
+    if _env_flag_true(_os.environ.get('HARTOS_MCP_DISABLE_AUTH')):
+        if not _MCP_AUTH_DISABLED_WARNED:
+            _MCP_AUTH_DISABLED_WARNED = True
+            logger.warning(
+                "MCP auth disabled via env — use only for internal/"
+                "air-gapped deployments"
+            )
         return None
     _auth = _req.headers.get('Authorization', '')
     _bearer = _auth[7:].strip() if _auth.startswith('Bearer ') else ''

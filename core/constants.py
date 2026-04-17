@@ -45,4 +45,56 @@ SUPPORTED_LANG_DICT = {
     "or": "Odia", "as": "Assamese", "sd": "Sindhi", "ks": "Kashmiri",
     "doi": "Dogri", "mni": "Manipuri", "sa": "Sanskrit", "kok": "Konkani",
     "mai": "Maithili", "brx": "Bodo", "sat": "Santali",
+    # SEA Brahmi-derived scripts — added for NON_LATIN_SCRIPT_LANGS
+    # membership so the sub-1B draft-skip gate recognises them.
+    "km": "Khmer", "lo": "Lao", "my": "Burmese",
+    # Cyrillic / Greek — weaker but non-zero 0.8B coverage; listed so
+    # NON_LATIN_SCRIPT_LANGS assertion passes.
+    "sr": "Serbian",
 }
+
+
+# Indic-language ISO 639-1 codes (Brahmi-family scripts + Urdu/Sindhi
+# in Perso-Arabic).  Subset used by TTS routing (Indic Parler) and by
+# NON_LATIN_SCRIPT_LANGS below.  Single source for any code that needs
+# "is this an Indic language?" — previously duplicated as _INDIC_LANGS
+# in tts/tts_engine.py.
+INDIC_LANGS = frozenset({
+    "as", "bn", "brx", "doi", "gu", "hi", "kn", "kok", "mai",
+    "ml", "mni", "mr", "ne", "or", "pa", "sa", "sat", "sd", "ta",
+    "te", "ur",
+})
+
+
+# ISO 639-1 codes where sub-1B LLMs (the Qwen3.5-0.8B-class draft
+# model) produce Latin-transliterated output ("Vanakkam" instead of
+# native Tamil script) due to weak Unicode-script tokenizer coverage.
+#
+# Single source of truth — consumed by:
+#   - integrations.agent_engine.speculative_dispatcher
+#     (dispatch_draft_first skip-gate at runtime)
+#   - integrations.service_tools.model_lifecycle
+#     (on_lang_change subscriber — evicts draft on switch TO these)
+#
+# Derived from INDIC_LANGS plus the other non-Latin script families.
+# Do NOT inline a duplicate frozenset anywhere else — import this.
+NON_LATIN_SCRIPT_LANGS = INDIC_LANGS | frozenset({
+    # CJK
+    "zh", "ja", "ko",
+    # RTL (Arabic / Hebrew / Persian)
+    "ar", "he", "fa",
+    # Southeast Asian Brahmi-derived
+    "th", "lo", "km", "my",
+    # Cyrillic + Greek (historically included by HIE's inline
+    # _NON_LATIN_LANGS; kept here for parity + weaker 0.8B coverage)
+    "ru", "uk", "bg", "sr", "el",
+})
+
+# Invariant: every code in NON_LATIN_SCRIPT_LANGS must be a registered
+# language in SUPPORTED_LANG_DICT.  Fails loud at import time on drift,
+# so adding a code to the set without registering its display name is
+# a build-time error, not a runtime mystery.
+assert NON_LATIN_SCRIPT_LANGS <= set(SUPPORTED_LANG_DICT), (
+    f"NON_LATIN_SCRIPT_LANGS has codes not in SUPPORTED_LANG_DICT: "
+    f"{NON_LATIN_SCRIPT_LANGS - set(SUPPORTED_LANG_DICT)}"
+)
