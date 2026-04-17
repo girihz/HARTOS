@@ -72,19 +72,9 @@ class LinkState(Enum):
     CLOSING = 'closing'
 
 
-# Channel IDs for binary frames
-CHANNEL_IDS = {
-    'control': 0x00,
-    'compute': 0x01,
-    'dispatch': 0x02,
-    'gossip': 0x03,
-    'federation': 0x04,
-    'hivemind': 0x05,
-    'events': 0x06,
-    'ralt': 0x07,
-    'sensor': 0x08,
-}
-CHANNEL_NAMES = {v: k for k, v in CHANNEL_IDS.items()}
+# Channel IDs for binary frames — single source of truth is CHANNEL_REGISTRY
+# in core.peer_link.channels. Re-exported here for backwards compatibility.
+from core.peer_link.channels import CHANNEL_IDS, CHANNEL_NAMES  # noqa: E402
 
 # Key rotation interval (seconds)
 KEY_ROTATION_INTERVAL = 3600
