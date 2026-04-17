@@ -47,6 +47,13 @@ _PUBLIC_TOPIC_PREFIXES = (
     'dm.',                # per-conversation, gated elsewhere
     'presence.',          # per-user presence
     'game.',              # game session id in the topic
+    'setup_progress',     # boot-time setup progress (pre-auth, no user_id)
+    'setup.',             # boot-time setup (broader)
+    'system.',            # system-wide events (catalog/orchestrator)
+    'catalog.',           # model catalog updates
+    'model.',             # per-model lifecycle
+    'tts.',               # per-user audio-ready event (audio URL per request)
+    'admin.',             # admin-console broadcasts
 )
 
 
