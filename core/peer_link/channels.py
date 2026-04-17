@@ -101,6 +101,11 @@ CHANNEL_REGISTRY = {
 # Reverse lookup: id -> name
 CHANNEL_ID_TO_NAME = {v['id']: k for k, v in CHANNEL_REGISTRY.items()}
 
+# Compatibility aliases — CHANNEL_IDS (name→id) and CHANNEL_NAMES (id→name)
+# are re-exported from link.py; both names are derived from CHANNEL_REGISTRY.
+CHANNEL_IDS = {k: v['id'] for k, v in CHANNEL_REGISTRY.items()}
+CHANNEL_NAMES = CHANNEL_ID_TO_NAME
+
 
 def get_channel_config(channel: str) -> dict:
     """Get channel config. Returns empty dict for unknown channels."""
