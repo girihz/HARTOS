@@ -299,6 +299,32 @@ class AdService:
                 db, node_id, hoster_share,
                 f'Ad impression revenue: ad {ad_id[:8]}')
 
+        # ── Viewer earns Spark for ad_impression_served ──────────────
+        # AWARD_TABLE['ad_impression_served'] = {'spark': 1} has
+        # existed in resonance_engine for every past release but was
+        # never invoked — the viewer's Spark wallet was always empty
+        # from ad exposure even though the node hoster was credited.
+        # Closing this loop is the "eyeball earns revenue" piece of
+        # the revenue-tracker flow.
+        #
+        # Gates already in place above keep this honest:
+        #   * per-user-per-ad 3/hour rate limit (line 251) — anti-farm
+        #   * budget-exhausted short-circuit (line 259)  — no phantom
+        #   * Provenance: ResonanceTransaction gets
+        #       source_type='ad_impression_served', source_id=imp.id
+        #     so every Spark credit traces back to the exact sealed
+        #     impression row (user_id, node_id, witness, sealed_hash).
+        #   * Isolation: award_action awards to `user_id` only; the
+        #     outer API handler already scoped this to g.user_id via
+        #     @require_auth before calling record_impression.
+        if user_id:
+            try:
+                ResonanceService.award_action(
+                    db, user_id, 'ad_impression_served', imp.id)
+            except Exception as _ve:
+                logger.debug(
+                    f"viewer spark credit skipped for imp {imp.id}: {_ve}")
+
         db.flush()
         result = imp.to_dict()
         result['witnessed'] = witnessed
