@@ -637,6 +637,73 @@ class WorldModelBridge:
 
     # ─── HiveMind collective thinking ────────────────────────────────
 
+    def register_peer_agent(
+        self,
+        peer_id: str,
+        agent_type: str = 'remote_peer',
+        latent_dim: int = 2048,
+        capabilities: Optional[list] = None,
+    ) -> bool:
+        """Best-effort registration of a newly-linked peer with the in-
+        process HiveMind so `fuse_thoughts` / `think_together_distributed`
+        can include it in MoE consensus.
+
+        Called from `core.peer_link.link_manager.upgrade_peer` right
+        after a successful `link.connect()`.  Safe to invoke in any
+        topology:
+
+        - In-process HiveMind loaded → real registration.
+        - In-process HiveMind missing (no hevolveai, HTTP-only central
+          tier) → logs at debug and returns False.
+        - Any exception inside HiveMind → swallowed at debug; the link
+          upgrade must never fail because the hive can't register.
+
+        Returns ``True`` iff the peer was accepted into the HiveMind
+        agent registry.  Callers generally ignore the return value —
+        this is a side-effect hook, not a prerequisite.
+        """
+        if not (self._in_process and self._hive_mind):
+            logger.debug(
+                f"[register_peer_agent] no in-process HiveMind; "
+                f"skipping peer {peer_id[:8] if peer_id else '?'}"
+            )
+            return False
+        try:
+            # Resolve AgentCapability lazily — hevolveai might expose a
+            # different enum shape across versions; fall back to string
+            # capabilities when the enum isn't importable.
+            caps: list
+            try:
+                from hevolveai.embodied_ai.learning.hive_mind import (
+                    AgentCapability,
+                )
+                default_caps = [
+                    AgentCapability.ENCODE,
+                    AgentCapability.REASON,
+                ]
+                caps = list(capabilities) if capabilities else default_caps
+            except Exception:
+                caps = list(capabilities) if capabilities else [
+                    'encode', 'reason',
+                ]
+            self._hive_mind.register_agent(
+                agent_id=peer_id,
+                agent_type=agent_type,
+                latent_dim=latent_dim,
+                capabilities=caps,
+            )
+            logger.info(
+                f"[register_peer_agent] peer={peer_id[:8]} "
+                f"type={agent_type} dim={latent_dim} registered"
+            )
+            return True
+        except Exception as e:
+            logger.debug(
+                f"[register_peer_agent] peer={peer_id[:8] if peer_id else '?'} "
+                f"skipped: {e}"
+            )
+            return False
+
     def query_hivemind(self, query_text: str,
                        timeout_ms: int = 1000,
                        user_id: str = None) -> Optional[dict]:
