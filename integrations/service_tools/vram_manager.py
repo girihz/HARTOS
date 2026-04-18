@@ -10,7 +10,6 @@ Pattern from: integrations/vision/minicpm_installer.py (detect_gpu)
 
 import logging
 import os
-import subprocess
 import sys
 from typing import Any, Dict, Optional, Tuple
 
@@ -77,19 +76,17 @@ class VRAMManager:
             "cuda_available": False,
         }
 
+        # run_bounded wraps Popen + explicit pipe close on timeout so the
+        # child's _readerthread can't orphan — see core/subprocess_safe.py
+        # for the failure mode (2026-04-15 wmic 27-min hang, same class).
+        from core.subprocess_safe import run_bounded
+
         # 1) nvidia-smi — zero-dependency, works on any NVIDIA GPU system
         try:
-            _smi_kwargs = dict(capture_output=True, text=True, timeout=5)
-            if sys.platform == 'win32':
-                si = subprocess.STARTUPINFO()
-                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                si.wShowWindow = 0
-                _smi_kwargs['startupinfo'] = si
-                _smi_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-            result = subprocess.run(
+            result = run_bounded(
                 ["nvidia-smi", "--query-gpu=name,memory.total,memory.free",
                  "--format=csv,noheader,nounits"],
-                **_smi_kwargs,
+                timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
                 line = result.stdout.strip().split("\n")[0]
@@ -116,9 +113,9 @@ class VRAMManager:
 
         # 1b) rocm-smi — AMD GPUs via ROCm
         try:
-            result = subprocess.run(
+            result = run_bounded(
                 ["rocm-smi", "--showmeminfo", "vram", "--csv"],
-                capture_output=True, text=True, timeout=5,
+                timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
                 # Parse CSV output: header line then data lines
