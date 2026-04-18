@@ -98,3 +98,75 @@ assert NON_LATIN_SCRIPT_LANGS <= set(SUPPORTED_LANG_DICT), (
     f"NON_LATIN_SCRIPT_LANGS has codes not in SUPPORTED_LANG_DICT: "
     f"{NON_LATIN_SCRIPT_LANGS - set(SUPPORTED_LANG_DICT)}"
 )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# GREETINGS — canonical, localized "first-run handshake" phrase per
+# language.  Used by the TTS first-run handshake smoke test
+# (tts/tts_handshake.py) to synthesize a phrase the user actually hears
+# before the "Voice engine ready" banner flips.
+#
+# Single source of truth — replaces two historical parallel paths:
+#   1. tts/verified_synth._TEST_PHRASES  (synthesis probe)
+#   2. the "ready to use" string that the React card heuristically
+#      matched to flip isComplete before any audio had been produced.
+#
+# Contract:
+#   * Keys are ISO 639-1 codes that appear in SUPPORTED_LANG_DICT.
+#   * Values are phrases long enough to produce > MIN_AUDIO_BYTES
+#     (~0.5s at 22kHz mono) on CPU synth in under 30 seconds.
+#   * English 'en' is the fallback when a requested lang is missing.
+#
+# Scope — only the languages that TTS backends actually ship support
+# for today.  Do NOT bulk-add entries without verifying the engine
+# can synth them; a missing entry falls back to English, which is
+# preferable to synthesizing garbage.
+# ──────────────────────────────────────────────────────────────────────
+GREETINGS = {
+    # Core — every Nunba install can hit these via at least one engine.
+    "en": "Hey, I'm Nunba. Can you hear me?",
+    "ta": "வணக்கம், நான் நண்பா. என்னுடைய குரல் கேட்கிறதா?",
+    "hi": "नमस्ते, मैं नन्बा हूँ। क्या आप मुझे सुन सकते हैं?",
+    # Indic Parler cohort — its 21-language allowlist, minus the
+    # scripts we haven't hand-verified greetings for.
+    # Transliteration intent: the brand "Nunba" reads aloud as "Nan-baa"
+    # (rhymes with "Numba" the JIT lib).  Indic scripts use "न + न" /
+    # "ன + ன" / equivalent so TTS synth renders the intended phonetics.
+    "bn": "হ্যালো, আমি নন্বা। আপনি কি আমাকে শুনতে পাচ্ছেন?",
+    "te": "హలో, నేను నన్బా. మీరు నన్ను వినగలరా?",
+    "ml": "ഹലോ, ഞാൻ നൻബ. എനിക്കു നിങ്ങൾ കേൾക്കാനാകുമോ?",
+    "kn": "ಹಲೋ, ನಾನು ನನ್ಬಾ. ನೀವು ನನ್ನನ್ನು ಕೇಳಬಹುದೆ?",
+    "mr": "नमस्कार, मी नन्बा. तुम्ही मला ऐकू शकता का?",
+    "gu": "નમસ્તે, હું નન્બા છું. શું તમે મને સાંભળી શકો છો?",
+    "pa": "ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ, ਮੈਂ ਨਨਬਾ ਹਾਂ। ਕੀ ਤੁਸੀਂ ਮੈਨੂੰ ਸੁਣ ਸਕਦੇ ਹੋ?",
+    "ur": "ہیلو، میں نَنبا ہوں۔ کیا آپ مجھے سن سکتے ہیں؟",
+    # Chatterbox Multilingual + CosyVoice3 cohort
+    "zh": "你好,我是 Nunba。你能听到我吗?",
+    "ja": "こんにちは、私はNunbaです。聞こえますか?",
+    "ko": "안녕하세요, 저는 Nunba입니다. 제 목소리가 들리시나요?",
+    "fr": "Bonjour, je suis Nunba. Vous m'entendez ?",
+    "es": "Hola, soy Nunba. ¿Me escuchas?",
+    "de": "Hallo, ich bin Nunba. Kannst du mich hören?",
+    "it": "Ciao, sono Nunba. Mi senti?",
+    "ru": "Привет, я Nunba. Вы меня слышите?",
+    "pt": "Olá, eu sou o Nunba. Você consegue me ouvir?",
+}
+
+
+# Fallback phrase when the requested language isn't in GREETINGS.
+# Kept as a named constant (not a magic literal) so call sites read
+# clearly and tests can refer to it by name.
+GREETING_FALLBACK_LANG: str = "en"
+
+
+# Every GREETINGS key MUST be a registered language.  Mirrors the
+# NON_LATIN_SCRIPT_LANGS invariant above — a missing display name for
+# a greeting-supported lang is a build-time error, not a runtime
+# "None" appearing in a banner.
+assert set(GREETINGS) <= set(SUPPORTED_LANG_DICT), (
+    f"GREETINGS has codes not in SUPPORTED_LANG_DICT: "
+    f"{set(GREETINGS) - set(SUPPORTED_LANG_DICT)}"
+)
+assert GREETING_FALLBACK_LANG in GREETINGS, (
+    f"GREETING_FALLBACK_LANG={GREETING_FALLBACK_LANG!r} is not in GREETINGS"
+)
