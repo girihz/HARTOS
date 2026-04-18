@@ -63,6 +63,14 @@ class SpeculativeDispatcher:
         self._lock = threading.Lock()
         self._results: Dict[str, dict] = {}  # speculation_id → expert result
         self._results_max = 1000  # evict oldest when exceeded
+        # HiveMind fusion consult results (speculation_id → {result, ts}).
+        # Populated by the best-effort `_schedule_hive_consult` fired when
+        # the user selected `intelligence_preference='hive_preferred'` AND
+        # the draft self-delegated to hive.  Read by observers / tests —
+        # does NOT feed back into the chat reply path (non-blocking; the
+        # hot-path latency budget is preserved).  Capped at 1000 entries
+        # via the same eviction helper as `_results`.
+        self._last_hive_consult: Dict[str, dict] = {}
 
     # ─── Gate: should we speculate? ───
 
@@ -180,7 +188,8 @@ class SpeculativeDispatcher:
                              goal_id: str = None, goal_type: str = 'general',
                              node_id: str = None,
                              agent_persona: Optional[str] = None,
-                             preferred_lang: str = 'en') -> dict:
+                             preferred_lang: str = 'en',
+                             user_pref: str = 'auto') -> dict:
         """Draft-first dispatch: tiny model answers immediately, signals whether
         to delegate.
 
@@ -317,8 +326,10 @@ class SpeculativeDispatcher:
 
         # ── 4. Schedule expert if the draft self-delegated ──
         expert_pending = False
+        hive_consult_scheduled = False
         if delegate in ('local', 'hive'):
-            expert_model = self._pick_expert_for_delegate(delegate)
+            expert_model = self._pick_expert_for_delegate(
+                delegate, user_pref=user_pref)
             expert_pending = self._schedule_expert_background(
                 speculation_id=speculation_id,
                 prompt=prompt,
@@ -330,6 +341,20 @@ class SpeculativeDispatcher:
                 origin_model_role='draft_model',
                 delegate=delegate,
             )
+            # When the user explicitly asked for `hive_preferred` AND the
+            # draft self-delegated to hive, also fire a best-effort MoE
+            # HiveMind fusion consult in the background.  The consult
+            # result is stored on self._last_hive_consult for observers
+            # and future wiring; it does NOT replace the expert's reply
+            # on the hot path (preserves the 1.5s chat budget).  Safe on
+            # `auto` and `local_only` paths — gated by user_pref so
+            # existing callers see no behavior change.
+            if delegate == 'hive' and user_pref == 'hive_preferred':
+                hive_consult_scheduled = self._schedule_hive_consult(
+                    prompt=prompt,
+                    user_id=user_id,
+                    speculation_id=speculation_id,
+                )
 
         # Channel name defensively coerced: draft model sometimes emits None,
         # null, or a capitalised string. Normalise to a lowercased str so
@@ -364,6 +389,10 @@ class SpeculativeDispatcher:
             'channel_connect': _channel.strip().lower(),
             'language_change': _lang.strip().lower(),
             'expert_pending': expert_pending,
+            # Additive field: observers (J282, telemetry, admin/diag) can
+            # tell a hive fusion consult was fired in background.  Legacy
+            # callers that don't read this field are unaffected.
+            'hive_consult_scheduled': hive_consult_scheduled,
             'latency_ms': round(draft_latency_ms, 1),
             'energy_kwh': round(
                 self._registry.get_total_energy_kwh(hours=0.01), 6),
@@ -648,24 +677,110 @@ class SpeculativeDispatcher:
         logger.debug(f"draft envelope parse failed: {raw[:120]!r}")
         return {}
 
-    def _pick_expert_for_delegate(self, delegate: str):
+    def _pick_expert_for_delegate(self, delegate: str,
+                                  user_pref: str = 'auto'):
         """Select the background model for a given delegate value.
 
         - "local": local FAST-tier model (e.g. Qwen3.5-4B)
         - "hive":  highest-accuracy hive/expert model, falls back to local
                    if no remote expert is available
 
-        Returns None if no suitable model exists — caller then treats the
-        draft's reply as the final answer."""
+        ``user_pref`` honours the Demopage intelligence toggle
+        (``local_only`` | ``auto`` | ``hive_preferred``):
+
+        - ``local_only`` + ``delegate='hive'`` → **downgrade to local
+          fast model**.  The user explicitly opted out of hive compute;
+          we respect that even if the draft self-delegated.
+        - ``auto`` (default) → today's behavior: hive delegate picks the
+          expert, falls back to fast if no expert registered.
+        - ``hive_preferred`` → today's behavior for model selection; the
+          ADDITIONAL MoE HiveMind fusion consult is fired separately by
+          ``dispatch_draft_first`` via ``_schedule_hive_consult``.
+
+        Returns None if no suitable model exists — caller then treats
+        the draft's reply as the final answer."""
         if delegate == 'local':
             return self._registry.get_fast_model()
         if delegate == 'hive':
+            # Respect the user's explicit "local only" preference even
+            # when the draft says hive would be better — the toggle is
+            # the final authority on egress.
+            if user_pref == 'local_only':
+                return self._registry.get_fast_model()
             expert = self._registry.get_expert_model()
             if expert:
                 return expert
             # Graceful fallback: no hive expert → use local fast
             return self._registry.get_fast_model()
         return None
+
+    def _schedule_hive_consult(self, prompt: str, user_id: str,
+                               speculation_id: str) -> bool:
+        """Best-effort MoE HiveMind fusion consult on the expert pool.
+
+        Fired only when the user selected
+        ``intelligence_preference='hive_preferred'`` AND the draft
+        self-delegated to ``hive``.  Runs on the existing
+        ``_expert_pool`` so it never contends with the chat hot path;
+        the consult result populates ``self._last_hive_consult`` for
+        observers (journey tests, admin/diag, future fusion wiring) to
+        read.
+
+        Guarantees:
+          * Returns ``True`` iff a task was accepted onto the pool.
+          * All failures are swallowed (``logger.debug`` only) — the
+            chat reply path never blocks or errors on a missing /
+            offline HiveMind.
+          * No dependency on ``world_model_bridge`` at import time; the
+            import is inside the worker so environments without
+            hevolveai (pip) still load the dispatcher cleanly.
+        """
+        def _consult():
+            try:
+                from integrations.agent_engine.world_model_bridge import (
+                    get_world_model_bridge,
+                )
+                bridge = get_world_model_bridge()
+                if not bridge:
+                    return
+                # 1500ms timeout matches the default hive consult budget
+                # in world_model_bridge and is half the chat hot-path
+                # ceiling — cannot stall user-visible latency because
+                # this runs on a worker thread, not the request thread.
+                result = bridge.query_hivemind(
+                    prompt, timeout_ms=1500, user_id=user_id,
+                )
+                if not result:
+                    return
+                with self._lock:
+                    self._last_hive_consult[speculation_id] = {
+                        'result': result,
+                        'completed_at': time.time(),
+                        'user_id': user_id,
+                    }
+                    # Cap the dict at the same ceiling as _results to
+                    # avoid unbounded growth in long-running instances.
+                    if len(self._last_hive_consult) > self._results_max:
+                        oldest = sorted(
+                            self._last_hive_consult.items(),
+                            key=lambda kv: kv[1].get('completed_at', 0),
+                        )[:len(self._last_hive_consult) - self._results_max]
+                        for k, _ in oldest:
+                            self._last_hive_consult.pop(k, None)
+                logger.info(
+                    f"[hive_consult] speculation={speculation_id} "
+                    f"user={user_id} fusion returned "
+                    f"{str(result)[:160]!r}"
+                )
+            except Exception as e:
+                logger.debug(f"[hive_consult] failed: {e}")
+
+        try:
+            self._expert_pool.submit(_consult)
+            return True
+        except Exception as e:
+            logger.debug(f"[hive_consult] pool submit failed: {e}")
+            return False
 
     def _record_interaction_safely(self, **kwargs) -> None:
         """Feed an interaction into HevolveAI via WorldModelBridge. Never
