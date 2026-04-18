@@ -14,7 +14,10 @@ Blueprint: distributed_agent_bp
 """
 
 import os
+import time
 import logging
+import threading
+from collections import deque
 from flask import Blueprint, request, jsonify, g
 
 from integrations.social.auth import require_auth, require_admin
@@ -25,6 +28,89 @@ distributed_agent_bp = Blueprint('distributed_agent', __name__)
 
 # Track which backend is active
 _coordinator_backend_type = None
+
+# ─── Delegation subscriber state ───────────────────────────────────
+# When Redis is available, a daemon thread subscribes to
+# `LedgerPubSub.CHANNEL_DELEGATION` so distributed nodes see real-time
+# delegation broadcasts from create_recipe / reuse_recipe ledgers.
+# Ring buffer capped at 100 so memory cannot grow unbounded.
+# Gated entirely on Redis presence — no Redis → no subscriber, and the
+# rest of /api/distributed/* keeps working via in-memory coordinator.
+_delegation_sub_started: bool = False
+_delegation_sub_lock = threading.Lock()
+_recent_delegations: "deque[dict]" = deque(maxlen=100)
+
+
+def _ensure_delegation_subscriber() -> bool:
+    """Lazy-start the CHANNEL_DELEGATION subscriber.
+
+    Idempotent (the `_delegation_sub_started` flag prevents double
+    starts).  Gated on:
+
+      * Redis reachable via `_get_redis_client()` + `.ping()`.
+      * `agent_ledger.pubsub` importable.
+
+    Fails silently at debug level.  Returns True iff the subscriber is
+    active after the call; callers (endpoints, tests) can use the
+    return value to surface status without raising.
+    """
+    global _delegation_sub_started
+    with _delegation_sub_lock:
+        if _delegation_sub_started:
+            return True
+        redis_client = _get_redis_client()
+        if not redis_client:
+            return False
+        try:
+            redis_client.ping()
+        except Exception as e:
+            logger.debug(f"[delegation_subscriber] redis ping failed: {e}")
+            return False
+        try:
+            from agent_ledger.pubsub import LedgerPubSub
+        except Exception as e:
+            logger.debug(f"[delegation_subscriber] pubsub import failed: {e}")
+            return False
+        try:
+            node_id = os.environ.get('HEVOLVE_NODE_ID', 'distributed_node')
+            pubsub = LedgerPubSub(redis_client, agent_id=node_id)
+
+            def _on_message(channel: str, data: dict) -> None:
+                try:
+                    _recent_delegations.append({
+                        'channel': channel,
+                        'data': data,
+                        'received_at': time.time(),
+                    })
+                    logger.info(
+                        f"[delegation_subscriber] {channel}: "
+                        f"{str(data)[:160]}"
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"[delegation_subscriber] handler error: {e}"
+                    )
+
+            pubsub.subscribe(
+                [LedgerPubSub.CHANNEL_DELEGATION], _on_message,
+            )
+            _delegation_sub_started = True
+            logger.info(
+                f"[delegation_subscriber] started as node={node_id}"
+            )
+            return True
+        except Exception as e:
+            logger.debug(f"[delegation_subscriber] start failed: {e}")
+            return False
+
+
+@distributed_agent_bp.before_request
+def _bp_before_request_ensure_subscriber():
+    """One-shot subscriber bootstrap on the first /api/distributed/*
+    request.  After it succeeds the guard short-circuits cheaply —
+    no per-request overhead in steady state."""
+    if not _delegation_sub_started:
+        _ensure_delegation_subscriber()
 
 
 # ─── Shared helpers ───
@@ -336,8 +422,44 @@ def create_baseline():
 def coordinator_status():
     """Report coordinator status and backend type."""
     coordinator = _get_coordinator()
+    # Attempt lazy subscriber start here too — /status is typically the
+    # first endpoint admin UIs hit, so this doubles as a bootstrap.
+    _ensure_delegation_subscriber()
     return jsonify({
         'success': True,
         'coordinator_active': coordinator is not None,
         'backend_type': _coordinator_backend_type,
+        'delegation_subscriber_active': _delegation_sub_started,
+    })
+
+
+@distributed_agent_bp.route('/api/distributed/delegations/recent', methods=['GET'])
+@require_auth
+def recent_delegations():
+    """Return the most recent delegation broadcasts received over the
+    ``agent_ledger:delegation`` Redis channel.
+
+    Response shape::
+
+        {
+          "success": true,
+          "subscriber_active": bool,
+          "delegations": [
+            {"channel": str, "data": {...}, "received_at": float},
+            ...
+          ]
+        }
+
+    When Redis is unavailable the subscriber never starts and the list
+    stays empty — this is the correct degradation for single-node /
+    flat-tier deployments (Nunba desktop).  Admin UIs can poll this to
+    visualize the distributed ledger traffic.
+    """
+    # Best-effort start on read so admins can see status even if no
+    # prior distributed endpoint has been hit yet.
+    _ensure_delegation_subscriber()
+    return jsonify({
+        'success': True,
+        'subscriber_active': _delegation_sub_started,
+        'delegations': list(_recent_delegations),
     })
