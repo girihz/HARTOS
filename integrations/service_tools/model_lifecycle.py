@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 
 LIFECYCLE_STATE_FILE = Path.home() / '.hevolve' / 'lifecycle_state.json'
 
+# Hints older than this are discarded on reload.  A 24h cutoff keeps
+# "this user spoke Tamil yesterday" relevant while throwing away
+# "this user spoke Tamil in January" (long-stale entries would pin
+# models that the user actually doesn't use anymore).
+LIFECYCLE_STALENESS_S: float = 24 * 3600.0
+
 
 # ═══════════════════════════════════════════════════════════════
 # Enums and State
@@ -265,6 +271,18 @@ class ModelLifecycleManager:
         self._last_pressure_alert: Dict[str, float] = {}  # type → timestamp
         self._pressure_alert_cooldown = 60.0  # seconds between alerts of same type
 
+        # ── Cross-restart persistence ─────────────────────────────
+        # Load any persisted per-model access hints from the previous
+        # Nunba boot.  Entries older than LIFECYCLE_STALENESS_S are
+        # dropped — last_access from a week ago is worse than no hint.
+        self._last_persist_time: float = 0.0
+        self._persist_interval_s: float = 60.0  # throttle disk writes
+        self._persisted_hints: Dict[str, dict] = {}
+        try:
+            self._persisted_hints = self._load_persisted_state()
+        except Exception as e:
+            logger.debug(f"Lifecycle: persisted state load skipped: {e}")
+
     # ── Daemon lifecycle ──────────────────────────────────────
 
     def start(self):
@@ -452,6 +470,14 @@ class ModelLifecycleManager:
         # Phase 13: Pressure alerts to frontend (debounced)
         self._emit_pressure_alerts()
 
+        # Phase 14: Persist access hints (throttled — J211).
+        # Cheap I/O (single JSON file, atomic rename) so the rate limit
+        # lives in _persist_state_to_disk itself rather than here.
+        try:
+            self._persist_state_to_disk()
+        except Exception:
+            pass
+
     # ── Hook callbacks (from RuntimeToolManager) ──────────────
 
     def _on_tool_started(self, tool_name: str, **kwargs):
@@ -486,7 +512,7 @@ class ModelLifecycleManager:
 
         now = time.time()
         with self._lock:
-            self._models[tool_name] = ModelState(
+            state = ModelState(
                 name=tool_name,
                 device=device,
                 priority=ModelPriority.WARM,
@@ -498,6 +524,29 @@ class ModelLifecycleManager:
                 vram_gb=vram_gb,
                 ram_gb=ram_gb,
             )
+            # Apply persisted-from-previous-boot hints so warm-start
+            # preference survives restart.  This is the J211 fix for
+            # the cold-load penalty after Nunba is killed + relaunched.
+            hint = self._persisted_hints.pop(tool_name, None)
+            if hint:
+                try:
+                    state.access_count = int(hint.get('access_count', 0) or 0)
+                    # prior last_access_time preserved as a hint; the
+                    # current boot's load time overrides so idle math
+                    # starts fresh.  The prior timestamp is only used to
+                    # reason about popularity (see _apply_hive_hints).
+                    prior_access = float(hint.get('last_access_time', 0.0) or 0.0)
+                    if prior_access and (now - prior_access) < LIFECYCLE_STALENESS_S:
+                        # Boost priority for recently-used models so the
+                        # first request after restart doesn't get stuck
+                        # behind a cold-load.
+                        state.priority = ModelPriority.WARM
+                        state.hive_boost = True
+                    if hint.get('pinned'):
+                        state.pinned = True
+                except Exception:
+                    pass
+            self._models[tool_name] = state
 
         # Notify UI: model loaded — include capabilities from catalog
         # so UI knows what features are now available
@@ -519,11 +568,121 @@ class ModelLifecycleManager:
                 state.ram_gb = 0.0
                 state.active_inference_count = 0
 
+        # Persist the release — even if we crash immediately after,
+        # the next boot has a fresh snapshot of which models were in use.
+        try:
+            self._persist_state_to_disk(force=True)
+        except Exception:
+            pass
+
         # Notify UI: model unloaded — these capabilities are now unavailable
         self._emit_event('model.unloaded', {
             'model': tool_name,
             'capabilities': self._get_model_capabilities(tool_name),
         })
+
+    # ── Cross-restart persistence (J211) ──────────────────────
+    #
+    # The lifecycle state file was declared as LIFECYCLE_STATE_FILE at
+    # module top but never written until the 2026-04-18 live audit
+    # flagged the gap.  We persist a compact, user-scoped JSON doc:
+    #
+    #   {
+    #     "version": 1,
+    #     "saved_at": 1713456789.12,
+    #     "models": {
+    #        "indic_parler": {
+    #          "last_access_time": 1713450000.0,
+    #          "access_count": 17,
+    #          "pinned": false
+    #        },
+    #        ...
+    #     }
+    #   }
+    #
+    # Reload happens ONCE in __init__.  Save happens throttled inside
+    # _tick (every _persist_interval_s) and on every model stop event.
+    # Stale entries (older than LIFECYCLE_STALENESS_S) are discarded at
+    # load-time so a 6-month-old hint doesn't distort today's boot.
+    # No secrets / credentials / PII are persisted — only tool names
+    # and access counters.
+
+    def _load_persisted_state(self) -> Dict[str, dict]:
+        """Read the on-disk hint doc and return the map of models.
+
+        Returns an empty dict if the file is missing, malformed, or
+        older than LIFECYCLE_STALENESS_S (entries are filtered on
+        that threshold to avoid pinning stale models).
+        """
+        try:
+            if not LIFECYCLE_STATE_FILE.exists():
+                return {}
+            with open(LIFECYCLE_STATE_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            return {}
+
+        models = data.get('models') if isinstance(data, dict) else None
+        if not isinstance(models, dict):
+            return {}
+
+        now = time.time()
+        fresh: Dict[str, dict] = {}
+        for name, hint in models.items():
+            if not isinstance(hint, dict):
+                continue
+            last = float(hint.get('last_access_time', 0.0) or 0.0)
+            # Stale entries get dropped — a week-old hint is worse than
+            # no hint (it would keep a model the user no longer uses).
+            if last and (now - last) > LIFECYCLE_STALENESS_S:
+                continue
+            fresh[name] = hint
+        if fresh:
+            logger.info(
+                f"Lifecycle: loaded {len(fresh)} persisted hint(s) "
+                f"from {LIFECYCLE_STATE_FILE}"
+            )
+        return fresh
+
+    def _persist_state_to_disk(self, force: bool = False) -> None:
+        """Write current access hints to disk.
+
+        Throttled to at most one write per _persist_interval_s unless
+        ``force=True`` (used from _on_tool_stopped so a user-visible
+        release is recorded immediately).  Writes are atomic via
+        rename-tmpfile-to-target so a crash mid-write can't leave a
+        half-written JSON blob behind.
+        """
+        now = time.time()
+        if not force and (now - self._last_persist_time) < self._persist_interval_s:
+            return
+
+        with self._lock:
+            payload = {
+                'version': 1,
+                'saved_at': now,
+                'models': {
+                    name: {
+                        'last_access_time': s.last_access_time,
+                        'access_count': s.access_count,
+                        'pinned': bool(s.pinned),
+                    }
+                    for name, s in self._models.items()
+                    if s.last_access_time > 0
+                },
+            }
+
+        try:
+            LIFECYCLE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = LIFECYCLE_STATE_FILE.with_suffix('.json.tmp')
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            # Atomic rename — survives a crash mid-write.  On Windows,
+            # os.replace handles "target exists" correctly.
+            os.replace(tmp, LIFECYCLE_STATE_FILE)
+            self._last_persist_time = now
+        except Exception as e:
+            logger.debug(f"Lifecycle: persist skipped ({e})")
 
     # ── Access tracking (called by tool wrappers) ─────────────
 
