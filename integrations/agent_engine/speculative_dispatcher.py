@@ -697,22 +697,81 @@ class SpeculativeDispatcher:
           ADDITIONAL MoE HiveMind fusion consult is fired separately by
           ``dispatch_draft_first`` via ``_schedule_hive_consult``.
 
+        Install-validation gate:
+        A model that was installed via `/api/admin/models/hub/install`
+        is stamped ``capabilities['install_validated']`` — ``False`` on
+        register, flipped to ``True`` only when the post-download
+        ``loader.load()`` probe succeeded.  If the dispatcher picks an
+        entry whose validation has not yet flipped (or explicitly
+        failed), fall back to the local fast model rather than serve
+        the user an unproven weight.  Seeded / manually-registered
+        entries have no such flag and are trusted by default.
+
         Returns None if no suitable model exists — caller then treats
         the draft's reply as the final answer."""
         if delegate == 'local':
-            return self._registry.get_fast_model()
+            return self._pass_validation_gate(
+                self._registry.get_fast_model())
         if delegate == 'hive':
             # Respect the user's explicit "local only" preference even
             # when the draft says hive would be better — the toggle is
             # the final authority on egress.
             if user_pref == 'local_only':
-                return self._registry.get_fast_model()
+                return self._pass_validation_gate(
+                    self._registry.get_fast_model())
             expert = self._registry.get_expert_model()
-            if expert:
-                return expert
-            # Graceful fallback: no hive expert → use local fast
-            return self._registry.get_fast_model()
+            gated = self._pass_validation_gate(expert)
+            if gated:
+                return gated
+            # Graceful fallback: no (valid) hive expert → use local fast
+            return self._pass_validation_gate(
+                self._registry.get_fast_model())
         return None
+
+    def _pass_validation_gate(self, model):
+        """Refuse to route to a hub-installed model whose post-download
+        load probe has not yet succeeded.
+
+        Catalog entries registered by `/api/admin/models/hub/install`
+        carry ``source == 'hub-install'`` and
+        ``capabilities['install_validated']`` (False at register time,
+        flipped to True by the background validate probe).  Any other
+        entry — seeded preset, manual register, legacy — has no such
+        flag and passes through unchanged, preserving every existing
+        code path byte-for-byte.
+
+        Returns ``None`` when the gate rejects the pick so the caller
+        can cascade to the next fallback."""
+        if model is None:
+            return None
+        try:
+            model_id = getattr(model, 'id', None) or getattr(model, 'model_id', None)
+            if not model_id:
+                return model  # unknown shape — don't second-guess
+            # Late import — the catalog lives in the Nunba-side shim
+            # but is a transitive dependency through service_tools.
+            from integrations.service_tools.model_catalog import (
+                get_catalog,
+            )
+            entry = get_catalog().get(model_id)
+            if entry is None:
+                return model  # not a catalog entry — trust the registry
+            source = getattr(entry, 'source', '')
+            if source != 'hub-install':
+                return model  # seeded / manual → no validation requirement
+            caps = getattr(entry, 'capabilities', {}) or {}
+            if caps.get('install_validated') is True:
+                return model
+            logger.info(
+                f"[dispatcher] refusing unvalidated hub-install "
+                f"{model_id}; caller will fall back"
+            )
+            return None
+        except Exception as e:
+            # Any error in the gate degrades open — the dispatcher must
+            # not fail chat because the validation lookup misbehaved.
+            logger.debug(f"[dispatcher] validation gate error: {e}")
+            return model
 
     def _schedule_hive_consult(self, prompt: str, user_id: str,
                                speculation_id: str) -> bool:
