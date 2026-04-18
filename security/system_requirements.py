@@ -490,14 +490,14 @@ def _detect_camera_hw() -> bool:
     # Check for V4L2 video devices (Linux)
     if os.path.exists('/dev/video0'):
         return True
-    # Check for Raspberry Pi camera via vcgencmd
+    # Check for Raspberry Pi camera via vcgencmd.  Use run_bounded so a
+    # firmware-stalled vcgencmd can't orphan _readerthread daemons.
     try:
-        import subprocess
-        result = subprocess.run(
-            ['vcgencmd', 'get_camera'], capture_output=True, text=True, timeout=3)
+        from core.subprocess_safe import run_bounded
+        result = run_bounded(['vcgencmd', 'get_camera'], timeout=3)
         if result.returncode == 0 and 'detected=1' in result.stdout:
             return True
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    except (FileNotFoundError, OSError):
         pass
     return False
 
