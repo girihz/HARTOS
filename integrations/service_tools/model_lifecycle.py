@@ -544,6 +544,13 @@ class ModelLifecycleManager:
                         state.hive_boost = True
                     if hint.get('pinned'):
                         state.pinned = True
+                    # J214: a pending pressure_evict_only staged via
+                    # set_pressure_evict_only() applies at start-time
+                    # so the TTS backend the user just picked never
+                    # enters the idle-sweep phase on its first load.
+                    if 'pressure_evict_only' in hint:
+                        state.pressure_evict_only = bool(
+                            hint['pressure_evict_only'])
                 except Exception:
                     pass
             self._models[tool_name] = state
@@ -1762,6 +1769,47 @@ class ModelLifecycleManager:
                 return {'error': f'Model {model_name} not tracked'}
             state.priority = priority
         return {'model': model_name, 'priority': priority_str}
+
+    def set_pressure_evict_only(self, model_name: str, value: bool) -> dict:
+        """Toggle the ``pressure_evict_only`` flag for a tracked model.
+
+        When True, the model is evicted ONLY on VRAM pressure (phase 3
+        of ``_tick``) and never by the idle-timeout sweep (phase 7).
+        Used by ``TTSEngine.set_language`` to pin the ACTIVE TTS
+        backend so a background model load can't idle-out the engine
+        the user is actively speaking to.
+
+        If the model isn't tracked yet (first call can precede the
+        RTM ``on_tool_started`` hook when a language is chosen before
+        the first synth), the call no-ops with ``tracked=False`` so
+        the caller can decide whether to retry on next tick.  This is
+        additive: the flag lands when the RTM hook fires, via the
+        ``_persisted_hints`` path.
+
+        Returns a small dict for admin-API / journey-test inspection;
+        the caller typically discards it.
+        """
+        with self._lock:
+            state = self._models.get(model_name)
+            if state is None:
+                # Stage the pin so it's applied the moment the tool
+                # starts — treating this as a pre-start hint matches
+                # the pattern we already use for persisted hints.
+                self._persisted_hints.setdefault(model_name, {}).update({
+                    'pressure_evict_only': bool(value),
+                })
+                return {
+                    'model': model_name,
+                    'pressure_evict_only': bool(value),
+                    'tracked': False,
+                    'staged_as_hint': True,
+                }
+            state.pressure_evict_only = bool(value)
+        return {
+            'model': model_name,
+            'pressure_evict_only': bool(value),
+            'tracked': True,
+        }
 
     def get_system_pressure(self) -> dict:
         """Return current pressure state for dispatch throttling.
