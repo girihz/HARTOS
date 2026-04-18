@@ -5564,6 +5564,15 @@ def chat():
     probe = data.get('probe', None)
     intermediate = data.get('intermediate', None)
     speculative = data.get('speculative', False)
+    # Tier ladder preference forwarded from Nunba Demopage toggle (see
+    # routes/hartos_backend_adapter.py + routes/chatbot_routes.py).
+    # Values: 'local_only' | 'auto' | 'hive_preferred'.  Default 'auto'
+    # preserves today's behavior for every existing caller (old Nunba
+    # builds, direct HTTP clients, MCP bridge, tests).  Validated on
+    # Nunba side too; we revalidate here to keep HARTOS self-contained.
+    intelligence_preference = data.get('intelligence_preference', 'auto')
+    if intelligence_preference not in ('local_only', 'auto', 'hive_preferred'):
+        intelligence_preference = 'auto'
     # Draft-first dispatch: Qwen3.5-0.8B standby reply + delegate signal.
     # Default ON — the dispatcher gracefully returns 'no_draft_model' when
     # the 0.8B isn't loaded and we transparently fall through to the normal
@@ -5807,6 +5816,7 @@ def chat():
                 str(prompt_id) if prompt_id else str(request_id or 'anon'),
                 agent_persona=custom_prompt or None,
                 preferred_lang=preferred_lang,
+                user_pref=intelligence_preference,
             )
             # Only commit when the dispatcher actually produced a reply.
             # no_draft_model / circuit breaker / guardrail block all leave
