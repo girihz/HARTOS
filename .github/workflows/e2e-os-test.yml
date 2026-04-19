@@ -30,9 +30,14 @@ jobs:
         with:
           extra-conf: |
             experimental-features = nix-command flakes
-
-      - name: Cache Nix store
-        uses: DeterminateSystems/magic-nix-cache-action@v7
+            substituters = https://cache.nixos.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+            narinfo-cache-negative-ttl = 0
+            max-jobs = 2
+            cores = 2
+      # magic-nix-cache dropped: under sustained load the CDN returns
+      # < 1 byte/sec and stalls for 300s (seen 13:30-14:04 on run
+      # 24629754670). cache.nixos.org has no such throttling.
 
       # Scope evaluation to the x86_64-linux ISO targets this
       # workflow actually builds. `nix flake check` has been broken
@@ -64,9 +69,14 @@ jobs:
         with:
           extra-conf: |
             experimental-features = nix-command flakes
-
-      - name: Cache Nix store
-        uses: DeterminateSystems/magic-nix-cache-action@v7
+            substituters = https://cache.nixos.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+            narinfo-cache-negative-ttl = 0
+            max-jobs = 2
+            cores = 2
+      # magic-nix-cache dropped: under sustained load the CDN returns
+      # < 1 byte/sec and stalls for 300s (seen 13:30-14:04 on run
+      # 24629754670). cache.nixos.org has no such throttling.
 
       - name: Install QEMU and sshpass
         run: |
@@ -159,9 +169,14 @@ jobs:
         with:
           extra-conf: |
             experimental-features = nix-command flakes
-
-      - name: Cache Nix store
-        uses: DeterminateSystems/magic-nix-cache-action@v7
+            substituters = https://cache.nixos.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+            narinfo-cache-negative-ttl = 0
+            max-jobs = 2
+            cores = 2
+      # magic-nix-cache dropped: under sustained load the CDN returns
+      # < 1 byte/sec and stalls for 300s (seen 13:30-14:04 on run
+      # 24629754670). cache.nixos.org has no such throttling.
 
       - name: Install QEMU and sshpass
         run: |
