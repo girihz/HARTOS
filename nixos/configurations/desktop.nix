@@ -42,14 +42,19 @@
     (final: prev: {
       glibcLocales = prev.glibcLocales.override {
         allLocales = false;
+        # Must match nixpkgs' glibcLocales SUPPORTED list — upstream
+        # rejects `hi_IN.UTF-8/UTF-8` and `vi_VN.UTF-8/UTF-8` (only
+        # the bare `hi_IN/UTF-8` / `vi_VN/UTF-8` forms are allowed).
+        # Fix: use the accepted forms for those two, keep
+        # `XX_YY.UTF-8/UTF-8` for the rest.
         locales = [
           "en_US.UTF-8/UTF-8" "en_GB.UTF-8/UTF-8"
           "de_DE.UTF-8/UTF-8" "fr_FR.UTF-8/UTF-8" "es_ES.UTF-8/UTF-8"
           "pt_BR.UTF-8/UTF-8" "it_IT.UTF-8/UTF-8" "nl_NL.UTF-8/UTF-8"
           "ja_JP.UTF-8/UTF-8" "ko_KR.UTF-8/UTF-8"
           "zh_CN.UTF-8/UTF-8" "zh_TW.UTF-8/UTF-8"
-          "hi_IN.UTF-8/UTF-8" "ar_SA.UTF-8/UTF-8" "ru_RU.UTF-8/UTF-8"
-          "tr_TR.UTF-8/UTF-8" "th_TH.UTF-8/UTF-8" "vi_VN.UTF-8/UTF-8"
+          "hi_IN/UTF-8" "ar_SA.UTF-8/UTF-8" "ru_RU.UTF-8/UTF-8"
+          "tr_TR.UTF-8/UTF-8" "th_TH.UTF-8/UTF-8" "vi_VN/UTF-8"
         ];
       };
     })
@@ -423,8 +428,9 @@
       "pt_BR.UTF-8/UTF-8" "it_IT.UTF-8/UTF-8" "nl_NL.UTF-8/UTF-8"
       "ja_JP.UTF-8/UTF-8" "ko_KR.UTF-8/UTF-8"
       "zh_CN.UTF-8/UTF-8" "zh_TW.UTF-8/UTF-8"
-      "hi_IN.UTF-8/UTF-8" "ar_SA.UTF-8/UTF-8" "ru_RU.UTF-8/UTF-8"
-      "tr_TR.UTF-8/UTF-8" "th_TH.UTF-8/UTF-8" "vi_VN.UTF-8/UTF-8"
+      # hi_IN / vi_VN have no `.UTF-8` variant in nixpkgs glibcLocales
+      "hi_IN/UTF-8" "ar_SA.UTF-8/UTF-8" "ru_RU.UTF-8/UTF-8"
+      "tr_TR.UTF-8/UTF-8" "th_TH.UTF-8/UTF-8" "vi_VN/UTF-8"
     ];
     inputMethod = {
       enable = true;
