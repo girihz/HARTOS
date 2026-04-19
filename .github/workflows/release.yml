@@ -379,6 +379,41 @@ jobs:
           files: /tmp/release-artifacts/*
 
   # ═══════════════════════════════════════════════════════════
+  # 3a. Build universal installers (fast Go cross-compile)
+  # ═══════════════════════════════════════════════════════════
+  #
+  # Same three binaries that tag-and-sign produces on workflow_dispatch,
+  # but also on every push so the docs.hevolve.ai/downloads links
+  # `/releases/latest/download/hevolve-install.{exe,macos,linux}`
+  # always resolve. Builds in ~1 min — no nix, no matrix.
+  build-installers:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      - name: Cross-compile hevolve-install {exe,macos,linux}
+        working-directory: deploy/installer
+        run: |
+          set -eo pipefail
+          mkdir -p /tmp/installer-artifacts
+          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" \
+            -o /tmp/installer-artifacts/hevolve-install.exe .
+          GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" \
+            -o /tmp/installer-artifacts/hevolve-install-macos .
+          GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" \
+            -o /tmp/installer-artifacts/hevolve-install-linux .
+          ls -lh /tmp/installer-artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hevolve-installers
+          path: /tmp/installer-artifacts/
+          retention-days: 30
+
+  # ═══════════════════════════════════════════════════════════
   # 3b. Publish Nightly Release (draft → upload → publish)
   # ═══════════════════════════════════════════════════════════
   #
@@ -395,18 +430,25 @@ jobs:
   # that did build.
   publish-nightly:
     if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [build-iso]
+    needs: [build-iso, build-installers]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all ISO matrix artifacts
+      - name: Download ISO matrix artifacts
         uses: actions/download-artifact@v4
         with:
           path: /tmp/all-artifacts
           pattern: iso-*
+          merge-multiple: true
+
+      - name: Download hevolve-install binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all-artifacts
+          pattern: hevolve-installers
           merge-multiple: true
 
       - name: Create unique-tagged nightly release, upload, publish as latest
