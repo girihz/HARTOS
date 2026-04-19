@@ -231,8 +231,19 @@ jobs:
         with:
           extra-conf: |
             experimental-features = nix-command flakes
+            substituters = https://cache.nixos.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+            narinfo-cache-negative-ttl = 0
+            max-jobs = 2
+            cores = 2
 
-      - uses: DeterminateSystems/magic-nix-cache-action@v7
+      # magic-nix-cache disabled: under heavy load (full NixOS ISO
+      # derivation graph) the GitHub Actions Cache quota trips the
+      # Twirp ResourceExhausted path at ~5min in, after which the
+      # magic-nix-cache daemon announces "Not trying to use it again
+      # on this run" — every narinfo fetch thereafter gets HTTP 418,
+      # the build aborts, and `nix build` fails. cache.nixos.org is
+      # CDN-backed and has no such quota, so we rely on it exclusively.
 
       - name: Free disk space (aggressive)
         run: |
@@ -361,47 +372,83 @@ jobs:
           tag_name: "v${{ github.event.inputs.version }}"
           files: /tmp/release-artifacts/*
 
-      # On push to main: attach ISO + torrent + sha256 to a rolling
-      # `nightly` release so docs.hevolve.ai/downloads links resolve
-      # to fresh artifacts. v1.0.0 is immutable (signed release) so we
-      # cannot upload to it; `nightly` is the mutable sibling for
-      # bleeding-edge main-HEAD ISOs. Non-breaking: signed releases
-      # keep their own release_manifest.json; `nightly` ISOs verify
-      # via their own regenerated .sha256.
-      - name: Attach to nightly release (push to main)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  # ═══════════════════════════════════════════════════════════
+  # 3b. Publish Nightly Release (draft → upload → publish)
+  # ═══════════════════════════════════════════════════════════
+  #
+  # Repo has release-immutability on: published releases cannot have
+  # assets added or mutated. `gh release create` defaults to published,
+  # so every "upload to nightly" attempt from the build-iso matrix got
+  # HTTP 422. Workaround documented in `gh release create --help`:
+  # create as draft (mutable), upload, then publish.
+  #
+  # We pull this up to a single post-build job so the 3 matrix workers
+  # don't race each other creating/publishing the same release. Uses
+  # `if: always()` so even partial matrix success (e.g. iso-desktop
+  # OOMs but iso-server/iso-edge complete) still ships the two ISOs
+  # that did build.
+  publish-nightly:
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-iso]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all ISO matrix artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all-artifacts
+          pattern: iso-*
+          merge-multiple: true
+
+      - name: Recreate nightly release as draft, upload assets, publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eo pipefail
           REPO="${{ github.repository }}"
           TAG="nightly"
-          # Create mutable nightly release if it doesn't exist yet.
-          # --target main pins the tag to the latest push. Marked as
-          # prerelease=false so /releases/latest doesn't switch from
-          # v1.0.0 to nightly.
-          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            echo "Creating nightly release"
-            gh release create "$TAG" \
-              --repo "$REPO" \
-              --target "$GITHUB_SHA" \
-              --title "HART OS nightly (main HEAD)" \
-              --prerelease \
-              --notes "Rolling bleeding-edge ISOs built from \`main\` on every push. Not signed by the master key — for stable signed releases see [/releases/latest](https://github.com/${REPO}/releases/latest). Each ISO verifies against its companion \`.sha256\`."
-          else
-            # Re-point tag to current main HEAD so /download/nightly/*
-            # always matches the latest build.
-            gh release edit "$TAG" --repo "$REPO" \
-              --tag "$TAG" 2>/dev/null || true
+          SHA="${{ github.sha }}"
+
+          echo "=== Artifacts downloaded ==="
+          ls -la /tmp/all-artifacts/ || { echo "No artifacts"; exit 0; }
+          FILES=$(find /tmp/all-artifacts -maxdepth 2 -type f | wc -l)
+          if [[ "$FILES" -eq 0 ]]; then
+            echo "No build artifacts produced by any ISO matrix job — nothing to publish"
+            exit 0
           fi
 
-          echo "Uploading ${{ matrix.target }} artifacts to $TAG"
-          cd /tmp/release-artifacts
-          for f in *; do
-            [[ -f "$f" ]] || continue
-            gh release upload "$TAG" "$f" \
-              --repo "$REPO" --clobber
+          # Delete existing nightly release (the tag `nightly` on the
+          # repo is already immutable after publish — we recycle it by
+          # deleting the release AND the tag, then making a fresh
+          # draft pointed at the current main-HEAD commit).
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Deleting prior nightly release (and tag) for refresh"
+            gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag || true
+          fi
+
+          echo "=== Creating nightly DRAFT (mutable while draft) ==="
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --target "$SHA" \
+            --draft \
+            --prerelease \
+            --title "HART OS nightly (main HEAD)" \
+            --notes "Rolling bleeding-edge ISOs built from \`main\` on every push. Not signed by the master key — for stable signed releases see [/releases/latest](https://github.com/${REPO}/releases/latest). Each ISO verifies against its companion \`.sha256\`."
+
+          echo "=== Uploading artifacts ==="
+          find /tmp/all-artifacts -maxdepth 2 -type f | while read -r f; do
+            echo "  -> $(basename "$f")"
+            gh release upload "$TAG" "$f" --repo "$REPO" --clobber
           done
+
+          echo "=== Publishing release (becomes immutable) ==="
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest=false
+
+          echo "=== Done ==="
+          gh release view "$TAG" --repo "$REPO" --json tagName,assets --jq '{tag:.tagName, assets:[.assets[].name]}'
 
   # ═══════════════════════════════════════════════════════════
   # 4. Deploy Docs to GitHub Pages
