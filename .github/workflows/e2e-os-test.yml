@@ -34,9 +34,20 @@ jobs:
       - name: Cache Nix store
         uses: DeterminateSystems/magic-nix-cache-action@v7
 
-      - name: Evaluate all flake outputs
+      # Scope evaluation to the x86_64-linux ISO targets this
+      # workflow actually builds. `nix flake check` has been broken
+      # for months on an upstream mobile-nixos module-option drift
+      # in `sd-phone` — unrelated to e2e-server / e2e-desktop — and
+      # gating on it skipped every e2e boot test since 2026-03.
+      - name: Evaluate e2e target flake outputs
         working-directory: nixos
-        run: nix flake check --no-build
+        run: |
+          set -eo pipefail
+          for t in iso-server iso-desktop; do
+            echo "=== Evaluating .#packages.x86_64-linux.$t ==="
+            nix eval ".#packages.x86_64-linux.${t}.drvPath" --raw
+            echo
+          done
 
   # ─── E2E: Server Variant ───────────────────────────────────
   e2e-server:
