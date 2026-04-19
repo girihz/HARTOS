@@ -53,7 +53,7 @@ Your phone becomes a remote to your private AI mesh.
 | Platform | Download |
 |----------|----------|
 | **Android (Play Store)** | [Google Play](https://play.google.com/store/apps/details?id=com.hertzai.hevolve) |
-| **Android (APK)** | [Direct APK](https://github.com/hertz-ai/Hevolve_React_Native/releases/latest/download/Hevolve.apk) |
+| **Android (APK, team only)** | [Direct APK](https://github.com/hertz-ai/Hevolve_React_Native/releases/latest/download/Hevolve.apk) — _`hertz-ai/Hevolve_React_Native` is a private repo; the asset link requires a GitHub session. Public users should install via Play Store above._ |
 
 ## Hevolve Web
 
