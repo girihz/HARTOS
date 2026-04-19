@@ -20,13 +20,17 @@ Double-click (Windows) or `chmod +x && ./hevolve-install-*` (macOS/Linux). Choos
 
 Boot from USB/SD card or run in a VM. Includes everything.
 
+### Nightly (bleeding-edge, rebuilt on every push to `main`)
+
 | Variant | Best for | Download |
 |---------|----------|----------|
-| **Server** | Headless servers, Raspberry Pi, IoT hubs | [Latest ISO](https://github.com/hertz-ai/HARTOS/releases/latest/download/hart-os-1.0.0-server-x86_64-linux.iso) |
-| **Desktop** | Workstations, dev machines (GNOME desktop) | [Latest ISO](https://github.com/hertz-ai/HARTOS/releases/latest/download/hart-os-1.0.0-desktop-x86_64-linux.iso) |
-| **Edge** | Minimal observer nodes, embedded | [Latest ISO](https://github.com/hertz-ai/HARTOS/releases/latest/download/hart-os-1.0.0-edge-x86_64-linux.iso) |
+| **Server** | Headless servers, Raspberry Pi, IoT hubs | [ISO](https://github.com/hertz-ai/HARTOS/releases/download/nightly/hart-os-1.0.0-server-x86_64-linux.iso) · [torrent](https://github.com/hertz-ai/HARTOS/releases/download/nightly/hart-os-1.0.0-server-x86_64-linux.iso.torrent) · [sha256](https://github.com/hertz-ai/HARTOS/releases/download/nightly/hart-os-1.0.0-server-x86_64-linux.iso.sha256) |
+| **Desktop** | Workstations, dev machines (GNOME desktop) | [ISO](https://github.com/hertz-ai/HARTOS/releases/download/nightly/hart-os-1.0.0-desktop-x86_64-linux.iso) · [torrent](https://github.com/hertz-ai/HARTOS/releases/download/nightly/hart-os-1.0.0-desktop-x86_64-linux.iso.torrent) · [sha256](https://github.com/hertz-ai/HARTOS/releases/download/nightly/hart-os-1.0.0-desktop-x86_64-linux.iso.sha256) |
+| **Edge** | Minimal observer nodes, embedded | [ISO](https://github.com/hertz-ai/HARTOS/releases/download/nightly/hart-os-1.0.0-edge-x86_64-linux.iso) · [torrent](https://github.com/hertz-ai/HARTOS/releases/download/nightly/hart-os-1.0.0-edge-x86_64-linux.iso.torrent) · [sha256](https://github.com/hertz-ai/HARTOS/releases/download/nightly/hart-os-1.0.0-edge-x86_64-linux.iso.sha256) |
 
-Torrents available alongside each ISO (web-seeded via GitHub CDN).
+Nightly ISOs verify against their companion `.sha256` but are **not** signed by the master key — for signed stable ISOs, browse the [release archive](https://github.com/hertz-ai/HARTOS/releases).
+
+Torrents are web-seeded via GitHub CDN.
 
 ## Nunba (Companion App)
 
