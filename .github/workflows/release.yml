@@ -403,14 +403,21 @@ jobs:
           pattern: iso-*
           merge-multiple: true
 
-      - name: Recreate nightly release as draft, upload assets, publish
+      - name: Create unique-tagged nightly release, upload, publish as latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eo pipefail
           REPO="${{ github.repository }}"
-          TAG="nightly"
           SHA="${{ github.sha }}"
+          SHORT_SHA="${SHA:0:7}"
+          # Per-push unique tag — GitHub's immutable-release feature
+          # permanently reserves any tag name used for a published
+          # release, so we cannot reuse "nightly". Each push gets its
+          # own nightly-${SHORT_SHA} tag. Docs link to
+          # /releases/latest/download/* which GitHub resolves to the
+          # release marked `--latest=true` (this one).
+          TAG="nightly-${SHORT_SHA}"
 
           echo "=== Artifacts downloaded ==="
           ls -la /tmp/all-artifacts/ || { echo "No artifacts"; exit 0; }
@@ -420,23 +427,22 @@ jobs:
             exit 0
           fi
 
-          # Delete existing nightly release (the tag `nightly` on the
-          # repo is already immutable after publish — we recycle it by
-          # deleting the release AND the tag, then making a fresh
-          # draft pointed at the current main-HEAD commit).
-          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            echo "Deleting prior nightly release (and tag) for refresh"
-            gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag || true
-          fi
+          # Clean up the tag-less draft from the prior refactor (has
+          # tag_name=nightly but tag never got created). Idempotent.
+          echo "=== Cleaning up any tag-less nightly drafts ==="
+          gh api "repos/${REPO}/releases" --jq '.[] | select(.draft==true and .tag_name=="nightly") | .id' \
+            | while read -r RID; do
+              [[ -n "$RID" ]] && gh api -X DELETE "repos/${REPO}/releases/${RID}" || true
+            done
 
-          echo "=== Creating nightly DRAFT (mutable while draft) ==="
+          echo "=== Creating $TAG DRAFT (mutable while draft) ==="
           gh release create "$TAG" \
             --repo "$REPO" \
             --target "$SHA" \
             --draft \
             --prerelease \
-            --title "HART OS nightly (main HEAD)" \
-            --notes "Rolling bleeding-edge ISOs built from \`main\` on every push. Not signed by the master key — for stable signed releases see [/releases/latest](https://github.com/${REPO}/releases/latest). Each ISO verifies against its companion \`.sha256\`."
+            --title "HART OS nightly ${SHORT_SHA}" \
+            --notes "Rolling bleeding-edge ISOs built from \`main\` @ ${SHORT_SHA} on every push. Not signed by the master key — for stable signed releases see the [release archive](https://github.com/${REPO}/releases). Each ISO verifies against its companion \`.sha256\`."
 
           echo "=== Uploading artifacts ==="
           find /tmp/all-artifacts -maxdepth 2 -type f | while read -r f; do
@@ -444,11 +450,22 @@ jobs:
             gh release upload "$TAG" "$f" --repo "$REPO" --clobber
           done
 
-          echo "=== Publishing release (becomes immutable) ==="
-          gh release edit "$TAG" --repo "$REPO" --draft=false --latest=false
+          echo "=== Publishing as latest (immutable after publish) ==="
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest=true --prerelease=false
+
+          echo "=== Pruning old nightly-* releases (keep newest 3) ==="
+          gh api "repos/${REPO}/releases" --paginate \
+            --jq '.[] | select(.tag_name | startswith("nightly-")) | {tag:.tag_name, created:.created_at}' \
+            | jq -s 'sort_by(.created) | reverse | .[3:] | .[].tag' -r \
+            | while read -r OLD_TAG; do
+              [[ -n "$OLD_TAG" && "$OLD_TAG" != "$TAG" ]] && {
+                echo "  pruning $OLD_TAG"
+                gh release delete "$OLD_TAG" --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
+              }
+            done
 
           echo "=== Done ==="
-          gh release view "$TAG" --repo "$REPO" --json tagName,assets --jq '{tag:.tagName, assets:[.assets[].name]}'
+          gh release view "$TAG" --repo "$REPO" --json tagName,assets,isLatest --jq '{tag:.tagName, latest:.isLatest, assets:[.assets[].name]}'
 
   # ═══════════════════════════════════════════════════════════
   # 4. Deploy Docs to GitHub Pages
