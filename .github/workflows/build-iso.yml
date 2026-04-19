@@ -1,0 +1,62 @@
+# .github/workflows/build-iso.yml
+name: Build HART OS ISO                                                                                                                                                                                        
+on:                                                                                                                                                                                                                push:
+    branches: [main, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Build variant'
+        required: true
+        default: 'desktop'
+        type: choice
+        options: [desktop, server, edge]
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y live-build xorriso syslinux-utils isolinux
+
+      - name: Set variant
+        id: vars
+        run: |
+          VARIANT="${{ github.event.inputs.variant || 'desktop' }}"
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          echo "variant=$VARIANT" >> $GITHUB_OUTPUT
+          echo "version=$VERSION"  >> $GITHUB_OUTPUT
+
+      - name: Build ISO
+        run: |
+          sudo bash deploy/distro/build-iso.sh \
+            --variant ${{ steps.vars.outputs.variant }} \
+            --version ${{ steps.vars.outputs.version }} \
+            --output dist/ \
+            --no-clean
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hart-os-${{ steps.vars.outputs.variant }}-${{ steps.vars.outputs.version }}
+          path: |
+            dist/*.iso
+            dist/*.sha256
+          retention-days: 14
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ steps.vars.outputs.variant }}
+          path: /tmp/hart-iso-build-*/build.log
+          retention-days: 7
