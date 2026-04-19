@@ -39,9 +39,9 @@ Nunba is the HART agentic client — same experience on HART OS and as a native 
 | Target | Delivery | Notes |
 |--------|----------|-------|
 | **HART OS (native)** | Pre-installed | Systemd user service `hart-nunba` starts on boot (port 5000) and renders inside the LiquidUI Glass Shell. Enable via `hart.nunba.enable = true` in the desktop/phone configs (default). Registered in the HART AppRegistry (group: System) so launchers and the agentic runtime dispatch to it. |
-| **Windows** | [Nunba Installer](https://github.com/hertz-ai/Nunba/releases/latest/download/Nunba_Setup.exe) | Windows 10/11, x64. Azure Trusted Signing. |
-| **macOS** | [Nunba.dmg](https://github.com/hertz-ai/Nunba/releases/latest/download/Nunba_Setup.dmg) | macOS 13+ (Apple Silicon native). Notarized. |
-| **Linux (AppImage)** | [AppImage](https://github.com/hertz-ai/Nunba/releases/latest/download/Nunba-x86_64.AppImage) | Any distro, x86_64. `chmod +x` and run. |
+| **Windows** | [Nunba Installer](https://github.com/hertz-ai/Nunba/releases/latest) _(built by the [Nunba repo's `Build & Sign Installers`](https://github.com/hertz-ai/Nunba/actions) workflow)_ | Windows 10/11, x64. Azure Trusted Signing. |
+| **macOS** | [Nunba.dmg](https://github.com/hertz-ai/Nunba/releases/latest) | macOS 13+ (Apple Silicon native). Notarized. |
+| **Linux (AppImage)** | [AppImage](https://github.com/hertz-ai/Nunba/releases/latest) | Any distro, x86_64. `chmod +x` and run. |
 | **Linux (.deb)** | [.deb package](https://github.com/hertz-ai/Nunba/releases/latest) | Debian/Ubuntu. `sudo dpkg -i nunba_*.deb` |
 
 On HART OS Nunba binds to the local `hart_intelligence_entry.py` runtime (port 6777). On other OSes it bundles the same runtime or points at a remote HART node via `NUNBA_BACKEND_URL`.
