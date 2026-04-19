@@ -321,6 +321,17 @@ def _register_native_apps(apps: AppRegistry) -> None:
     """
     NATIVE_APPS = [
         AppManifest(
+            id='nunba', name='Nunba', version='auto',
+            type=AppType.DESKTOP_APP.value, icon='hub',
+            entry={'exec': 'nunba',
+                   'http': 'http://localhost:5000',
+                   'backend': 'http://localhost:6777'},
+            group='System', platforms=['linux', 'windows', 'macos'],
+            permissions=['network', 'display'],
+            description='HART OS companion app — chat, communities, agents',
+            tags=['chat', 'agents', 'ui', 'nunba', 'hart'],
+        ),
+        AppManifest(
             id='rustdesk', name='RustDesk', version='auto',
             type=AppType.DESKTOP_APP.value, icon='desktop_windows',
             entry={'exec': 'rustdesk', 'bridge': 'rustdesk_bridge'},
