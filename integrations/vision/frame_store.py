@@ -17,16 +17,32 @@ from typing import Optional, Dict, Any, List, Tuple
 
 # Canonical frame utilities live in HevolveAI (downstream dep).
 # Re-export here so VisionService imports stay clean.
+#
+# We go through security.native_hive_loader.try_import_hevolveai_names so
+# that an armored bundle (HevolveArmor) is transparently unlocked before
+# the import — the scattered bare `import hevolveai.X` probes used to miss
+# the armored path when a key was needed.
+import logging as _logging
+_logger = _logging.getLogger(__name__)
+
+_visual_encoding_result = None
 try:
-    from hevolveai.embodied_ai.utils.visual_encoding import (
-        compute_frame_difference,
-        decode_jpeg,
+    from security.native_hive_loader import try_import_hevolveai_names
+    _visual_encoding_result = try_import_hevolveai_names(
+        'hevolveai.embodied_ai.utils.visual_encoding',
+        ('compute_frame_difference', 'decode_jpeg'),
     )
 except ImportError:
-    # Fallback if HevolveAI not installed (e.g. tests without full deps)
-    import logging as _logging
-    _logging.getLogger(__name__).warning(
-        "HevolveAI not installed — visual_encoding using numpy fallback")
+    # security package itself unavailable — treat as missing HevolveAI
+    _visual_encoding_result = None
+
+if _visual_encoding_result is not None:
+    compute_frame_difference, decode_jpeg = _visual_encoding_result
+else:
+    # Fallback if HevolveAI not installed (e.g. tests without full deps,
+    # or armored bundle present but key unavailable)
+    _logger.warning(
+        "HevolveAI not installed/armored — visual_encoding using numpy fallback")
     import numpy as np
 
     def compute_frame_difference(frame1: 'np.ndarray', frame2: 'np.ndarray') -> float:

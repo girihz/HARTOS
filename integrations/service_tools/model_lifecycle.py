@@ -271,6 +271,19 @@ class ModelLifecycleManager:
         self._last_pressure_alert: Dict[str, float] = {}  # type → timestamp
         self._pressure_alert_cooldown = 60.0  # seconds between alerts of same type
 
+        # ── G3: Direct llama-server supervision ───────────────────
+        # When Nunba's LlamaConfig is unavailable (standalone, Docker,
+        # or bundled mode where Nunba's supervisor failed) we launch
+        # llama-server ourselves via _launch_llama_server_direct.  We
+        # must also supervise it — otherwise a dead server is invisible
+        # to _check_llm_health and never gets restarted.
+        self._direct_llama_proc = None          # subprocess.Popen
+        self._direct_llama_port: Optional[int] = None
+        self._direct_llama_mode: Optional[str] = None  # 'gpu' | 'cpu'
+        self._direct_llama_log_fh = None
+        self._direct_llama_last_restart: float = 0.0
+        self._direct_llama_restart_cooldown_s: float = 10.0
+
         # ── Cross-restart persistence ─────────────────────────────
         # Load any persisted per-model access hints from the previous
         # Nunba boot.  Entries older than LIFECYCLE_STALENESS_S are
@@ -1093,16 +1106,28 @@ class ModelLifecycleManager:
             self._handle_dead_process(tool_name, exit_code, proc_type)
 
     def _check_llm_health(self, dead_models: list):
-        """Check llama.cpp server health (separate from RTM sidecar tools)."""
+        """Check llama.cpp server health (separate from RTM sidecar tools).
+
+        Supervises BOTH:
+          1. Nunba-managed server via LlamaConfig (primary in bundled mode).
+          2. Direct-launch server (self._direct_llama_proc) when Nunba's
+             LlamaConfig module isn't available (G3 — standalone / Docker /
+             bundled-without-supervisor).
+
+        Either source adding to ``dead_models`` triggers _handle_dead_process,
+        which queues a restart through _process_restart_queue.
+        """
         with self._lock:
             state = self._models.get('llm')
             if not state or state.device == ModelDevice.UNLOADED:
                 return
 
+        nunba_handled = False
         try:
             from llama.llama_config import LlamaConfig
             config = LlamaConfig()
             if config.server_process is not None:
+                nunba_handled = True
                 exit_code = config.server_process.poll()
                 if exit_code is not None:
                     dead_models.append(('llm', exit_code, 'llm_server'))
@@ -1110,8 +1135,49 @@ class ModelLifecycleManager:
                 # No process object but we think it's loaded — verify via HTTP
                 if not config.check_server_running():
                     dead_models.append(('llm', None, 'llm_server'))
+                else:
+                    nunba_handled = True
         except ImportError:
             pass
+
+        # G3: Direct-launch supervision (fires when Nunba not in charge).
+        if nunba_handled:
+            return
+        proc = self._direct_llama_proc
+        port = self._direct_llama_port
+        if proc is not None:
+            exit_code = proc.poll()
+            if exit_code is not None:
+                logger.warning(
+                    f"[G3] direct llama-server died: PID={proc.pid} "
+                    f"exit_code={exit_code} port={port}")
+                # Clear stale handle so _handle_dead_process → restart
+                # can cleanly relaunch via _launch_llama_server_direct.
+                try:
+                    fh = self._direct_llama_log_fh
+                    if fh is not None and not fh.closed:
+                        fh.close()
+                except Exception:
+                    pass
+                self._direct_llama_proc = None
+                self._direct_llama_log_fh = None
+                dead_models.append(('llm', exit_code, 'llm_server_direct'))
+        elif port is not None and state.device != ModelDevice.UNLOADED:
+            # We once launched directly but lost the handle — verify via HTTP.
+            # A missing handle + unreachable port == dead server.
+            try:
+                import urllib.request as _ur
+                import urllib.error as _ue
+                url = f'http://127.0.0.1:{port}/health'
+                try:
+                    with _ur.urlopen(url, timeout=2) as resp:
+                        if resp.status != 200:
+                            dead_models.append(
+                                ('llm', None, 'llm_server_direct'))
+                except (_ue.URLError, _ue.HTTPError, OSError):
+                    dead_models.append(('llm', None, 'llm_server_direct'))
+            except Exception as e:
+                logger.debug(f"[G3] direct HTTP health check skipped: {e}")
 
     def _handle_dead_process(self, tool_name: str, exit_code: Optional[int],
                              proc_type: str):
@@ -1334,6 +1400,13 @@ class ModelLifecycleManager:
             # Store handle so it stays open for the child process
             self._direct_log_fh = log_fh
             log_fh = None  # Prevent close in finally
+            # G3: Track the Popen so _check_llm_health can detect death
+            # and _process_restart_queue can resurrect it.
+            self._direct_llama_proc = proc
+            self._direct_llama_port = port
+            self._direct_llama_mode = mode
+            self._direct_llama_log_fh = self._direct_log_fh
+            self._direct_llama_last_restart = time.time()
             logger.info(f"llama-server started: PID={proc.pid} port={port} "
                         f"gpu_layers={gpu_layers} log={log_path}")
             return True
