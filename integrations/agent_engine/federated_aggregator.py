@@ -620,24 +620,21 @@ class FederatedAggregator:
         return result
 
     def apply_aggregated(self, aggregated: dict):
-        """Store aggregated metrics locally for dashboard + benchmark consumption."""
+        """Store aggregated metrics locally for dashboard + benchmark consumption.
+
+        Single code path: routes through WorldModelBridge.apply_federation_update()
+        which owns storage AND the EventBus emit. This prevents the earlier
+        dead path where apply_aggregated mutated bridge._federation_aggregated
+        directly and emitted 'federation.aggregated' on its own, while the
+        bridge's apply_federation_update() was never called by any caller.
+        """
         self._last_aggregated = aggregated
         try:
             from .world_model_bridge import get_world_model_bridge
             bridge = get_world_model_bridge()
-            bridge._federation_aggregated = aggregated
-        except Exception:
-            pass
-
-        # Broadcast to EventBus — hive intelligence updated
-        try:
-            from core.platform.events import emit_event
-            emit_event('federation.aggregated', {
-                'epoch': aggregated.get('epoch', 0),
-                'peer_count': aggregated.get('peer_count', 0),
-            })
-        except Exception:
-            pass
+            bridge.apply_federation_update(aggregated)
+        except Exception as exc:
+            logger.debug(f"[FederatedAggregator] bridge.apply_federation_update failed: {exc}")
 
         # Feed hive-aggregated coding benchmarks back to local tool router
         coding_data = aggregated.get('benchmark_results', {}).get('coding_benchmarks')

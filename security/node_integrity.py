@@ -37,11 +37,29 @@ _CODE_ROOT = os.environ.get('HEVOLVE_CODE_ROOT', os.path.dirname(
 _private_key: Optional[Ed25519PrivateKey] = None
 _public_key: Optional[Ed25519PublicKey] = None
 
-# Directories excluded from code hash computation
+# Directories excluded from code hash computation.
+#
+# Defense-in-depth (2026-04-19): when compute_code_hash is called in a
+# cx_Freeze bundle and HEVOLVE_CODE_HASH_PRECOMPUTED is NOT set (e.g.,
+# env var missing because app.py's setup block raised), the fallback
+# walk runs against the install root.  In a cx_Freeze layout that root
+# contains `python-embed/` (stdlib + site-packages, 10k+ .py files),
+# `lib/` (bundled .pyc modules), `lib_src/` (pycparser + cryptography
+# source copies), `build/` (intermediate artifacts), `landing-page/`
+# (React build output), `node_modules/` (already excluded).  Without
+# these in the exclude set, a single code-hash walk on cold cache
+# takes 2-5 minutes per caller, and 5+ peer-discovery threads running
+# in parallel stalled boot for 10+ minutes in startup_trace.log from
+# 2026-04-19T17:00:29.  The exclude-set expansion keeps that walk
+# bounded to Nunba/HARTOS source only.
 _EXCLUDE_DIRS = {
     '__pycache__', 'venv310', 'venv', '.venv', '.git', '.idea',
     'agent_data', 'tests', 'node_modules', 'hevolve_backend.egg-info',
     'autogen-0.2.37', '.pycharm_plugin',
+    # cx_Freeze bundle dirs (Nunba desktop install) — defense-in-depth
+    # in case HEVOLVE_CODE_HASH_PRECOMPUTED is not set by the host app.
+    'python-embed', 'lib', 'lib_src', 'build', 'landing-page',
+    'Output', 'dist', '.pytest_cache', '.ruff_cache', '.mypy_cache',
 }
 
 
