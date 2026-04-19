@@ -301,15 +301,120 @@ def _decrypt_binary_to_tmpfs(enc_path: str) -> Optional[str]:
         return None
 
 
+_armor_install_tried = False
+_armor_install_ok = False
+
+
+def _try_install_hevolvearmor() -> Tuple[bool, str]:
+    """Install the HevolveArmor import hook if an armored bundle is present.
+
+    Looks for a HevolveArmor-armored hevolveai at one of:
+      - $HEVOLVE_ARMORED_DIR                (explicit override)
+      - {HART_ROOT}/vendor/hevolveai_armored/modules
+      - {HART_ROOT}/hevolveai_armored/modules
+      - ~/.hevolveai/armored/modules
+      - /opt/hevolveai/armored/modules
+
+    Key resolution (in order):
+      1. $HEVOLVE_ARMOR_KEY_FILE  — path to raw 32-byte or hex-encoded key file
+      2. $HEVOLVE_ARMOR_PASSPHRASE — PBKDF2-derived from passphrase + salt file
+      3. derive_runtime_key()     — HevolveArmor's machine-bound derivation
+
+    Idempotent: safe to call repeatedly; returns cached result after first try.
+
+    Returns (installed, message).
+    """
+    global _armor_install_tried, _armor_install_ok
+    if _armor_install_tried:
+        return _armor_install_ok, 'armor install cached'
+    _armor_install_tried = True
+
+    try:
+        import hevolvearmor
+    except ImportError:
+        _armor_install_ok = False
+        return False, 'hevolvearmor package not installed'
+
+    # Locate encrypted modules directory
+    candidate_dirs = [
+        os.environ.get('HEVOLVE_ARMORED_DIR', ''),
+        os.path.join(_HART_ROOT, 'vendor', 'hevolveai_armored', 'modules'),
+        os.path.join(_HART_ROOT, 'hevolveai_armored', 'modules'),
+        os.path.expanduser('~/.hevolveai/armored/modules'),
+        '/opt/hevolveai/armored/modules',
+    ]
+    modules_dir = None
+    for d in candidate_dirs:
+        if d and os.path.isdir(d):
+            # Must contain at least one .enc file under hevolveai/
+            hevolveai_dir = os.path.join(d, 'hevolveai')
+            if os.path.isdir(hevolveai_dir):
+                modules_dir = d
+                break
+    if modules_dir is None:
+        _armor_install_ok = False
+        return False, 'no armored hevolveai bundle found'
+
+    # Resolve key
+    key: Optional[bytes] = None
+    key_file = os.environ.get('HEVOLVE_ARMOR_KEY_FILE', '')
+    if key_file and os.path.isfile(key_file):
+        try:
+            with open(key_file, 'rb') as f:
+                raw = f.read().strip()
+            if len(raw) == 32:
+                key = raw
+            elif len(raw) == 64:
+                key = bytes.fromhex(raw.decode('ascii'))
+        except Exception as e:
+            logger.debug(f"[armor] key file read failed: {e}")
+
+    if key is None:
+        passphrase = os.environ.get('HEVOLVE_ARMOR_PASSPHRASE', '')
+        if passphrase:
+            try:
+                key = hevolvearmor.armor_derive_key_passphrase(
+                    passphrase, b'hevolveai-armor-salt-v1')
+            except Exception as e:
+                logger.debug(f"[armor] passphrase derivation failed: {e}")
+
+    if key is None:
+        try:
+            key = hevolvearmor.derive_runtime_key()
+        except Exception as e:
+            logger.debug(f"[armor] runtime key derivation failed: {e}")
+
+    if key is None or len(bytes(key)) != 32:
+        _armor_install_ok = False
+        return False, 'no usable armor decryption key'
+
+    try:
+        hevolvearmor.install(modules_dir, bytes(key))
+        _armor_install_ok = True
+        logger.info(
+            f"[armor] HevolveArmor import hook installed: modules_dir={modules_dir}")
+        return True, f'armor installed: {modules_dir}'
+    except Exception as e:
+        _armor_install_ok = False
+        return False, f'armor install failed: {e}'
+
+
 def _try_load_cython_package() -> Tuple[bool, str]:
     """Try to import the Cython-compiled hevolveai wheel.
 
     This is the PRIMARY load path. The wheel is installed via pip and
     contains .so/.pyd Cython extensions — standard Python imports, no ctypes.
 
+    Before attempting the import, we call `_try_install_hevolvearmor()` so
+    that an armored bundle (if present) is transparently decryptable via
+    the import hook.
+
     Returns (success, message).
     """
     global _cython_module, _native_available, _stub_mode, _load_method
+
+    # Install armor import hook first (no-op if already tried or absent).
+    _try_install_hevolvearmor()
 
     try:
         import hevolveai
@@ -558,7 +663,96 @@ def get_status() -> Dict:
         'load_method': _load_method,
         'binary_path': _find_native_binary(),
         'cython_package': bool(_cython_module),
+        'armor_installed': _armor_install_ok,
         'version': native_version(),
         'platform_lib': _LIB_NAME,
         'search_paths': [p for p in _SEARCH_PATHS if p],
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Canonical HevolveAI submodule loader (G2 — unified probe)
+# ═══════════════════════════════════════════════════════════════════════
+
+def try_import_hevolveai(dotted_path: str = 'hevolveai') -> Optional[Any]:
+    """Canonical helper to import HevolveAI (or a submodule) with armor support.
+
+    Replaces scattered ``try: import hevolveai.X except ImportError`` probes
+    across HARTOS (vision/frame_store, agent_engine/world_model_bridge,
+    hart_intelligence_entry, etc.) with a single entry point that:
+
+      1. Ensures HevolveArmor's import hook is installed (if an armored
+         bundle is present on disk and decryption keys are resolvable).
+      2. Guarantees the top-level ``hevolveai`` package is loaded exactly
+         once via the same code path as ``load_native_lib()``.
+      3. Imports the requested dotted submodule via ``importlib``.
+
+    Returns the imported module object, or ``None`` on any failure.
+    All failures are logged at debug level — callers decide whether to
+    log at a higher level based on their fallback semantics.
+
+    Examples:
+        >>> visual_encoding = try_import_hevolveai(
+        ...     'hevolveai.embodied_ai.utils.visual_encoding')
+        >>> if visual_encoding is None:
+        ...     # fall back to local numpy implementation
+        ...     ...
+
+        >>> hive_mind = try_import_hevolveai(
+        ...     'hevolveai.embodied_ai.learning.hive_mind')
+    """
+    if not dotted_path or not dotted_path.startswith('hevolveai'):
+        logger.debug(f"[try_import_hevolveai] invalid path: {dotted_path!r}")
+        return None
+
+    # Ensure the top-level package is loaded via the canonical path so
+    # armor install + compiled-check happen exactly once per process.
+    if _cython_module is None:
+        ok, msg = _try_load_cython_package()
+        if not ok:
+            logger.debug(f"[try_import_hevolveai] hevolveai unavailable: {msg}")
+            return None
+
+    if dotted_path == 'hevolveai':
+        return _cython_module
+
+    try:
+        import importlib
+        return importlib.import_module(dotted_path)
+    except ImportError as e:
+        logger.debug(f"[try_import_hevolveai] {dotted_path}: {e}")
+        return None
+    except Exception as e:
+        logger.debug(f"[try_import_hevolveai] {dotted_path} unexpected: {e}")
+        return None
+
+
+def try_import_hevolveai_names(
+    dotted_path: str,
+    names: Tuple[str, ...],
+) -> Optional[Tuple[Any, ...]]:
+    """Import a hevolveai submodule and extract specific attributes.
+
+    Convenience wrapper for the common ``from X.Y import A, B`` pattern.
+    Returns a tuple of attribute values, or ``None`` if the module or
+    any named attribute is missing.
+
+    Example:
+        >>> result = try_import_hevolveai_names(
+        ...     'hevolveai.embodied_ai.utils.visual_encoding',
+        ...     ('compute_frame_difference', 'decode_jpeg'),
+        ... )
+        >>> if result is None:
+        ...     # use fallback
+        ...     ...
+        ... else:
+        ...     compute_frame_difference, decode_jpeg = result
+    """
+    mod = try_import_hevolveai(dotted_path)
+    if mod is None:
+        return None
+    try:
+        return tuple(getattr(mod, n) for n in names)
+    except AttributeError as e:
+        logger.debug(f"[try_import_hevolveai_names] {dotted_path}: {e}")
+        return None
