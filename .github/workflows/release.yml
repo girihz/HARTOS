@@ -219,7 +219,13 @@ jobs:
       (github.event_name == 'push')
     # ISO build runs independently — tests run in parallel, don't block ISO
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # iso-desktop consistently hits the 90-min cap (run 24634878558
+    # cancelled at 90m17s mid-build) — the glibcLocales overlay forces
+    # a from-source rebuild that cache.nixos.org can't serve, adding
+    # ~30 min to the baseline. iso-server/iso-edge stay well under
+    # 15 min so bumping the shared cap doesn't waste any runner time
+    # on the fast variants.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
