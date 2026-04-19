@@ -411,13 +411,16 @@ jobs:
           REPO="${{ github.repository }}"
           SHA="${{ github.sha }}"
           SHORT_SHA="${SHA:0:7}"
-          # Per-push unique tag — GitHub's immutable-release feature
+          RUN_ID="${{ github.run_id }}"
+          # Globally-unique tag — GitHub's immutable-release feature
           # permanently reserves any tag name used for a published
-          # release, so we cannot reuse "nightly". Each push gets its
-          # own nightly-${SHORT_SHA} tag. Docs link to
-          # /releases/latest/download/* which GitHub resolves to the
+          # release, so we cannot reuse "nightly" OR "nightly-${SHORT_SHA}"
+          # (which would collide on workflow re-run of the same commit).
+          # github.run_id is unique per workflow execution, so this tag
+          # is guaranteed fresh even under "Re-run all jobs". Docs link
+          # to /releases/latest/download/* which GitHub resolves to the
           # release marked `--latest=true` (this one).
-          TAG="nightly-${SHORT_SHA}"
+          TAG="nightly-${SHORT_SHA}-${RUN_ID}"
 
           echo "=== Artifacts downloaded ==="
           ls -la /tmp/all-artifacts/ || { echo "No artifacts"; exit 0; }
