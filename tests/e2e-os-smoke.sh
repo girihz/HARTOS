@@ -22,7 +22,7 @@ SSH_PASS="${SSH_PASS:-hart}"
 
 PASS=0
 FAIL=0
-TOTAL=15
+TOTAL=17
 
 # Colors
 GREEN='\033[0;32m'
@@ -227,6 +227,47 @@ else
         check 15 "Conky config (not expected on $VARIANT)" "skipped" "skipped"
     else
         check 15 "Conky config deployed" "MISSING" "found"
+    fi
+fi
+
+# ─── Check 16: Nunba native app — binary on PATH ──────────────
+# Proves the nunba package was installed by the nix module, so
+# AppRegistry.shutil.which('nunba') resolves on this system and the
+# agentic runtime can dispatch through it. Only expected on variants
+# that set `hart.nunba.enable = true` (desktop, phone).
+NUNBA_VAR=$(ssh_cmd "cat /var/lib/hart/variant 2>/dev/null || echo unknown")
+NUNBA_VAR=$(echo "$NUNBA_VAR" | tr -d '[:space:]')
+NUNBA_BIN=$(ssh_cmd "which nunba 2>/dev/null || echo MISSING")
+NUNBA_BIN=$(echo "$NUNBA_BIN" | tr -d '[:space:]')
+if [[ "$NUNBA_VAR" == "server" || "$NUNBA_VAR" == "edge" ]]; then
+    check 16 "Nunba binary (not expected on $NUNBA_VAR)" "skipped" "skipped"
+elif [[ "$NUNBA_BIN" != "MISSING" ]] && [[ -n "$NUNBA_BIN" ]]; then
+    check 16 "Nunba native binary on PATH" "$NUNBA_BIN" "/nix/"
+else
+    check 16 "Nunba native binary on PATH" "MISSING" "/nix/"
+fi
+
+# ─── Check 17: Nunba systemd user service + .desktop entry ────
+# The hart-nunba systemd USER service autostarts on login and serves
+# the Flask API that LiquidUI renders. The .desktop entry is what
+# GNOME/the shell catalog uses to launch Nunba outside LiquidUI.
+if [[ "$NUNBA_VAR" == "server" || "$NUNBA_VAR" == "edge" ]]; then
+    check 17 "Nunba systemd user unit (not expected on $NUNBA_VAR)" "skipped" "skipped"
+else
+    # systemctl --user cat requires a user session — check the unit file
+    # on disk instead, which is deterministic and session-agnostic.
+    UNIT_FOUND=$(ssh_cmd "find /etc/systemd /run/current-system /nix/store -maxdepth 6 -name 'hart-nunba.service' -print -quit 2>/dev/null || echo MISSING")
+    UNIT_FOUND=$(echo "$UNIT_FOUND" | tr -d '[:space:]')
+    DESKTOP_FOUND=$(ssh_cmd "find /run/current-system/sw/share/applications -name 'nunba.desktop' -print -quit 2>/dev/null || echo MISSING")
+    DESKTOP_FOUND=$(echo "$DESKTOP_FOUND" | tr -d '[:space:]')
+    if [[ "$UNIT_FOUND" != "MISSING" && "$DESKTOP_FOUND" != "MISSING" ]]; then
+        check 17 "Nunba user unit + .desktop entry deployed" "both found" "both found"
+    elif [[ "$UNIT_FOUND" != "MISSING" ]]; then
+        check 17 "Nunba user unit + .desktop entry deployed" "unit only (no .desktop)" "both found"
+    elif [[ "$DESKTOP_FOUND" != "MISSING" ]]; then
+        check 17 "Nunba user unit + .desktop entry deployed" ".desktop only (no unit)" "both found"
+    else
+        check 17 "Nunba user unit + .desktop entry deployed" "neither found" "both found"
     fi
 fi
 
