@@ -25,6 +25,36 @@
   boot.supportedFilesystems.zfs = lib.mkForce false;
   nixpkgs.config.allowBroken = false;
 
+  # ─── Override glibcLocales to only build supported locales ───
+  # Something in the desktop closure (wine, GNOME, or one of the font
+  # packages) transitively pulls in the FULL `glibcLocales` package,
+  # which always builds all ~700 locales regardless of
+  # `i18n.supportedLocales`. On GHA runners the locale-gen pass OOM-
+  # exits partway through `zu_ZA.UTF-8` (classic ENOSPC at
+  # ~/nix/store saturation) — this has blocked iso-desktop builds
+  # for months.
+  #
+  # Overriding the package itself means every consumer of
+  # glibcLocales now gets the same 18-locale subset, matching what
+  # `i18n.supportedLocales` already promises below. No behavioral
+  # drift for the runtime — the locales we ship are unchanged.
+  nixpkgs.overlays = [
+    (final: prev: {
+      glibcLocales = prev.glibcLocales.override {
+        allLocales = false;
+        locales = [
+          "en_US.UTF-8/UTF-8" "en_GB.UTF-8/UTF-8"
+          "de_DE.UTF-8/UTF-8" "fr_FR.UTF-8/UTF-8" "es_ES.UTF-8/UTF-8"
+          "pt_BR.UTF-8/UTF-8" "it_IT.UTF-8/UTF-8" "nl_NL.UTF-8/UTF-8"
+          "ja_JP.UTF-8/UTF-8" "ko_KR.UTF-8/UTF-8"
+          "zh_CN.UTF-8/UTF-8" "zh_TW.UTF-8/UTF-8"
+          "hi_IN.UTF-8/UTF-8" "ar_SA.UTF-8/UTF-8" "ru_RU.UTF-8/UTF-8"
+          "tr_TR.UTF-8/UTF-8" "th_TH.UTF-8/UTF-8" "vi_VN.UTF-8/UTF-8"
+        ];
+      };
+    })
+  ];
+
   # ─── Workaround: systemd-hwdb update fails on CI/WSL2 build hosts ───
   # Replace the hwdb.bin derivation with a minimal stub.
   # The real hwdb.bin will be regenerated on first boot by udev.
