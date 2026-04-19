@@ -468,7 +468,9 @@ jobs:
             done
 
           echo "=== Done ==="
-          gh release view "$TAG" --repo "$REPO" --json tagName,assets,isLatest --jq '{tag:.tagName, latest:.isLatest, assets:[.assets[].name]}'
+          # `isLatest` isn't a valid gh CLI --json field — use REST.
+          gh api "repos/${REPO}/releases/latest" \
+            --jq '{tag:.tag_name, assets:[.assets[].name], published:.published_at}' || true
 
   # ═══════════════════════════════════════════════════════════
   # 4. Deploy Docs to GitHub Pages
