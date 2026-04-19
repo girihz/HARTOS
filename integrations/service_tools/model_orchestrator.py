@@ -76,6 +76,31 @@ class ModelLoader:
         """
         return bool(getattr(entry, 'loaded', False))
 
+    def validate(self, entry: ModelEntry) -> tuple:
+        """Post-load capability probe.
+
+        Called by the install pipeline after a successful ``load()`` to
+        prove the loaded model actually answers for its declared
+        capability — not merely "bytes on disk + subprocess alive".
+
+        Modality-specific subclasses (VLMLoader, TTSLoader, STTLoader,
+        LlamaLoader) SHOULD override this with a canned, deterministic
+        round-trip (e.g. VLM: describe a 32×32 JPEG; TTS: synthesize a
+        fixed phrase; STT: transcribe the TTS output; LLM: complete a
+        canned prompt).
+
+        Default returns ``(True, 'no capability probe defined')`` so
+        loaders without an override don't gate installs.  Any override
+        must be deterministic (fixed input) and fast (<5s wall clock)
+        so the install-probe doesn't hang.
+
+        Returns:
+            (ok: bool, reason: str) — ``ok=True`` on pass; ``reason``
+            is a one-line human-readable diagnostic used by the
+            install-progress UI and the dispatcher's fallback logging.
+        """
+        return (True, 'no capability probe defined')
+
 
 class ModelOrchestrator:
     """Compute-aware model loader that works for ANY model type.
