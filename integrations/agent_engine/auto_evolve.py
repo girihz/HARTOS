@@ -43,6 +43,38 @@ AUTO_EVOLVE_MAX_PARALLEL_DISPATCH = 4
 AUTO_EVOLVE_SUPERMAJORITY_RATIO = 2.0 / 3.0
 
 
+def _is_sqlite_backend() -> bool:
+    """Return True when the active DB engine is SQLite (flat tier).
+
+    FIX-1.4a support: SQLite serializes writes at the file level, so
+    parallel dispatch that commits concurrently produces ``database is
+    locked`` errors.  Callers use this to fall back to a single worker
+    and preserve the DISPATCH contract without the race.
+
+    Detection order:
+      1. Ask SQLAlchemy directly via the shared ``engine`` (authoritative).
+      2. Sniff the ``HEVOLVE_DB_URL`` env var (covers first-boot path
+         where the engine hasn't been created yet).
+      3. Default to ``True`` — SQLite is the flat-tier default, so the
+         safer assumption on failure is "serialize."
+    """
+    try:
+        from integrations.social.models import engine as _engine
+        dialect = getattr(getattr(_engine, 'dialect', None), 'name', '') or ''
+        if dialect:
+            return dialect.lower() == 'sqlite'
+    except Exception:
+        pass
+    try:
+        import os
+        url = os.environ.get('HEVOLVE_DB_URL', '') or ''
+        if url:
+            return url.lower().startswith('sqlite')
+    except Exception:
+        pass
+    return True  # flat-tier default = SQLite
+
+
 @dataclass
 class EvolveSession:
     """Tracks one auto-evolve cycle."""
@@ -296,11 +328,35 @@ class AutoEvolveOrchestrator:
 
         Mutations on `session` (dispatched/failed/experiments/errors) are
         serialized by acquiring self._lock around each bookkeeping update.
+
+        FIX-1.4a: On SQLite (flat tier), ``db.commit()`` serializes the
+        whole database file, and multiple concurrent commits produce
+        ``database is locked`` SQLALchemy errors.  Detect the engine URL
+        and drop ``max_workers`` to 1 when SQLite is the backend.  MySQL
+        (regional/central) keeps the bounded parallel dispatch.
+
+        FIX-1.4b: ``_dispatch_experiment`` returns ``{'success': False,
+        'reason': ...}`` on logical failure (e.g. already-dispatched
+        experiment, missing goal recipe) WITHOUT raising.  The earlier
+        code counted those as successful dispatches, so a session with
+        100 % logical-failure returns would sit at status='running' with
+        ``dispatched == N`` and ``failed == 0`` forever.  Branch on the
+        ``success`` flag: only count dispatched on True, else route to
+        the ``failed`` counter + errors list so the terminal-state rule
+        at line 192 (``running if dispatched > 0 else failed``) fires
+        correctly.
         """
         if not winners:
             return
 
-        max_workers = min(len(winners), AUTO_EVOLVE_MAX_PARALLEL_DISPATCH)
+        max_parallel = AUTO_EVOLVE_MAX_PARALLEL_DISPATCH
+        if _is_sqlite_backend():
+            max_parallel = 1  # FIX-1.4a: serialize on flat/SQLite
+            logger.debug(
+                f"[{session.session_id}] SQLite backend detected — "
+                f"serializing dispatch to avoid 'database is locked'")
+
+        max_workers = min(len(winners), max_parallel)
         with ThreadPoolExecutor(
                 max_workers=max_workers,
                 thread_name_prefix=f'auto-evolve-{session.session_id}') as pool:
@@ -312,18 +368,48 @@ class AutoEvolveOrchestrator:
                 exp = futures[future]
                 try:
                     goal_result = future.result()
+                    # FIX-1.4b: distinguish logical success from logical failure.
+                    # _dispatch_experiment returns dict — missing/falsy 'success'
+                    # key = logical failure, not dispatched.
+                    success = (
+                        isinstance(goal_result, dict)
+                        and bool(goal_result.get('success'))
+                    )
                     with self._lock:
-                        session.dispatched += 1
-                        session.experiments.append({
-                            'id': exp['id'],
-                            'title': exp.get('title', ''),
-                            'type': exp.get('experiment_type', 'traditional'),
-                            'approval_score': exp.get('_approval_score', 0),
-                            'super_majority': exp.get('_super_majority', 0),
-                            'goal_id': goal_result.get('goal_id')
-                            if isinstance(goal_result, dict) else None,
-                            'status': 'dispatched',
-                        })
+                        if success:
+                            session.dispatched += 1
+                            session.experiments.append({
+                                'id': exp['id'],
+                                'title': exp.get('title', ''),
+                                'type': exp.get('experiment_type', 'traditional'),
+                                'approval_score': exp.get('_approval_score', 0),
+                                'super_majority': exp.get('_super_majority', 0),
+                                'goal_id': goal_result.get('goal_id')
+                                if isinstance(goal_result, dict) else None,
+                                'status': 'dispatched',
+                            })
+                        else:
+                            session.failed += 1
+                            reason = (
+                                goal_result.get('reason')
+                                if isinstance(goal_result, dict)
+                                else 'non-dict result'
+                            ) or 'unknown'
+                            session.errors.append(
+                                f"Dispatch {exp['id']}: {reason}")
+                            session.experiments.append({
+                                'id': exp['id'],
+                                'title': exp.get('title', ''),
+                                'type': exp.get('experiment_type', 'traditional'),
+                                'approval_score': exp.get('_approval_score', 0),
+                                'super_majority': exp.get('_super_majority', 0),
+                                'goal_id': None,
+                                'status': 'failed',
+                                'reason': reason,
+                            })
+                            logger.info(
+                                f"[{session.session_id}] Dispatch declined "
+                                f"for {exp['id']}: {reason}")
                 except Exception as e:
                     with self._lock:
                         session.failed += 1
