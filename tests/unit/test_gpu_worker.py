@@ -498,12 +498,21 @@ def test_ft16_observer_fires_on_spawn_crash_stop():
 
 import pytest
 
-@pytest.mark.skip(reason="try_free_vram internal logic changed — mock path needs rewrite")
 def test_ft19_try_free_vram_stops_lru_workers():
     """try_free_vram() should stop live workers oldest-idle-first until
-    the VRAM budget is met. Mocks vram_manager to avoid needing a GPU."""
-    from unittest.mock import patch
+    the VRAM budget is met.  Mocks the vram_manager singleton to avoid
+    needing a GPU.
+
+    Patch strategy: the function does
+        `from integrations.service_tools.vram_manager import vram_manager`
+    so we patch the attribute on the singleton instance that lives on
+    the submodule — not sys.modules (the packge __init__ rebinds the
+    name so sys.modules patching is fragile)."""
+    import sys
     from integrations.service_tools import gpu_worker as gw
+
+    vm_mod = sys.modules['integrations.service_tools.vram_manager']
+    real_free_fn = vm_mod.vram_manager.get_free_vram
 
     # Spawn 3 workers with staggered _last_used timestamps (oldest first)
     workers = []
@@ -524,25 +533,30 @@ def test_ft19_try_free_vram_stops_lru_workers():
             # Stagger last_used so evict_test_0 is oldest
             w._last_used = time.monotonic() - (3 - i)
 
-        # Mock vram_manager.get_free_vram to start low, jump up each stop
+        # vram sequence: first read low → after 1 stop still low →
+        # after 2 stops free up → stays freed for final check.
         call_count = {'n': 0}
-        vram_sequence = [0.2, 0.5, 1.2, 2.5]  # 4 reads: low, after stop 1, 2, 3
+        vram_sequence = [0.2, 0.5, 1.2, 2.5]
 
-        class _FakeVM:
-            def get_free_vram(self):
-                idx = min(call_count['n'], len(vram_sequence) - 1)
-                call_count['n'] += 1
-                return vram_sequence[idx]
+        def fake_free():
+            idx = min(call_count['n'], len(vram_sequence) - 1)
+            call_count['n'] += 1
+            return vram_sequence[idx]
 
-        with patch.dict('sys.modules', {'integrations.service_tools.vram_manager':
-                type('M', (), {'vram_manager': _FakeVM()})()}):
+        vm_mod.vram_manager.get_free_vram = fake_free
+        try:
             freed = gw.try_free_vram(
                 needed_gb=1.0,
                 exclude_tool='evict_test_2',  # keep newest alive
             )
+        finally:
+            vm_mod.vram_manager.get_free_vram = real_free_fn
 
-        assert freed is True, f"should have freed enough VRAM, calls={call_count['n']}"
-        # evict_test_0 (oldest) and evict_test_1 should have been stopped
+        assert freed is True, (
+            f"should have freed enough VRAM, calls={call_count['n']}"
+        )
+        # evict_test_0 (oldest) must have been stopped; _1 may or may
+        # not, depending on how quickly the budget was met.
         assert not workers[0].is_alive(), "oldest should be evicted first"
         # evict_test_2 must NOT be stopped (it's in exclude_tool)
         assert workers[2].is_alive(), "exclude_tool must stay running"
