@@ -776,6 +776,21 @@ class TTSRouter:
             )
 
         lang = language or detect_language(text)
+
+        # Normalize numbers, currency, URLs, units to spoken form BEFORE
+        # engine selection — every TTS engine benefits (single converging
+        # path).  Latency-sensitive ('instant' urgency) skips the LLM
+        # fallback but keeps the fast rule pass.
+        try:
+            from integrations.channels.media.tts_text_normalizer import (
+                normalize_for_tts,
+            )
+            text = normalize_for_tts(
+                text, lang, use_llm=(urgency != 'instant'),
+            )
+        except Exception as _e:  # never let normalization block synthesis
+            logger.debug(f'tts normalization skipped: {_e}')
+
         require_clone = voice is not None and voice not in ('default', '', None)
 
         # Engine override
