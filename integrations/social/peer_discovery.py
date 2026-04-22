@@ -411,14 +411,13 @@ class GossipProtocol:
     def _announce_to_all(self):
         peers = self._load_peers_from_db(exclude_dead=False)
         urls = set(p['url'] for p in peers)
-        # Skip genesis/seed peers in flat mode — a single-user desktop
-        # has no reason to announce to central.hevolve.ai (which is
-        # unreachable offline anyway). Prevents the recurring
-        # 'NameResolutionError: Failed to resolve central.hevolve.ai'
-        # warnings that flood the logs every gossip interval. Regional
-        # and central tiers still announce to seeds for network bootstrap.
+        # Skip genesis/seed peers in flat mode regardless of how they
+        # entered the set (env, prior DB persist, defaults). Prevents
+        # the recurring NameResolutionError flood for central.hevolve.ai.
         _tier = os.environ.get('HEVOLVE_NODE_TIER', 'flat')
-        if _tier != 'flat':
+        if _tier == 'flat':
+            urls.difference_update(self.seed_peers)
+        else:
             urls.update(self.seed_peers)
         for url in urls:
             if not self._running:
@@ -562,7 +561,13 @@ class GossipProtocol:
         Used by RALT skill distribution and skill queries.
         Posts to /api/social/peers/broadcast on each target node.
 
-        Returns number of successfully contacted peers.
+        Returns number of peers that responded with HTTP 2xx.
+
+        Audit fix #8 (April 2026): previously this counted every HTTP
+        response as "sent" — even 404s when the peer didn't implement
+        the broadcast endpoint. Callers thought they succeeded when
+        they hadn't. Now only 2xx counts, and non-2xx is recorded as
+        a peer failure so the back-off path kicks in.
         """
         peers = self._load_peers_from_db(exclude_dead=True)
         if targets:
@@ -577,13 +582,23 @@ class GossipProtocol:
             if self._is_peer_backed_off(url):
                 continue
             try:
-                pooled_post(
+                resp = pooled_post(
                     f"{url}/api/social/peers/broadcast",
                     json=message,
                     timeout=5,
                 )
-                self._record_peer_success(url)
-                sent += 1
+                # Only 2xx counts as a successful delivery. 4xx means the
+                # peer rejected (rate-limited, missing endpoint, bad
+                # payload); 5xx means the peer errored. Either way the
+                # payload did NOT land, so don't tell callers it did.
+                if 200 <= resp.status_code < 300:
+                    self._record_peer_success(url)
+                    sent += 1
+                else:
+                    self._record_peer_failure(url)
+                    logger.debug(
+                        f"gossip.broadcast to {url}: HTTP "
+                        f"{resp.status_code} (type={message.get('type')})")
             except requests.RequestException:
                 self._record_peer_failure(url)
         return sent

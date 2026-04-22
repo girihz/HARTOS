@@ -26,7 +26,12 @@ QEMU_PID_FILE="/tmp/hart-qemu-test.pid"
 QEMU_LOG="/tmp/hart-qemu-boot.log"
 BACKEND_PORT="${BACKEND_PORT:-16777}"
 SSH_PORT="${SSH_PORT:-10022}"
-MAX_WAIT="${MAX_WAIT:-300}"  # 5 minutes
+MAX_WAIT="${MAX_WAIT:-600}"  # 10 minutes — first-boot initialization
+                              # (node key gen, DB init, capability tier
+                              # classification, model-store layout) takes
+                              # longer under emulation. Run 24629754670
+                              # still ticking the wait loop at 300s when
+                              # the old timeout killed QEMU.
 
 echo "============================================================"
 echo "  HART OS E2E: Booting ISO in QEMU"

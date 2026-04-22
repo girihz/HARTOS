@@ -243,6 +243,22 @@ class PeerLinkManager:
                 pass
             except Exception as e:
                 logger.debug(f"ensure_wamp_running skipped: {e}")
+            # Best-effort HiveMind enrolment for MoE consensus.  The
+            # bridge's `register_peer_agent` is a no-op when hevolveai
+            # isn't loaded (central HTTP-only tier) so this is safe
+            # everywhere and never blocks the link upgrade.
+            try:
+                from integrations.agent_engine.world_model_bridge import (
+                    get_world_model_bridge,
+                )
+                bridge = get_world_model_bridge()
+                if bridge and hasattr(bridge, 'register_peer_agent'):
+                    bridge.register_peer_agent(peer_id=peer_id)
+            except Exception as e:
+                logger.debug(
+                    f"hive register_peer_agent skipped for "
+                    f"{peer_id[:8] if peer_id else '?'}: {e}"
+                )
             return True
         return False
 

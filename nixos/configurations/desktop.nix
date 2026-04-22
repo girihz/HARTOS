@@ -25,6 +25,18 @@
   boot.supportedFilesystems.zfs = lib.mkForce false;
   nixpkgs.config.allowBroken = false;
 
+  # Note: do NOT override `glibcLocales` with a custom `locales`
+  # allow-list. Changing its derivation hash invalidates the
+  # cache.nixos.org binary for glibcLocales AND for every package
+  # that depends on it — cascading hundreds of from-source rebuilds
+  # that blow the 180-min GHA build cap (run 24639371107 hit
+  # 3h0m16s and was still going). The original ENOSPC in full
+  # locale-gen (seen in 24623184098 etc.) only reproduced under
+  # magic-nix-cache; with that dropped and substituters pinned to
+  # cache.nixos.org, the prebuilt glibcLocales binary is served
+  # directly and no from-source locale-gen runs. `i18n.supportedLocales`
+  # below still trims the runtime locale-archive to 18 locales.
+
   # ─── Workaround: systemd-hwdb update fails on CI/WSL2 build hosts ───
   # Replace the hwdb.bin derivation with a minimal stub.
   # The real hwdb.bin will be regenerated on first boot by udev.
@@ -393,8 +405,9 @@
       "pt_BR.UTF-8/UTF-8" "it_IT.UTF-8/UTF-8" "nl_NL.UTF-8/UTF-8"
       "ja_JP.UTF-8/UTF-8" "ko_KR.UTF-8/UTF-8"
       "zh_CN.UTF-8/UTF-8" "zh_TW.UTF-8/UTF-8"
-      "hi_IN.UTF-8/UTF-8" "ar_SA.UTF-8/UTF-8" "ru_RU.UTF-8/UTF-8"
-      "tr_TR.UTF-8/UTF-8" "th_TH.UTF-8/UTF-8" "vi_VN.UTF-8/UTF-8"
+      # hi_IN / vi_VN have no `.UTF-8` variant in nixpkgs glibcLocales
+      "hi_IN/UTF-8" "ar_SA.UTF-8/UTF-8" "ru_RU.UTF-8/UTF-8"
+      "tr_TR.UTF-8/UTF-8" "th_TH.UTF-8/UTF-8" "vi_VN/UTF-8"
     ];
     inputMethod = {
       enable = true;

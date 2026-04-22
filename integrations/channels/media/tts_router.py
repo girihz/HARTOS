@@ -197,6 +197,35 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_worker_attr='_tool',
         required_package='kokoro',
     ),
+    # OmniVoice — universal TTS.  Qwen3-0.6B backbone + diffusion head,
+    # 646 languages (581k training hours spanning every Indic script,
+    # zh/ja/ko, European, Arabic, low-resource).  Zero-shot voice cloning
+    # from 3-10 s of reference audio.  Apache 2.0.
+    #
+    # Languages tuple is ('*',) — same wildcard convention as espeak —
+    # but select_engines() only considers engines explicitly listed in
+    # LANG_ENGINE_PREFERENCE for the resolved language.  We prepend
+    # 'omnivoice' to every Indic + non-English entry + _DEFAULT_PREFERENCE
+    # so it wins unless it's uninstalled or the GPU can't hold it.
+    #
+    # VRAM is stubbed at 3.0 GB in vram_manager.VRAM_BUDGETS; the worker
+    # self-reports actual usage on first load via '__WORKER_VRAM_GB__'
+    # and vram_manager.record_actual_usage tightens the budget.
+    'omnivoice': TTSEngineSpec(
+        engine_id='omnivoice',
+        device=TTSDevice.GPU_ONLY,
+        vram_key='tts_omnivoice',
+        languages=('*',),  # 646 languages
+        quality=0.93,
+        voice_clone=True,
+        latency_gpu_ms=250,
+        latency_cpu_ms=0,
+        latency_cloud_ms=0,
+        tool_module='integrations.service_tools.omnivoice_tool',
+        tool_function='omnivoice_synthesize',
+        tool_worker_attr='_tool',
+        required_package='omnivoice',
+    ),
     'espeak': TTSEngineSpec(
         engine_id='espeak',
         device=TTSDevice.CPU_ONLY,
@@ -260,46 +289,55 @@ LANG_ENGINE_PREFERENCE: Dict[str, List[str]] = {
     #   6. espeak           — absolute last-resort phoneme synth
     # luxtts dropped from default ladder (poor naturalness); still available
     # for explicit voice-clone requests via direct engine selection.
-    'en': ['chatterbox_turbo', 'kokoro', 'pocket_tts', 'cosyvoice3', 'piper', 'espeak'],
-    # Indic languages
-    'hi': ['indic_parler', 'chatterbox_ml', 'cosyvoice3', 'espeak'],
-    'ta': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'te': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'bn': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'gu': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'kn': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'ml': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'mr': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'or': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'pa': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'ur': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'as': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'ne': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    'sa': ['indic_parler', 'chatterbox_ml', 'espeak'],
-    # CJK
-    'zh': ['cosyvoice3', 'f5_tts', 'chatterbox_ml', 'espeak'],
-    'ja': ['cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'ko': ['cosyvoice3', 'chatterbox_ml', 'espeak'],
+    # chatterbox_turbo wins on English quality; omnivoice sits above
+    # kokoro/pocket/cosyvoice for cross-engine consistency when the
+    # user also runs non-English traffic and we want to avoid swapping
+    # engines on every language switch.
+    'en': ['chatterbox_turbo', 'omnivoice', 'kokoro', 'pocket_tts', 'cosyvoice3', 'piper', 'espeak'],
+    # Indic languages — omnivoice replaces indic_parler as the primary
+    # (parler kept as fallback for one release cycle).  OmniVoice has
+    # 100-400 training hours per major Indic language vs parler's ~10,
+    # and adds voice cloning which parler lacks entirely.
+    'hi': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'cosyvoice3', 'espeak'],
+    'ta': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'te': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'bn': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'gu': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'kn': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'ml': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'mr': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'or': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'pa': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'ur': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'as': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'ne': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'sa': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
+    'si': ['omnivoice', 'chatterbox_ml', 'espeak'],  # Sinhala — NEW via omnivoice
+    # CJK — omnivoice has 500k+ hours of CJK in training; promote over cosyvoice.
+    'zh': ['omnivoice', 'cosyvoice3', 'f5_tts', 'chatterbox_ml', 'espeak'],
+    'ja': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
+    'ko': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
     # European
-    'de': ['cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'es': ['cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'fr': ['cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'it': ['cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'ru': ['cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'pt': ['chatterbox_ml', 'espeak'],
-    'ar': ['chatterbox_ml', 'espeak'],
-    'nl': ['chatterbox_ml', 'espeak'],
-    'pl': ['chatterbox_ml', 'espeak'],
-    'sv': ['chatterbox_ml', 'espeak'],
-    'tr': ['chatterbox_ml', 'espeak'],
-    'id': ['chatterbox_ml', 'espeak'],
-    'th': ['chatterbox_ml', 'espeak'],
-    'vi': ['chatterbox_ml', 'espeak'],
-    'cs': ['chatterbox_ml', 'espeak'],
+    'de': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
+    'es': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
+    'fr': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
+    'it': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
+    'ru': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
+    'pt': ['omnivoice', 'chatterbox_ml', 'espeak'],
+    'ar': ['omnivoice', 'chatterbox_ml', 'espeak'],
+    'nl': ['omnivoice', 'chatterbox_ml', 'espeak'],
+    'pl': ['omnivoice', 'chatterbox_ml', 'espeak'],
+    'sv': ['omnivoice', 'chatterbox_ml', 'espeak'],
+    'tr': ['omnivoice', 'chatterbox_ml', 'espeak'],
+    'id': ['omnivoice', 'chatterbox_ml', 'espeak'],
+    'th': ['omnivoice', 'chatterbox_ml', 'espeak'],
+    'vi': ['omnivoice', 'chatterbox_ml', 'espeak'],
+    'cs': ['omnivoice', 'chatterbox_ml', 'espeak'],
 }
 
-# Fallback for unlisted languages
-_DEFAULT_PREFERENCE = ['chatterbox_ml', 'espeak']
+# Fallback for unlisted languages — omnivoice covers 646 so this is
+# reached only when omnivoice is uninstalled or can't fit on the GPU.
+_DEFAULT_PREFERENCE = ['omnivoice', 'chatterbox_ml', 'espeak']
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -776,6 +814,21 @@ class TTSRouter:
             )
 
         lang = language or detect_language(text)
+
+        # Normalize numbers, currency, URLs, units to spoken form BEFORE
+        # engine selection — every TTS engine benefits (single converging
+        # path).  Latency-sensitive ('instant' urgency) skips the LLM
+        # fallback but keeps the fast rule pass.
+        try:
+            from integrations.channels.media.tts_text_normalizer import (
+                normalize_for_tts,
+            )
+            text = normalize_for_tts(
+                text, lang, use_llm=(urgency != 'instant'),
+            )
+        except Exception as _e:  # never let normalization block synthesis
+            logger.debug(f'tts normalization skipped: {_e}')
+
         require_clone = voice is not None and voice not in ('default', '', None)
 
         # Engine override
