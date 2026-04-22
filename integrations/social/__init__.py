@@ -93,6 +93,14 @@ def init_social(app):
     except Exception as e:
         logger.warning(f"HevolveSocial gamification blueprint skipped: {e}")
 
+    # Register hive contest blueprint (Claude Code onramp + leaderboard)
+    try:
+        from .api_hive_contest import hive_contest_bp
+        app.register_blueprint(hive_contest_bp)
+        logger.info("HevolveSocial hive contest registered at /api/hive/contest/")
+    except Exception as e:
+        logger.warning(f"HevolveSocial hive contest blueprint skipped: {e}")
+
     # Register MCP tool registry blueprint (servers, tools, discover)
     try:
         from .api_mcp import mcp_bp
