@@ -54,6 +54,7 @@ _PUBLIC_TOPIC_PREFIXES = (
     'model.',             # per-model lifecycle
     'tts.',               # per-user audio-ready event (audio URL per request)
     'admin.',             # admin-console broadcasts
+    'agent.',             # agent lifecycle (creation/review/complete/error) — scoped by agent_id
 )
 
 

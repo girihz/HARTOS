@@ -369,6 +369,53 @@ def peer_federation_delta():
         return jsonify({'success': False, 'reason': str(e)}), 500
 
 
+@discovery_bp.route('/api/social/peers/broadcast', methods=['POST'])
+def peer_broadcast():
+    """Inbound gossip broadcast endpoint.
+
+    Complements `peer_discovery.gossip.broadcast()` (peer_discovery.py:559)
+    which POSTs to this path on every known peer. Without this receiver
+    those broadcasts silently 404 and any gossip-carried payload is lost
+    — see hive bridge audit (April 2026) Fix #1.
+
+    Dispatch is by `message['type']`. Currently handled:
+      * 'ralt_skill_available'  → world_model_bridge.handle_ralt_skill_notification
+                                  (pulls full packet from the sender's
+                                  /v1/ralt/skills/export/<task_id> and
+                                  installs it locally via import_skill)
+
+    Unknown types are acknowledged but not dispatched, so new gossip
+    payload types can be added without wire-breaking older peers.
+    """
+    ip = request.remote_addr or '0.0.0.0'
+    if not _check_announce_rate(ip):
+        return jsonify({'success': False, 'reason': 'rate_limited'}), 429
+
+    msg = request.get_json(force=True, silent=True) or {}
+    msg_type = msg.get('type', '')
+
+    if msg_type == 'ralt_skill_available':
+        try:
+            from integrations.agent_engine.world_model_bridge import (
+                get_world_model_bridge)
+            bridge = get_world_model_bridge()
+            result = bridge.handle_ralt_skill_notification(msg)
+            status = 200 if result.get('success') else 202
+            return jsonify(result), status
+        except Exception as e:
+            logger.debug(f"peer_broadcast ralt dispatch failed: {e}")
+            return jsonify({'success': False, 'reason': str(e)}), 500
+
+    # Forward-compatible: ack unknown types without error so older
+    # peers don't see 5xx from newer payloads, but mark dispatched=False
+    # so the sender knows nothing happened.
+    return jsonify({
+        'success': True,
+        'dispatched': False,
+        'type': msg_type,
+    })
+
+
 @discovery_bp.route('/api/social/peers/embedding-delta', methods=['POST'])
 def peer_embedding_delta():
     """Receive a compressed embedding delta from a federated peer.

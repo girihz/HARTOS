@@ -3209,6 +3209,35 @@ def create_action_with_ledger(actions: List[Dict], user_id: int, prompt_id: int,
         ledger = create_ledger_from_actions(user_id, prompt_id, actions, backend=backend)
         user_ledgers[user_prompt] = ledger
 
+        # Best-effort: when the Redis backend is live, enable ledger
+        # pubsub + heartbeat so the distributed_agent subscribers (see
+        # CHANNEL_DELEGATION wiring) can see and respond to this
+        # ledger's delegations in real time.  Gated on
+        # `hasattr(backend, 'redis_client')` — JSONBackend and
+        # InMemoryBackend have no redis_client, so they skip cleanly.
+        # Any exception is swallowed at debug; ledger still functions
+        # without pubsub/heartbeat (single-node degraded mode).
+        try:
+            _redis = getattr(backend, 'redis_client', None)
+            if _redis is not None:
+                ledger.enable_pubsub(_redis)
+                ledger.enable_heartbeat(
+                    _redis,
+                    host_info={
+                        'user_id': user_id,
+                        'prompt_id': prompt_id,
+                        'mode': 'create',
+                    },
+                )
+                current_app.logger.info(
+                    f"Ledger pubsub+heartbeat enabled for {user_prompt}"
+                )
+        except Exception as _lsetup_e:
+            current_app.logger.debug(
+                f"Ledger pubsub/heartbeat setup skipped for "
+                f"{user_prompt}: {_lsetup_e}"
+            )
+
         # Register ledger for auto-sync from ActionState transitions
         register_ledger_for_session(user_prompt, ledger)
         current_app.logger.info(f"Registered ledger for auto-sync: {user_prompt}")

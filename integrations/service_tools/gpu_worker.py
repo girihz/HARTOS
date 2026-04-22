@@ -209,6 +209,11 @@ class GPUWorker:
 
     # Signal line the worker prints to stdout when ready to serve.
     READY_MARKER = '__WORKER_READY__'
+    # Emitted immediately after READY — carries the post-load GPU VRAM
+    # measurement in GB as a float.  Parent captures and forwards to
+    # vram_manager.record_actual_usage.  Workers that can't measure emit
+    # 0.0 and the parent ignores the reading.
+    VRAM_MARKER_PREFIX = '__WORKER_VRAM_GB__'
 
     def __init__(
         self,
@@ -463,16 +468,42 @@ class GPUWorker:
             line = self._read_line_with_timeout(0.5)
             if line is None:
                 continue
-            if line.strip() == self.READY_MARKER:
+            stripped = line.strip()
+            if stripped == self.READY_MARKER:
                 self._ready = True
                 logger.info(f"{self.name}: worker ready")
                 return
+            # VRAM-measurement marker — emitted by workers BEFORE READY.
+            # Forward the measurement and keep looping for READY.
+            if stripped.startswith(self.VRAM_MARKER_PREFIX):
+                self._handle_vram_marker(stripped)
+                continue
             # Ignore any other startup chatter
-            logger.debug(f"[{self.name}] startup: {line}")
+            logger.debug(f"[{self.name}] startup: {stripped}")
 
         # Timeout
         self._reap(force=True)
         raise WorkerTimeout(f"{self.name}: startup timeout ({self.startup_timeout}s)")
+
+    def _handle_vram_marker(self, stripped_line: str) -> None:
+        """Parse a '__WORKER_VRAM_GB__<n>' startup marker and forward the
+        measurement to vram_manager.record_actual_usage.
+
+        Non-fatal on parse error: older workers don't emit this marker;
+        a failed parse just means we fall back to the declared
+        VRAM_BUDGETS entry.
+        """
+        payload = stripped_line[len(self.VRAM_MARKER_PREFIX):].strip()
+        try:
+            gb = float(payload)
+        except ValueError:
+            logger.debug(f"{self.name}: unparseable VRAM marker '{payload}'")
+            return
+        try:
+            from integrations.service_tools.vram_manager import vram_manager
+            vram_manager.record_actual_usage(self.name, gb)
+        except Exception as e:
+            logger.debug(f"{self.name}: VRAM marker forward failed: {e}")
 
     def _write_line(self, line: str) -> None:
         if not self._proc or not self._proc.stdin:
@@ -596,7 +627,28 @@ def run_worker(
         worker_log.exception(f'load failed: {e}')
         sys.exit(2)
 
-    # ── Phase 2: announce ready ────────────────────────────────────
+    # ── Phase 2a: self-report post-load VRAM ──────────────────────
+    # Emitted BEFORE READY so the parent's _wait_ready loop sees it
+    # in-order on the stdout queue.  (Placing it after READY races
+    # against the next call(): if 'ready' arrives first and the
+    # marker follows late, the marker ends up being consumed as a
+    # response payload → invalid-JSON error.)
+    #
+    # Best-effort: workers that can't measure (CPU-only, Metal,
+    # torch missing) emit 0.0 and the parent ignores the reading.
+    # Lets us stub conservative budgets (e.g. new OmniVoice at
+    # 3.0 GB) and auto-correct after the first real load.
+    try:
+        import torch as _torch_vram_probe
+        if _torch_vram_probe.cuda.is_available():
+            _measured = _torch_vram_probe.cuda.memory_allocated(0) / (1024 ** 3)
+        else:
+            _measured = 0.0
+    except Exception:
+        _measured = 0.0
+    _emit(f'{GPUWorker.VRAM_MARKER_PREFIX}{_measured:.3f}')
+
+    # ── Phase 2b: announce ready ───────────────────────────────────
     _emit(GPUWorker.READY_MARKER)
 
     # ── Phase 3: serve requests ────────────────────────────────────

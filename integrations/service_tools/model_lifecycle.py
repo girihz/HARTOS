@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 
 LIFECYCLE_STATE_FILE = Path.home() / '.hevolve' / 'lifecycle_state.json'
 
+# Hints older than this are discarded on reload.  A 24h cutoff keeps
+# "this user spoke Tamil yesterday" relevant while throwing away
+# "this user spoke Tamil in January" (long-stale entries would pin
+# models that the user actually doesn't use anymore).
+LIFECYCLE_STALENESS_S: float = 24 * 3600.0
+
 
 # ═══════════════════════════════════════════════════════════════
 # Enums and State
@@ -265,6 +271,31 @@ class ModelLifecycleManager:
         self._last_pressure_alert: Dict[str, float] = {}  # type → timestamp
         self._pressure_alert_cooldown = 60.0  # seconds between alerts of same type
 
+        # ── G3: Direct llama-server supervision ───────────────────
+        # When Nunba's LlamaConfig is unavailable (standalone, Docker,
+        # or bundled mode where Nunba's supervisor failed) we launch
+        # llama-server ourselves via _launch_llama_server_direct.  We
+        # must also supervise it — otherwise a dead server is invisible
+        # to _check_llm_health and never gets restarted.
+        self._direct_llama_proc = None          # subprocess.Popen
+        self._direct_llama_port: Optional[int] = None
+        self._direct_llama_mode: Optional[str] = None  # 'gpu' | 'cpu'
+        self._direct_llama_log_fh = None
+        self._direct_llama_last_restart: float = 0.0
+        self._direct_llama_restart_cooldown_s: float = 10.0
+
+        # ── Cross-restart persistence ─────────────────────────────
+        # Load any persisted per-model access hints from the previous
+        # Nunba boot.  Entries older than LIFECYCLE_STALENESS_S are
+        # dropped — last_access from a week ago is worse than no hint.
+        self._last_persist_time: float = 0.0
+        self._persist_interval_s: float = 60.0  # throttle disk writes
+        self._persisted_hints: Dict[str, dict] = {}
+        try:
+            self._persisted_hints = self._load_persisted_state()
+        except Exception as e:
+            logger.debug(f"Lifecycle: persisted state load skipped: {e}")
+
     # ── Daemon lifecycle ──────────────────────────────────────
 
     def start(self):
@@ -452,6 +483,14 @@ class ModelLifecycleManager:
         # Phase 13: Pressure alerts to frontend (debounced)
         self._emit_pressure_alerts()
 
+        # Phase 14: Persist access hints (throttled — J211).
+        # Cheap I/O (single JSON file, atomic rename) so the rate limit
+        # lives in _persist_state_to_disk itself rather than here.
+        try:
+            self._persist_state_to_disk()
+        except Exception:
+            pass
+
     # ── Hook callbacks (from RuntimeToolManager) ──────────────
 
     def _on_tool_started(self, tool_name: str, **kwargs):
@@ -486,7 +525,7 @@ class ModelLifecycleManager:
 
         now = time.time()
         with self._lock:
-            self._models[tool_name] = ModelState(
+            state = ModelState(
                 name=tool_name,
                 device=device,
                 priority=ModelPriority.WARM,
@@ -498,6 +537,36 @@ class ModelLifecycleManager:
                 vram_gb=vram_gb,
                 ram_gb=ram_gb,
             )
+            # Apply persisted-from-previous-boot hints so warm-start
+            # preference survives restart.  This is the J211 fix for
+            # the cold-load penalty after Nunba is killed + relaunched.
+            hint = self._persisted_hints.pop(tool_name, None)
+            if hint:
+                try:
+                    state.access_count = int(hint.get('access_count', 0) or 0)
+                    # prior last_access_time preserved as a hint; the
+                    # current boot's load time overrides so idle math
+                    # starts fresh.  The prior timestamp is only used to
+                    # reason about popularity (see _apply_hive_hints).
+                    prior_access = float(hint.get('last_access_time', 0.0) or 0.0)
+                    if prior_access and (now - prior_access) < LIFECYCLE_STALENESS_S:
+                        # Boost priority for recently-used models so the
+                        # first request after restart doesn't get stuck
+                        # behind a cold-load.
+                        state.priority = ModelPriority.WARM
+                        state.hive_boost = True
+                    if hint.get('pinned'):
+                        state.pinned = True
+                    # J214: a pending pressure_evict_only staged via
+                    # set_pressure_evict_only() applies at start-time
+                    # so the TTS backend the user just picked never
+                    # enters the idle-sweep phase on its first load.
+                    if 'pressure_evict_only' in hint:
+                        state.pressure_evict_only = bool(
+                            hint['pressure_evict_only'])
+                except Exception:
+                    pass
+            self._models[tool_name] = state
 
         # Notify UI: model loaded — include capabilities from catalog
         # so UI knows what features are now available
@@ -519,11 +588,121 @@ class ModelLifecycleManager:
                 state.ram_gb = 0.0
                 state.active_inference_count = 0
 
+        # Persist the release — even if we crash immediately after,
+        # the next boot has a fresh snapshot of which models were in use.
+        try:
+            self._persist_state_to_disk(force=True)
+        except Exception:
+            pass
+
         # Notify UI: model unloaded — these capabilities are now unavailable
         self._emit_event('model.unloaded', {
             'model': tool_name,
             'capabilities': self._get_model_capabilities(tool_name),
         })
+
+    # ── Cross-restart persistence (J211) ──────────────────────
+    #
+    # The lifecycle state file was declared as LIFECYCLE_STATE_FILE at
+    # module top but never written until the 2026-04-18 live audit
+    # flagged the gap.  We persist a compact, user-scoped JSON doc:
+    #
+    #   {
+    #     "version": 1,
+    #     "saved_at": 1713456789.12,
+    #     "models": {
+    #        "indic_parler": {
+    #          "last_access_time": 1713450000.0,
+    #          "access_count": 17,
+    #          "pinned": false
+    #        },
+    #        ...
+    #     }
+    #   }
+    #
+    # Reload happens ONCE in __init__.  Save happens throttled inside
+    # _tick (every _persist_interval_s) and on every model stop event.
+    # Stale entries (older than LIFECYCLE_STALENESS_S) are discarded at
+    # load-time so a 6-month-old hint doesn't distort today's boot.
+    # No secrets / credentials / PII are persisted — only tool names
+    # and access counters.
+
+    def _load_persisted_state(self) -> Dict[str, dict]:
+        """Read the on-disk hint doc and return the map of models.
+
+        Returns an empty dict if the file is missing, malformed, or
+        older than LIFECYCLE_STALENESS_S (entries are filtered on
+        that threshold to avoid pinning stale models).
+        """
+        try:
+            if not LIFECYCLE_STATE_FILE.exists():
+                return {}
+            with open(LIFECYCLE_STATE_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            return {}
+
+        models = data.get('models') if isinstance(data, dict) else None
+        if not isinstance(models, dict):
+            return {}
+
+        now = time.time()
+        fresh: Dict[str, dict] = {}
+        for name, hint in models.items():
+            if not isinstance(hint, dict):
+                continue
+            last = float(hint.get('last_access_time', 0.0) or 0.0)
+            # Stale entries get dropped — a week-old hint is worse than
+            # no hint (it would keep a model the user no longer uses).
+            if last and (now - last) > LIFECYCLE_STALENESS_S:
+                continue
+            fresh[name] = hint
+        if fresh:
+            logger.info(
+                f"Lifecycle: loaded {len(fresh)} persisted hint(s) "
+                f"from {LIFECYCLE_STATE_FILE}"
+            )
+        return fresh
+
+    def _persist_state_to_disk(self, force: bool = False) -> None:
+        """Write current access hints to disk.
+
+        Throttled to at most one write per _persist_interval_s unless
+        ``force=True`` (used from _on_tool_stopped so a user-visible
+        release is recorded immediately).  Writes are atomic via
+        rename-tmpfile-to-target so a crash mid-write can't leave a
+        half-written JSON blob behind.
+        """
+        now = time.time()
+        if not force and (now - self._last_persist_time) < self._persist_interval_s:
+            return
+
+        with self._lock:
+            payload = {
+                'version': 1,
+                'saved_at': now,
+                'models': {
+                    name: {
+                        'last_access_time': s.last_access_time,
+                        'access_count': s.access_count,
+                        'pinned': bool(s.pinned),
+                    }
+                    for name, s in self._models.items()
+                    if s.last_access_time > 0
+                },
+            }
+
+        try:
+            LIFECYCLE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = LIFECYCLE_STATE_FILE.with_suffix('.json.tmp')
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            # Atomic rename — survives a crash mid-write.  On Windows,
+            # os.replace handles "target exists" correctly.
+            os.replace(tmp, LIFECYCLE_STATE_FILE)
+            self._last_persist_time = now
+        except Exception as e:
+            logger.debug(f"Lifecycle: persist skipped ({e})")
 
     # ── Access tracking (called by tool wrappers) ─────────────
 
@@ -927,16 +1106,28 @@ class ModelLifecycleManager:
             self._handle_dead_process(tool_name, exit_code, proc_type)
 
     def _check_llm_health(self, dead_models: list):
-        """Check llama.cpp server health (separate from RTM sidecar tools)."""
+        """Check llama.cpp server health (separate from RTM sidecar tools).
+
+        Supervises BOTH:
+          1. Nunba-managed server via LlamaConfig (primary in bundled mode).
+          2. Direct-launch server (self._direct_llama_proc) when Nunba's
+             LlamaConfig module isn't available (G3 — standalone / Docker /
+             bundled-without-supervisor).
+
+        Either source adding to ``dead_models`` triggers _handle_dead_process,
+        which queues a restart through _process_restart_queue.
+        """
         with self._lock:
             state = self._models.get('llm')
             if not state or state.device == ModelDevice.UNLOADED:
                 return
 
+        nunba_handled = False
         try:
             from llama.llama_config import LlamaConfig
             config = LlamaConfig()
             if config.server_process is not None:
+                nunba_handled = True
                 exit_code = config.server_process.poll()
                 if exit_code is not None:
                     dead_models.append(('llm', exit_code, 'llm_server'))
@@ -944,8 +1135,49 @@ class ModelLifecycleManager:
                 # No process object but we think it's loaded — verify via HTTP
                 if not config.check_server_running():
                     dead_models.append(('llm', None, 'llm_server'))
+                else:
+                    nunba_handled = True
         except ImportError:
             pass
+
+        # G3: Direct-launch supervision (fires when Nunba not in charge).
+        if nunba_handled:
+            return
+        proc = self._direct_llama_proc
+        port = self._direct_llama_port
+        if proc is not None:
+            exit_code = proc.poll()
+            if exit_code is not None:
+                logger.warning(
+                    f"[G3] direct llama-server died: PID={proc.pid} "
+                    f"exit_code={exit_code} port={port}")
+                # Clear stale handle so _handle_dead_process → restart
+                # can cleanly relaunch via _launch_llama_server_direct.
+                try:
+                    fh = self._direct_llama_log_fh
+                    if fh is not None and not fh.closed:
+                        fh.close()
+                except Exception:
+                    pass
+                self._direct_llama_proc = None
+                self._direct_llama_log_fh = None
+                dead_models.append(('llm', exit_code, 'llm_server_direct'))
+        elif port is not None and state.device != ModelDevice.UNLOADED:
+            # We once launched directly but lost the handle — verify via HTTP.
+            # A missing handle + unreachable port == dead server.
+            try:
+                import urllib.request as _ur
+                import urllib.error as _ue
+                url = f'http://127.0.0.1:{port}/health'
+                try:
+                    with _ur.urlopen(url, timeout=2) as resp:
+                        if resp.status != 200:
+                            dead_models.append(
+                                ('llm', None, 'llm_server_direct'))
+                except (_ue.URLError, _ue.HTTPError, OSError):
+                    dead_models.append(('llm', None, 'llm_server_direct'))
+            except Exception as e:
+                logger.debug(f"[G3] direct HTTP health check skipped: {e}")
 
     def _handle_dead_process(self, tool_name: str, exit_code: Optional[int],
                              proc_type: str):
@@ -1168,6 +1400,13 @@ class ModelLifecycleManager:
             # Store handle so it stays open for the child process
             self._direct_log_fh = log_fh
             log_fh = None  # Prevent close in finally
+            # G3: Track the Popen so _check_llm_health can detect death
+            # and _process_restart_queue can resurrect it.
+            self._direct_llama_proc = proc
+            self._direct_llama_port = port
+            self._direct_llama_mode = mode
+            self._direct_llama_log_fh = self._direct_log_fh
+            self._direct_llama_last_restart = time.time()
             logger.info(f"llama-server started: PID={proc.pid} port={port} "
                         f"gpu_layers={gpu_layers} log={log_path}")
             return True
@@ -1260,12 +1499,18 @@ class ModelLifecycleManager:
             if evict_target:
                 candidates = [evict_target]
             else:
+                # LLMs are owned by llama-server (separate process); evicting
+                # them from the registry doesn't free VRAM (see line 1562).
+                # Skip them as swap candidates so we never burn down the
+                # active LLM in exchange for a TTS that still won't fit.
                 gpu_models = sorted(
                     [s for s in self._models.values()
                      if s.device == ModelDevice.GPU
                      and s.priority != ModelPriority.ACTIVE
                      and s.active_inference_count == 0
-                     and s.name != needed_model],
+                     and s.name != needed_model
+                     and not s.name.startswith('llm-')
+                     and s.model_type != 'llm'],
                     key=lambda s: (
                         _PRIORITY_RANK.get(s.priority, 99),
                         s.last_access_time,
@@ -1603,6 +1848,47 @@ class ModelLifecycleManager:
                 return {'error': f'Model {model_name} not tracked'}
             state.priority = priority
         return {'model': model_name, 'priority': priority_str}
+
+    def set_pressure_evict_only(self, model_name: str, value: bool) -> dict:
+        """Toggle the ``pressure_evict_only`` flag for a tracked model.
+
+        When True, the model is evicted ONLY on VRAM pressure (phase 3
+        of ``_tick``) and never by the idle-timeout sweep (phase 7).
+        Used by ``TTSEngine.set_language`` to pin the ACTIVE TTS
+        backend so a background model load can't idle-out the engine
+        the user is actively speaking to.
+
+        If the model isn't tracked yet (first call can precede the
+        RTM ``on_tool_started`` hook when a language is chosen before
+        the first synth), the call no-ops with ``tracked=False`` so
+        the caller can decide whether to retry on next tick.  This is
+        additive: the flag lands when the RTM hook fires, via the
+        ``_persisted_hints`` path.
+
+        Returns a small dict for admin-API / journey-test inspection;
+        the caller typically discards it.
+        """
+        with self._lock:
+            state = self._models.get(model_name)
+            if state is None:
+                # Stage the pin so it's applied the moment the tool
+                # starts — treating this as a pre-start hint matches
+                # the pattern we already use for persisted hints.
+                self._persisted_hints.setdefault(model_name, {}).update({
+                    'pressure_evict_only': bool(value),
+                })
+                return {
+                    'model': model_name,
+                    'pressure_evict_only': bool(value),
+                    'tracked': False,
+                    'staged_as_hint': True,
+                }
+            state.pressure_evict_only = bool(value)
+        return {
+            'model': model_name,
+            'pressure_evict_only': bool(value),
+            'tracked': True,
+        }
 
     def get_system_pressure(self) -> dict:
         """Return current pressure state for dispatch throttling.
