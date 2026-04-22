@@ -292,14 +292,18 @@ class TestWorldModelBridgeIntegration(unittest.TestCase):
         call_kwargs = mock_bridge.record_interaction.call_args.kwargs
         self.assertEqual(call_kwargs['user_id'], 'benchmark_prover')
         self.assertEqual(call_kwargs['goal_id'], 'g1')
-        # prompt contains the attribution chain JSON
-        import json
-        chain = json.loads(call_kwargs['prompt'])
+        # Gap 5: structured attribution chain now lives in its own
+        # kwarg, not a JSON blob packed into 'prompt'.  'prompt'
+        # carries a compact human-readable summary for HevolveAI's
+        # text-distillation path.
+        chain = call_kwargs['attribution_chain']
         self.assertEqual(chain['agent_id'], 'benchmark_prover')
         self.assertEqual(chain['action_type'], 'benchmark_run')
         self.assertEqual(chain['step_count'], 2)
         self.assertIn('step_credits', chain)
         self.assertIn('success_score', chain)
+        self.assertIn('benchmark_prover', call_kwargs['prompt'])
+        self.assertIn('benchmark_run', call_kwargs['prompt'])
 
 
 class TestEventBusEmission(unittest.TestCase):
@@ -383,10 +387,11 @@ class TestCausalChain(unittest.TestCase):
         ), patch.object(self.orch, '_emit_completion_event'):
             self.orch.complete_action(child, outcome={'ok': True})
 
-        payload = captured.get('prompt', '')
-        import json
-        data = json.loads(payload)
-        self.assertEqual(data['parent_action_id'], parent)
+        # Structured field is now attribution_chain (was prompt JSON
+        # blob pre-gap-5).  prompt carries a human-readable summary.
+        chain = captured.get('attribution_chain', {})
+        self.assertEqual(chain.get('parent_action_id'), parent)
+        self.assertIn('child', captured.get('prompt', ''))
 
 
 class TestRecordObservation(unittest.TestCase):
@@ -459,10 +464,9 @@ class TestRecordObservation(unittest.TestCase):
         ), patch.object(self.orch, '_emit_completion_event'):
             self.orch.complete_action(aid, outcome={'ok': True})
 
-        import json
-        data = json.loads(captured['prompt'])
-        self.assertEqual(data['observation_count'], 1)
-        self.assertEqual(data['observations'][0]['observation_type'],
+        chain = captured['attribution_chain']
+        self.assertEqual(chain['observation_count'], 1)
+        self.assertEqual(chain['observations'][0]['observation_type'],
                          'user_feedback')
 
 
