@@ -1331,6 +1331,61 @@ SEED_BOOTSTRAP_GOALS = [
         'spark_budget': 150,
         'use_product': False,
     },
+    {
+        # Speech-therapy companion — pairs with the Nunba local agent
+        # `local_speech_companion` (routes/chatbot_routes.py LOCAL_AGENTS).
+        # The goal schedules periodic practice prompts; the agent does
+        # the live per-turn translation (STT → VLM lip-check →
+        # multimodal-fused LLM → per-child voice-clone TTS).
+        #
+        # Per-child adapter lives at
+        #   ~/Documents/Nunba/data/speech_therapy/<child_id>/lora_state.pt
+        # written via hevolveai OrthogonalLoRA once
+        # docs/ml_intern_brief_hevolveai_training.md confirms the
+        # gradient path is live. Until then this goal runs inference-
+        # only — no training claim, no parent lied to.
+        'slug': 'bootstrap_speech_companion',
+        'goal_type': 'speech_therapy',
+        'title': 'Speech Companion',
+        'description': (
+            "You are Speech Companion, a patient local voice assistant "
+            "for a child who is learning to speak clearly. Schedule "
+            "gentle practice moments (not drills) between real-world "
+            "speech-language pathology sessions. "
+            "1) Check the child's preferred language via core.user_lang "
+            "and the per-child practice memory via recall(); "
+            "2) Offer a short, playful prompt (name one thing you can "
+            "see, repeat a silly sentence, sing a line) appropriate to "
+            "the child's current targets; "
+            "3) On every attempt, score via speech-intelligibility + "
+            "lip-shape alignment (VLM frame), celebrate the attempt, "
+            "reflect back a clear version in the child's voice-clone TTS; "
+            "4) remember() what words / phonemes are in progress and "
+            "what's working so the next session picks up where this one "
+            "left off; "
+            "5) NEVER diagnose, never prescribe, never shame. "
+            "The child's brain is doing the work — you are a translator "
+            "between intent and expression while they build the pathway. "
+            "If distress or a red-flag pattern appears, surface a calm "
+            "suggestion to the grown-up that they see a therapist."
+        ),
+        'config': {
+            'autonomous': False,          # invoked by user / parent, not daemon
+            'continuous': True,            # picks up across sessions
+            'persona_kind': 'speech-companion',
+            'persona_name': 'Speech Companion',
+            'audience': 'child',
+            'cadence': 'event',            # triggered by user, not schedule
+            'priority': 7,                 # safety-adjacent: kid-facing
+            # Routes to the Nunba local agent by id so the goal
+            # dispatcher sends practice turns through the right prompt.
+            'nunba_agent_id': 'local_speech_companion',
+            'require_consent': True,       # parent/therapist approval
+            'camera_consent_required': True,
+        },
+        'spark_budget': 80,
+        'use_product': True,
+    },
 ]
 
 # ─── Loophole → Remediation Goal Map ───
