@@ -316,7 +316,8 @@ class WorldModelBridge:
     def record_interaction(self, user_id: str, prompt_id: str,
                            prompt: str, response: str,
                            model_id: str = None, latency_ms: float = 0,
-                           node_id: str = None, goal_id: str = None):
+                           node_id: str = None, goal_id: str = None,
+                           attribution_chain: dict = None):
         """Record every agent interaction as training data for HevolveAI.
 
         Called after EVERY /chat response.  Batches experiences and flushes
@@ -351,6 +352,15 @@ class WorldModelBridge:
             'timestamp': time.time(),
             'source': 'langchain_orchestration',
         }
+        # Structured attribution chain — preferred carrier for
+        # agent_attribution's step/observation/credit/parent_action_id
+        # payload.  Previously it was packed into the 'prompt' field
+        # as stringified JSON, which confused HevolveAI's prompt-text
+        # distillation path.  Leave the legacy path intact for callers
+        # that haven't migrated — they pass nothing, and HevolveAI
+        # receives only the primary experience fields.
+        if attribution_chain is not None:
+            experience['attribution_chain'] = attribution_chain
 
         # PRIVACY: Redact secrets + anonymize user before shared ingestion.
         # The hive must NEVER leak secrets from one user to another.

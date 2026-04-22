@@ -391,16 +391,43 @@ class AgentAttributionOrchestrator:
             'observations': [o.to_dict() for o in action.observations[-50:]],
         }
 
+        # Compact human-readable summary for the 'prompt' field — the
+        # structured chain goes in attribution_chain below.  This keeps
+        # HevolveAI's text-distillation path happy (it now sees a
+        # narrative sentence, not a JSON blob).
+        summary_text = (
+            f"{action.agent_id} ran {action.action_type} "
+            f"(goal={action.goal_id}, parent={action.parent_action_id}, "
+            f"steps={len(action.steps)}, observations={len(action.observations)}, "
+            f"success={round(success_score, 2)})"
+        )
+
         try:
             bridge.record_interaction(
                 user_id=action.agent_id,
                 prompt_id=action.action_id,
-                prompt=json.dumps(chain_summary, default=str)[:2000],
+                prompt=summary_text[:2000],
                 response=json.dumps(action.outcome or {}, default=str)[:5000],
                 model_id=f'{action.agent_id}:{action.action_type}',
                 latency_ms=(action.completed_at - action.started_at) * 1000 if action.completed_at else 0,
                 goal_id=action.goal_id,
+                attribution_chain=chain_summary,
             )
+        except TypeError:
+            # Older WMB without attribution_chain kwarg — fall back to
+            # packing JSON in prompt as before.
+            try:
+                bridge.record_interaction(
+                    user_id=action.agent_id,
+                    prompt_id=action.action_id,
+                    prompt=json.dumps(chain_summary, default=str)[:2000],
+                    response=json.dumps(action.outcome or {}, default=str)[:5000],
+                    model_id=f'{action.agent_id}:{action.action_type}',
+                    latency_ms=(action.completed_at - action.started_at) * 1000 if action.completed_at else 0,
+                    goal_id=action.goal_id,
+                )
+            except Exception as exc:
+                logger.debug("record_interaction fallback failed: %s", exc)
         except Exception as exc:
             logger.debug("record_interaction failed: %s", exc)
 
