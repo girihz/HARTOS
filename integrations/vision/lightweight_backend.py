@@ -389,18 +389,34 @@ class Qwen08BBackend(VisionBackend):
             return False
 
     def start(self) -> bool:
-        """Check if 0.8B is available. Does NOT auto-start at boot.
+        """Eagerly boot the 0.8B caption server when VisionService starts.
 
-        The 0.8B caption server is started lazily on first describe() call
-        (when actual frames arrive), not at VisionService.start().
-        This avoids wasting GPU memory when no camera/screen stream is active.
+        Pre-2026-04-22 this was lazy-only ("started on first describe()
+        call when frames arrive") — but that contradicted the contract
+        in vision_service.py:151 which states the backend is "pinned,
+        eager-booted".  The lazy-only behavior caused get_vision_backend()
+        to silently fall through to MiniCPM (4GB VRAM) on every boot,
+        because is_available() probed :8081 before _ensure_running() ever
+        had a chance to run (witnessed 2026-04-22 in gui_app.log).
+
+        Now: probe → if down, kick the same _ensure_running() pipeline
+        that describe() uses (event-driven start in bundled mode,
+        standalone subprocess.Popen as fallback).  Returns True even on
+        boot failure so that VisionService still selects this as the
+        canonical backend; describe() will retry _ensure_running() on
+        first frame, matching the original lazy contract.
         """
         if self.is_available():
             logger.info(f"Qwen3.5-0.8B caption backend ready on port {self._port}")
             return True
-        # Not running — that's OK. Will be started lazily in describe().
-        logger.info(f"Qwen3.5-0.8B not running — will start on first frame")
-        return True  # Return True so VisionService selects us as backend
+        # Eager boot via the same pathway describe() uses.
+        if self._ensure_running():
+            return True
+        logger.info(
+            "Qwen3.5-0.8B caption server eager-boot failed "
+            "(model files missing or llama-server unavailable) — will retry "
+            "on first frame.  Set up via wizard: 'Install vision captioner'.")
+        return True  # Stay selected; lazy retry path remains available.
 
         # Find llama-server binary (reuse model_lifecycle's finder)
         try:

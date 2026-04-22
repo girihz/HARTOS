@@ -129,6 +129,12 @@ class TestPriorityUpdates:
     def manager(self):
         from integrations.service_tools.model_lifecycle import ModelLifecycleManager
         mgr = ModelLifecycleManager()
+        # Isolate from persisted hints left by prior tests — the lifecycle
+        # state file at ~/.hevolve/lifecycle_state.json is process-global.
+        # A prior test that calls _on_tool_stopped persists hints, which
+        # would make _on_tool_started flip hive_boost=True and skew the
+        # idle/evictable threshold tests below.
+        mgr._persisted_hints.clear()
         return mgr
 
     def test_active_inference_sets_active(self, manager):

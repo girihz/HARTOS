@@ -637,6 +637,185 @@ class WorldModelBridge:
 
     # ─── HiveMind collective thinking ────────────────────────────────
 
+    def register_peer_agent(
+        self,
+        peer_id: str,
+        agent_type: str = 'remote_peer',
+        latent_dim: int = 2048,
+        capabilities: Optional[list] = None,
+    ) -> bool:
+        """Best-effort registration of a newly-linked peer with the in-
+        process HiveMind so `fuse_thoughts` / `think_together_distributed`
+        can include it in MoE consensus.
+
+        Called from `core.peer_link.link_manager.upgrade_peer` right
+        after a successful `link.connect()`.  Safe to invoke in any
+        topology:
+
+        - In-process HiveMind loaded → real registration.
+        - In-process HiveMind missing (no hevolveai, HTTP-only central
+          tier) → logs at debug and returns False.
+        - Any exception inside HiveMind → swallowed at debug; the link
+          upgrade must never fail because the hive can't register.
+
+        Returns ``True`` iff the peer was accepted into the HiveMind
+        agent registry.  Callers generally ignore the return value —
+        this is a side-effect hook, not a prerequisite.
+        """
+        if not (self._in_process and self._hive_mind):
+            logger.debug(
+                f"[register_peer_agent] no in-process HiveMind; "
+                f"skipping peer {peer_id[:8] if peer_id else '?'}"
+            )
+            return False
+        try:
+            # Resolve AgentCapability lazily — hevolveai might expose a
+            # different enum shape across versions; fall back to string
+            # capabilities when the enum isn't importable.
+            caps: list
+            try:
+                from hevolveai.embodied_ai.learning.hive_mind import (
+                    AgentCapability,
+                )
+                default_caps = [
+                    AgentCapability.ENCODE,
+                    AgentCapability.REASON,
+                ]
+                caps = list(capabilities) if capabilities else default_caps
+            except Exception:
+                caps = list(capabilities) if capabilities else [
+                    'encode', 'reason',
+                ]
+            self._hive_mind.register_agent(
+                agent_id=peer_id,
+                agent_type=agent_type,
+                latent_dim=latent_dim,
+                capabilities=caps,
+            )
+            logger.info(
+                f"[register_peer_agent] peer={peer_id[:8]} "
+                f"type={agent_type} dim={latent_dim} registered"
+            )
+            return True
+        except Exception as e:
+            logger.debug(
+                f"[register_peer_agent] peer={peer_id[:8] if peer_id else '?'} "
+                f"skipped: {e}"
+            )
+            return False
+
+    # ─── G12: parallel SSM student inference ─────────────────────────
+
+    def predict_student(
+        self,
+        prompt: str,
+        messages: Optional[List[Dict]] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 256,
+        timeout_s: float = 2.0,
+    ) -> Optional[Dict]:
+        """Run the HevolveAI SSM student forward pass in-process.
+
+        G12 — closes the gap where HARTOS' CustomGPT posts directly to
+        llama.cpp and never involves the SSM student.  When this is
+        available, callers can fire the student in parallel with the
+        llama.cpp teacher and feed the (teacher, student) pair into the
+        distillation engine for continuous learning.
+
+        Returns:
+            dict with keys {'response', 'action_tensor', 'epistemic_data'}
+            on success, or None if:
+                - In-process mode not active
+                - Provider doesn't expose _generate_response
+                - Student forward pass failed / timed out
+
+        Design notes:
+            * Synchronous call; use an executor at the call site if you
+              want to overlap it with the teacher HTTP request.
+            * Gated by HEVOLVE_PARALLEL_SSM=0 to disable per-deployment.
+            * Never raises — the teacher path must not be blocked by a
+              failing student.
+        """
+        import os as _os
+        if _os.environ.get('HEVOLVE_PARALLEL_SSM', '1') == '0':
+            return None
+        if not (self._in_process and self._provider):
+            return None
+        gen = getattr(self._provider, '_generate_response', None)
+        if gen is None or not callable(gen):
+            return None
+
+        if messages is None:
+            messages = [{'role': 'user', 'content': prompt}]
+        try:
+            # _generate_response returns (response_text, action_tensor,
+            # epistemic_data).  Signature verified against
+            # learning_llm_provider.py:1511.
+            res = gen(prompt, messages, temperature,
+                      cached_vision_features=None)
+        except Exception as e:
+            logger.debug(f"[predict_student] SSM forward failed: {e}")
+            return None
+
+        try:
+            if isinstance(res, tuple) and len(res) >= 3:
+                response_text, action_tensor, epistemic_data = res[:3]
+            elif isinstance(res, tuple) and len(res) == 2:
+                response_text, action_tensor = res
+                epistemic_data = None
+            else:
+                response_text, action_tensor, epistemic_data = (
+                    str(res), None, None)
+            with self._lock:
+                self._stats.setdefault('student_inferences', 0)
+                self._stats['student_inferences'] += 1
+            return {
+                'response': response_text,
+                'action_tensor': action_tensor,
+                'epistemic_data': epistemic_data,
+            }
+        except Exception as e:
+            logger.debug(f"[predict_student] result unpack failed: {e}")
+            return None
+
+    def record_teacher_student_pair(
+        self,
+        prompt: str,
+        teacher_response: str,
+        student_response: str,
+        student_action=None,
+    ) -> bool:
+        """Enqueue a (teacher, student) pair for Qwen distillation.
+
+        Feeds the HevolveAI DistillationEngine the same way the in-process
+        parallel path does (learning_llm_provider.py:1551-1558).  Fire-and-
+        forget; returns True iff enqueue succeeded.
+        """
+        if not (self._in_process and self._provider):
+            return False
+        engine = getattr(self._provider, 'distillation_engine', None)
+        if engine is None:
+            return False
+        if not student_response or not teacher_response:
+            return False
+        if student_response == teacher_response:
+            # No correction needed — skip.
+            return False
+        try:
+            engine.enqueue(
+                query=prompt,
+                teacher_response=teacher_response,
+                student_response=student_response,
+                student_action=student_action,
+            )
+            with self._lock:
+                self._stats.setdefault('distillation_pairs', 0)
+                self._stats['distillation_pairs'] += 1
+            return True
+        except Exception as e:
+            logger.debug(f"[distillation] enqueue failed: {e}")
+            return False
+
     def query_hivemind(self, query_text: str,
                        timeout_ms: int = 1000,
                        user_id: str = None) -> Optional[dict]:
@@ -683,15 +862,48 @@ class WorldModelBridge:
         if self._in_process and self._hive_mind:
             try:
                 import torch
-                # Encode query text as a thought tensor
-                thought = torch.randn(1, 2048)  # Placeholder encoding
-                # Use provider's encoder if available
+                # Encode query text as a thought tensor.
+                # Prefer the provider's encoder; if unavailable, fall back to
+                # a deterministic hash-derived vector so repeated queries of
+                # the same text yield the same latent (vs torch.randn which
+                # would make every call dissimilar to itself).
+                # Mirrors the fallback in api_server.py's /hivethink handler.
+                thought = None
                 if (self._provider and
                         hasattr(self._provider, 'embodied_agent') and
                         self._provider.embodied_agent and
                         hasattr(self._provider.embodied_agent, 'encoder')):
-                    encoder = self._provider.embodied_agent.encoder
-                    thought = encoder.encode_text(query_text)
+                    try:
+                        encoder = self._provider.embodied_agent.encoder
+                        if hasattr(encoder, 'encode_text'):
+                            encoded = encoder.encode_text(query_text)
+                            # encode_text may return a tensor or (tensor, info)
+                            if isinstance(encoded, tuple):
+                                encoded = encoded[0]
+                            flat = encoded.detach().cpu().flatten()
+                            if flat.shape[0] > 2048:
+                                flat = flat[:2048]
+                            elif flat.shape[0] < 2048:
+                                flat = torch.nn.functional.pad(
+                                    flat, (0, 2048 - flat.shape[0])
+                                )
+                            thought = torch.nn.functional.normalize(
+                                flat, dim=0
+                            ).unsqueeze(0)
+                    except Exception as enc_err:
+                        logger.debug(
+                            f"[Bridge] Encoder fallback for hivemind_query: {enc_err}"
+                        )
+                        thought = None
+
+                if thought is None:
+                    # Deterministic hash -> 2048-dim bit-expanded vector.
+                    # Same input yields same vector (unlike torch.randn).
+                    query_hash = hash(query_text) % (2 ** 31)
+                    vec = torch.zeros(2048, device='cpu')
+                    for i in range(2048):
+                        vec[i] = ((query_hash >> (i % 31)) & 1) * 0.02 - 0.01
+                    thought = torch.nn.functional.normalize(vec, dim=0).unsqueeze(0)
 
                 result = self._hive_mind.think_together_distributed(
                     local_thought=thought,
@@ -729,6 +941,39 @@ class WorldModelBridge:
             if responses:
                 with self._lock:
                     self._stats['total_hivemind_queries'] += 1
+                # Each peer response is a legitimate (query -> answer) pair.
+                # Feed them as training experiences so the local agent
+                # learns from cross-peer knowledge, not just transient
+                # query-response display. Deduplicated by peer_id +
+                # response-hash in record_interaction's batcher.
+                try:
+                    for idx, peer_resp in enumerate(responses):
+                        if not isinstance(peer_resp, dict):
+                            continue
+                        peer_id = (peer_resp.get('peer_id')
+                                   or peer_resp.get('node_id')
+                                   or f'peer_{idx}')
+                        peer_text = (peer_resp.get('thought')
+                                     or peer_resp.get('response')
+                                     or peer_resp.get('text'))
+                        if not peer_text:
+                            continue
+                        self.record_interaction(
+                            user_id=user_id or 'hive',
+                            prompt_id=f'peerlink_{peer_id}',
+                            prompt=query_text[:2000],
+                            response=str(peer_text)[:5000],
+                            model_id=f'peerlink:{peer_id}',
+                            latency_ms=float(timeout_ms),
+                            node_id=peer_id,
+                        )
+                    with self._lock:
+                        self._stats.setdefault('peerlink_responses_trained', 0)
+                        self._stats['peerlink_responses_trained'] += len(responses)
+                except Exception as train_err:
+                    logger.debug(
+                        f"[Bridge] Failed to feed PeerLink responses to training: {train_err}"
+                    )
                 return {
                     'thoughts': responses,
                     'source': 'peerlink',
@@ -903,6 +1148,186 @@ class WorldModelBridge:
         except Exception as e:
             logger.debug(f"RALT distribution skipped: {e}")
             return {'success': False, 'reason': str(e)}
+
+    # ─── RALT skill ingestion (inbound, peer → local) ────────────────
+    #
+    # Complements distribute_skill_packet(): that method is outbound
+    # (local HevolveAI learned a skill → notify peers). The two methods
+    # below are the inbound path (peer learned a skill → pull & install
+    # into local HevolveAI). Receiver side of the RALT hive loop.
+    #
+    # Wiring:
+    #   gossip peer_broadcast endpoint (discovery.py)
+    #     -> handle_ralt_skill_notification(msg)       ← notification
+    #          pulls full packet from source_api_url
+    #     -> ingest_skill_packet(packet_dict)          ← install
+    #          in-process: agent.import_skill(RALTPacket.from_wire(dict))
+    #          HTTP:       POST /v1/ralt/skills/install
+
+    def handle_ralt_skill_notification(self, msg: dict) -> dict:
+        """Pull a newly-announced skill from its source node and install it.
+
+        Invoked by the /api/social/peers/broadcast gossip receiver when
+        msg['type'] == 'ralt_skill_available'. The notification carries
+        only a summary; we fetch the full packet from the sender's
+        /v1/ralt/skills/export/{task_id} and hand it to
+        ingest_skill_packet.
+
+        Failure modes are returned as dicts rather than raised so the
+        gossip dispatcher can reply with a structured diagnostic to the
+        sender without crashing the blueprint.
+        """
+        summary = msg.get('packet_summary') or {}
+        task_id = summary.get('task_id')
+        source_url = (msg.get('source_api_url') or '').rstrip('/')
+        source_node = msg.get('source_node', 'unknown')
+
+        if not task_id or not source_url:
+            return {'success': False,
+                    'reason': 'missing_task_id_or_source_api_url'}
+
+        # Echo prevention: don't ingest skills we ourselves broadcast.
+        # _node_id on the bridge is currently unset; fall back to the
+        # gossip singleton which holds the canonical local node_id.
+        try:
+            from integrations.social.peer_discovery import gossip
+            local_node = self._node_id or getattr(gossip, 'node_id', None)
+        except Exception:
+            local_node = self._node_id
+        if local_node and source_node == local_node:
+            return {'success': False, 'reason': 'echo_skip'}
+
+        # Pull the packet. Use circuit breaker so a repeatedly failing
+        # source can't stall the gossip dispatcher.
+        if self._circuit_breaker.is_open():
+            return {'success': False, 'reason': 'circuit_open'}
+        try:
+            resp = pooled_get(
+                f"{source_url}/v1/ralt/skills/export/{task_id}",
+                timeout=self._timeout_default)
+        except requests.RequestException as e:
+            self._circuit_breaker.record_failure()
+            return {'success': False, 'reason': f'fetch_failed: {e}'}
+
+        if resp.status_code != 200:
+            self._circuit_breaker.record_failure()
+            return {'success': False,
+                    'reason': f'export_http_{resp.status_code}'}
+        try:
+            packet_dict = resp.json()
+        except ValueError as e:
+            self._circuit_breaker.record_failure()
+            return {'success': False,
+                    'reason': f'export_not_json: {e}'}
+        self._circuit_breaker.record_success()
+
+        return self.ingest_skill_packet(packet_dict, source_node=source_node)
+
+    def ingest_skill_packet(self, packet_dict: dict,
+                            source_node: str = '') -> dict:
+        """Install a wire-format RALT packet into the local HevolveAI.
+
+        In-process: reconstruct RALTPacket and call embodied_agent
+        .import_skill() directly (zero HTTP overhead, same code path as
+        the local learning loop at integrated_realtime_agent.py:1331).
+
+        HTTP: POST the dict to /v1/ralt/skills/install on the local
+        HevolveAI API server.
+
+        Guardrails:
+        1. CCT gate — requires a token with 'skill_distribution'
+           capability on the INGEST side too (prevents unauthenticated
+           peers from pushing skills into our local model).
+        2. WorldModelSafetyBounds.gate_ralt_ingest (if available) —
+           mirror of gate_ralt_export used by distribute_skill_packet.
+        """
+        # Symmetric CCT gate: we require skill_distribution to ingest
+        # because ingestion mutates the local world model. Mirrors the
+        # check in distribute_skill_packet (line 923).
+        if not self._check_cct_access('skill_distribution'):
+            logger.info("Skill ingest blocked: no CCT with "
+                        "skill_distribution capability")
+            with self._lock:
+                self._stats['total_skills_blocked'] += 1
+            return {'success': False, 'reason': 'no_cct_skill_distribution'}
+
+        # Optional ingest-side guardrail (inbound analog of
+        # gate_ralt_export). Skip gracefully if not implemented.
+        try:
+            from security.hive_guardrails import WorldModelSafetyBounds
+            if hasattr(WorldModelSafetyBounds, 'gate_ralt_ingest'):
+                passed, reason = WorldModelSafetyBounds.gate_ralt_ingest(
+                    packet_dict, source_node)
+                if not passed:
+                    with self._lock:
+                        self._stats['total_skills_blocked'] += 1
+                    return {'success': False, 'reason': reason}
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"gate_ralt_ingest skipped: {e}")
+
+        # In-process fast path: reuse the exact same call that the
+        # local learning loop uses after self-learning (see
+        # integrated_realtime_agent.py:1331). Importing RALTPacket
+        # lazily so this module works when HevolveAI isn't installed.
+        if self._in_process and self._provider is not None:
+            try:
+                agent = getattr(self._provider, 'embodied_agent', None)
+                if agent is not None and hasattr(agent, 'import_skill'):
+                    from hevolveai.embodied_ai.learning.latent_transfer import (
+                        RALTPacket)
+                    pkt = RALTPacket.from_wire(packet_dict)
+                    ok = bool(agent.import_skill(pkt, verify_topology=True))
+                    with self._lock:
+                        self._stats.setdefault('total_skills_received', 0)
+                        self._stats.setdefault('total_skills_installed', 0)
+                        self._stats['total_skills_received'] += 1
+                        if ok:
+                            self._stats['total_skills_installed'] += 1
+                    return {
+                        'success': ok,
+                        'mode': 'in_process',
+                        'task_id': pkt.task_id,
+                        'source_id': pkt.source_id,
+                    }
+            except Exception as e:
+                # Fall through to HTTP — in-process path failed but the
+                # HTTP API may still be reachable in a hybrid setup.
+                logger.debug(
+                    f"[WorldModelBridge] in-process skill ingest failed, "
+                    f"falling back to HTTP: {e}")
+
+        # HTTP fallback: POST to local HevolveAI /v1/ralt/skills/install
+        if self._http_disabled or self._circuit_breaker.is_open():
+            return {'success': False,
+                    'reason': 'http_disabled_or_circuit_open'}
+        try:
+            resp = pooled_post(
+                f'{self._api_url}/v1/ralt/skills/install',
+                json=packet_dict,
+                timeout=self._timeout_default)
+        except requests.RequestException as e:
+            self._circuit_breaker.record_failure()
+            return {'success': False, 'reason': f'install_fetch_failed: {e}'}
+
+        if resp.status_code != 200:
+            self._circuit_breaker.record_failure()
+            return {'success': False,
+                    'reason': f'install_http_{resp.status_code}'}
+        self._circuit_breaker.record_success()
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {'success': False, 'reason': 'install_not_json'}
+        with self._lock:
+            self._stats.setdefault('total_skills_received', 0)
+            self._stats.setdefault('total_skills_installed', 0)
+            self._stats['total_skills_received'] += 1
+            if body.get('success'):
+                self._stats['total_skills_installed'] += 1
+        body.setdefault('mode', 'http')
+        return body
 
     # ─── Health ──────────────────────────────────────────────────────
 
@@ -1289,13 +1714,57 @@ class WorldModelBridge:
                 self._cb_record_failure()
             return
 
-        # Error/rejection: route as correction
+        # Error/rejection: route as correction.
+        # C1 hive-memory-on-high-error: before submitting the correction,
+        # ask the hive if peers have encountered this modality+error before.
+        # Any collective hint is attached to the correction as explanation
+        # so the KernelContinualLearner / LoRA learner gets richer context
+        # than the raw error string alone. This closes the loop between
+        # local failures and the shared error-memory store.
         if status in ('error', 'user_rejected') and error_message:
+            hive_hint = None
+            try:
+                query_text = (
+                    f'output_failure modality={output_modality} '
+                    f'error={error_message[:200]} context={context[:200]}'
+                )
+                hive_result = self.query_hivemind(
+                    query_text, user_id=user_id, timeout_ms=200
+                )
+                if hive_result:
+                    if isinstance(hive_result, dict):
+                        hive_hint = (
+                            hive_result.get('thought')
+                            or hive_result.get('thoughts')
+                            or hive_result.get('source')
+                        )
+                    else:
+                        hive_hint = str(hive_result)[:400]
+                    if hive_hint:
+                        with self._lock:
+                            self._stats.setdefault(
+                                'hive_hints_on_output_error', 0)
+                            self._stats['hive_hints_on_output_error'] += 1
+            except Exception as hive_err:
+                logger.debug(
+                    f"[Bridge] hive hint query failed for output error: {hive_err}"
+                )
+                hive_hint = None
+
+            explanation = None
+            if hive_hint:
+                explanation = f'hive_hint: {str(hive_hint)[:400]}'
+
             self.submit_correction(
                 original_response=f'[{output_modality}] {context[:500]}',
                 corrected_response=f'{output_modality} generation failed: {error_message}',
                 expert_id=user_id,
                 confidence=0.8 if status == 'user_rejected' else 0.5,
+                explanation=explanation,
+                context={'output_modality': output_modality,
+                         'status': status,
+                         'user_id': user_id,
+                         'hive_hint_used': bool(hive_hint)},
             )
             return
 
@@ -1326,12 +1795,31 @@ class WorldModelBridge:
         }
 
     def apply_federation_update(self, aggregated: dict) -> bool:
-        """Store aggregated network-wide metrics locally.
+        """Store aggregated network-wide metrics locally and notify listeners.
 
-        Does NOT push to HevolveAI — federation metrics are consumed
-        by BenchmarkRegistry and dashboard, not HevolveAI's learning pipeline.
+        Does NOT push to HevolveAI's parametric learning — federation metrics
+        are consumed by BenchmarkRegistry and dashboard, not the gradient
+        pipeline. But the EventBus emit lets any local subscriber
+        (dashboards, benchmark router, coding_agent benchmark_tracker)
+        react without polling _federation_aggregated.
+
+        Called by FederatedAggregator.apply_aggregated() (single entry point).
         """
         self._federation_aggregated = aggregated
+        try:
+            from core.platform.events import emit_event
+            emit_event('learning.federation_update', {
+                'epoch': aggregated.get('epoch', 0),
+                'peer_count': aggregated.get('peer_count', 0),
+                'convergence': aggregated.get('convergence'),
+            })
+            # Keep legacy topic for backward-compat with existing subscribers
+            emit_event('federation.aggregated', {
+                'epoch': aggregated.get('epoch', 0),
+                'peer_count': aggregated.get('peer_count', 0),
+            })
+        except Exception as exc:
+            logger.debug(f"[WorldModelBridge] federation event emit failed: {exc}")
         return True
 
 

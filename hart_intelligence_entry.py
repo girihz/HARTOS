@@ -5,10 +5,18 @@ if sys.platform == 'win32' and 'pytest' not in sys.modules:
     # Force UTF-8 encoding for stdout/stderr to prevent crashes with non-ASCII characters
     # Skip when running under pytest — pytest wraps stdout/stderr for capture,
     # and replacing them here closes pytest's file handles.
+    # Skip in cx_Freeze windowed builds — sys.stdout.buffer is closed (no console),
+    # and TextIOWrapper on a closed buffer raises ValueError at import time.
     if sys.stdout is not None and hasattr(sys.stdout, 'buffer'):
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        except (ValueError, OSError):
+            pass
     if sys.stderr is not None and hasattr(sys.stderr, 'buffer'):
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        try:
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        except (ValueError, OSError):
+            pass
 
 from bs4 import BeautifulSoup
 from enum import Enum
@@ -1232,6 +1240,17 @@ def _init_learning_pipeline():
     global _learning_provider, _hive_mind, _trace_recorder
 
     try:
+        # G2: Ensure HevolveArmor's import hook is installed before the first
+        # `import hevolveai.*` statement runs below.  `try_import_hevolveai`
+        # is idempotent and a no-op when the package is already loaded or
+        # no armored bundle is present on disk.
+        try:
+            from security.native_hive_loader import try_import_hevolveai
+            try_import_hevolveai('hevolveai')
+        except ImportError:
+            # security package missing — fall through to the raw import path
+            pass
+
         from hevolveai.embodied_ai.rl_ef import (
             create_learning_llm_config,
             register_learning_provider,
@@ -3241,6 +3260,113 @@ def get_tools(req_tool, is_first: bool = False):
 from core.constants import SUPPORTED_LANG_DICT  # noqa: E402
 
 
+# ---------------------------------------------------------------------------
+# G12: Parallel SSM student executor shared across CustomGPT instances.
+# ---------------------------------------------------------------------------
+# llama.cpp (teacher) is reached via pooled_post to GPT_API / DRAFT_GPT_API.
+# HevolveAI's SSM student previously never ran on this path — only the
+# in-process LearningLLMProvider.create_chat_completion() branch invoked it,
+# which HARTOS' CustomGPT bypasses entirely.  We now kick off the SSM
+# forward pass in parallel with the teacher HTTP call.  After the teacher
+# reply arrives we opportunistically pair the two for distillation.
+#
+# Failure modes (all silent — never block the teacher path):
+#   * Bridge unavailable          → student_future is None
+#   * In-process mode off         → predict_student returns None
+#   * SSM forward raises          → predict_student returns None
+#   * SSM exceeds collect timeout → skip distillation, return teacher only
+import concurrent.futures as _g12_cf
+
+_g12_ssm_executor: Optional[_g12_cf.ThreadPoolExecutor] = None
+_g12_ssm_executor_lock = threading.Lock()
+
+
+def _g12_get_executor() -> Optional[_g12_cf.ThreadPoolExecutor]:
+    global _g12_ssm_executor
+    if _g12_ssm_executor is not None:
+        return _g12_ssm_executor
+    with _g12_ssm_executor_lock:
+        if _g12_ssm_executor is None:
+            if os.environ.get('HEVOLVE_PARALLEL_SSM', '1') == '0':
+                return None
+            try:
+                _g12_ssm_executor = _g12_cf.ThreadPoolExecutor(
+                    max_workers=2, thread_name_prefix='g12_ssm_student')
+                atexit.register(
+                    lambda: _g12_ssm_executor.shutdown(wait=False)
+                    if _g12_ssm_executor else None)
+            except Exception:
+                _g12_ssm_executor = None
+    return _g12_ssm_executor
+
+
+def _g12_kick_off_student(prompt: str):
+    """Submit a student SSM forward pass; return a Future or None."""
+    if not prompt or len(prompt) < 1:
+        return None
+    ex = _g12_get_executor()
+    if ex is None:
+        return None
+    try:
+        from integrations.agent_engine.world_model_bridge import (
+            get_world_model_bridge,
+        )
+        bridge = get_world_model_bridge()
+    except Exception:
+        return None
+
+    def _worker(_bridge=bridge, _prompt=prompt):
+        try:
+            return _bridge.predict_student(_prompt)
+        except Exception:
+            return None
+
+    try:
+        return ex.submit(_worker)
+    except RuntimeError:
+        # Executor shut down (e.g., during interpreter teardown).
+        return None
+
+
+def _g12_finalize(prompt: str, teacher_response: str, student_future) -> None:
+    """Collect the student future (short-timeout) and enqueue distillation.
+
+    Fire-and-forget — we never hold up the teacher return.  Callers MUST
+    pass the teacher text they're about to return; distillation only fires
+    when both responses are available AND they differ.
+    """
+    if student_future is None or not teacher_response:
+        return
+    try:
+        # Budget: we're about to return to the user anyway.  If the student
+        # isn't done within 500ms, drop it for this turn — distillation
+        # can pick up the next request.
+        student = student_future.result(timeout=0.5)
+    except _g12_cf.TimeoutError:
+        # Let it finish in the background; we just don't use it this turn.
+        return
+    except Exception:
+        return
+    if not student or not isinstance(student, dict):
+        return
+    s_text = student.get('response')
+    if not s_text:
+        return
+    try:
+        from integrations.agent_engine.world_model_bridge import (
+            get_world_model_bridge,
+        )
+        bridge = get_world_model_bridge()
+        bridge.record_teacher_student_pair(
+            prompt=prompt,
+            teacher_response=teacher_response,
+            student_response=str(s_text),
+            student_action=student.get('action_tensor'),
+        )
+    except Exception:
+        pass
+
+
 class CustomGPT(LLM):
     casual_conv: bool
 
@@ -3254,13 +3380,19 @@ class CustomGPT(LLM):
         return "custom"
 
     def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+        # G12: kick off HevolveAI SSM student in parallel with llama.cpp.
+        # `_g12_student_future` is set for the lifetime of this call and
+        # drained before each return path to feed the distillation engine.
+        _g12_student_future = _g12_kick_off_student(prompt)
         # Guard: if no LLM endpoint is configured, return gracefully instead
         # of crashing with MissingSchema on every request (SRE FM3 fix).
         if not (DRAFT_GPT_API or GPT_API):
             app.logger.error(
                 'No LLM endpoint configured (GPT_API and DRAFT_GPT_API both empty). '
                 'Set HEVOLVE_LOCAL_LLM_URL or configure port_registry.')
-            return "I'm not available right now — no language model endpoint is configured."
+            _fallback_msg = "I'm not available right now — no language model endpoint is configured."
+            _g12_finalize(prompt, _fallback_msg, _g12_student_future)
+            return _fallback_msg
 
         start_time = time.time()
         self.count += 1
@@ -3513,6 +3645,8 @@ class CustomGPT(LLM):
             end_result = str(response).replace('\n', ' ').replace('\t', '')
             app.logger.info(f"the end response is {end_result}")
 
+            # G12: drain SSM student future and feed distillation engine
+            _g12_finalize(prompt, end_result, _g12_student_future)
             return end_result
             # return response_from_groq.content.replace('\n', ' ').replace('\t', '')
         if checker == 1:
@@ -3546,12 +3680,18 @@ class CustomGPT(LLM):
                 _err = resp_json['error']
                 _msg = _err.get('message', str(_err)) if isinstance(_err, dict) else str(_err)
                 app.logger.error(f"LLM server error: {_msg}")
-                return f"I couldn't process that request — {_msg}"
+                _err_reply = f"I couldn't process that request — {_msg}"
+                # G12: drain SSM student future and feed distillation engine
+                _g12_finalize(prompt, _err_reply, _g12_student_future)
+                return _err_reply
             response_text = resp_json["choices"][0]["message"]["content"]
             num_tokens = len(encoding.encode(
                 response_text.replace('\n', ' ').replace('\t', ''))) if encoding else len(response_text.split())
             thread_local_data.update_res_token_count(num_tokens)
-            return response_text.replace('\n', ' ').replace('\t', '')
+            _final_text = response_text.replace('\n', ' ').replace('\t', '')
+            # G12: drain SSM student future and feed distillation engine
+            _g12_finalize(prompt, _final_text, _g12_student_future)
+            return _final_text
 
     @property
     def _identifying_params(self) -> Mapping[str, Any]:
@@ -4737,6 +4877,134 @@ else:
         raise ImportError("autogen package is not installed")
 
 
+# ---------------------------------------------------------------------------
+# G10: Agent-agent ingestion callback
+# ---------------------------------------------------------------------------
+# Each tool step inside the LangChain agent loop is a mini "agent talking to
+# another agent" exchange.  HevolveAI treats these just like user<->AI turns:
+# they become training data via WorldModelBridge.record_interaction().
+# Without this hook the ENTIRE inner reasoning loop was invisible to the
+# learner — only the final reply was ingested.
+#
+# On each tool invocation we record:
+#   prompt   = "<Thought + Action JSON emitted by the planner agent>"
+#   response = "<Observation returned by the tool/agent>"
+#   model_id = "langchain-tool:<tool_name>"
+#
+# All calls are best-effort and fire-and-forget — the callback must NEVER
+# raise or add latency to the agent loop.
+try:
+    from langchain_classic.callbacks.base import BaseCallbackHandler as _LC_BaseCallbackHandler
+except ImportError:
+    _LC_BaseCallbackHandler = None
+
+
+if _LC_BaseCallbackHandler is not None:
+
+    class AgentInteractionIngestor(_LC_BaseCallbackHandler):
+        """Feed every intra-agent tool step to WorldModelBridge as training data.
+
+        Correlates each tool invocation by capturing the AgentAction emitted
+        by ``on_agent_action`` and pairing it with the matching
+        ``on_tool_end`` observation.  LangChain may interleave parallel tools
+        in the future, so we key by ``run_id`` not a single latest slot.
+        """
+
+        def __init__(self, user_id, prompt_id, node_id=None):
+            super().__init__()
+            self._user_id = str(user_id) if user_id is not None else 'anonymous'
+            self._prompt_id = str(prompt_id) if prompt_id is not None else ''
+            self._node_id = node_id
+            self._pending = {}  # run_id -> (tool, tool_input, action_log, start_ts)
+            self._bridge = None
+
+        def _get_bridge(self):
+            if self._bridge is not None:
+                return self._bridge
+            try:
+                from integrations.agent_engine.world_model_bridge import (
+                    get_world_model_bridge,
+                )
+                self._bridge = get_world_model_bridge()
+            except Exception:
+                self._bridge = False  # sentinel meaning "gave up"
+            return self._bridge if self._bridge else None
+
+        def on_agent_action(self, action, *, run_id=None, **kwargs):
+            try:
+                rid = str(run_id) if run_id is not None else 'default'
+                self._pending[rid] = (
+                    getattr(action, 'tool', '') or '',
+                    getattr(action, 'tool_input', '') or '',
+                    getattr(action, 'log', '') or '',
+                    time.time(),
+                )
+            except Exception:
+                pass
+
+        def on_tool_end(self, output, *, run_id=None, **kwargs):
+            try:
+                rid = str(run_id) if run_id is not None else 'default'
+                ctx = self._pending.pop(rid, None)
+                if ctx is None:
+                    return
+                tool_name, tool_input, action_log, start_ts = ctx
+                bridge = self._get_bridge()
+                if bridge is None:
+                    return
+                latency_ms = max(0.0, (time.time() - start_ts) * 1000.0)
+                prompt_text = (
+                    f"[agent-step]\nAction: {tool_name}\n"
+                    f"Input: {str(tool_input)[:2000]}\n"
+                    f"Reasoning: {str(action_log)[:1500]}"
+                )
+                response_text = str(output)[:4000]
+                bridge.record_interaction(
+                    user_id=self._user_id,
+                    prompt_id=self._prompt_id,
+                    prompt=prompt_text,
+                    response=response_text,
+                    model_id=f"langchain-tool:{tool_name}",
+                    latency_ms=latency_ms,
+                    node_id=self._node_id,
+                )
+            except Exception:
+                # Never propagate — training ingestion must not break the agent.
+                pass
+
+        def on_tool_error(self, error, *, run_id=None, **kwargs):
+            # Tool errors are ALSO training signal (negative observations).
+            try:
+                rid = str(run_id) if run_id is not None else 'default'
+                ctx = self._pending.pop(rid, None)
+                if ctx is None:
+                    return
+                tool_name, tool_input, action_log, start_ts = ctx
+                bridge = self._get_bridge()
+                if bridge is None:
+                    return
+                latency_ms = max(0.0, (time.time() - start_ts) * 1000.0)
+                prompt_text = (
+                    f"[agent-step]\nAction: {tool_name}\n"
+                    f"Input: {str(tool_input)[:2000]}\n"
+                    f"Reasoning: {str(action_log)[:1500]}"
+                )
+                response_text = f"[TOOL_ERROR] {str(error)[:3000]}"
+                bridge.record_interaction(
+                    user_id=self._user_id,
+                    prompt_id=self._prompt_id,
+                    prompt=prompt_text,
+                    response=response_text,
+                    model_id=f"langchain-tool-error:{tool_name}",
+                    latency_ms=latency_ms,
+                    node_id=self._node_id,
+                )
+            except Exception:
+                pass
+else:
+    AgentInteractionIngestor = None  # noqa: N816
+
+
 # main function
 def get_ans(casual_conv, req_tool, user_id, query, custom_prompt, preferred_lang):
     start_time = time.time()
@@ -4953,9 +5221,128 @@ def get_ans(casual_conv, req_tool, user_id, query, custom_prompt, preferred_lang
         metadata=metadata
     )
     agent_chain_start_time = time.time()
-    ans = agent_chain.run({'input': query})
+    # G10: Feed every intra-agent tool step into WorldModelBridge so the
+    # inner reasoning loop (not just the final answer) becomes training data.
+    _ingestor_callbacks = None
+    # Global suppression flag: once we've proven that the running langchain_classic
+    # does NOT accept `callbacks=` on `.run()`, keep going but skip attempting it
+    # again.  Without this we'd hit the TypeError on every chat turn and still
+    # record/log the silent-drop metric every time.  The metric counter captures
+    # the fallback events so a /metrics endpoint can expose G10 ingestion health.
+    if AgentInteractionIngestor is not None and not getattr(
+            get_ans, '_g10_callbacks_unsupported', False):
+        try:
+            _ingestor_callbacks = [AgentInteractionIngestor(
+                user_id=user_id,
+                prompt_id=prom_id,
+            )]
+        except Exception:
+            _ingestor_callbacks = None
+    try:
+        try:
+            if _ingestor_callbacks is not None:
+                ans = agent_chain.run(
+                    {'input': query}, callbacks=_ingestor_callbacks)
+            else:
+                ans = agent_chain.run({'input': query})
+        except TypeError as _cb_te:
+            # Older langchain_classic does not accept callbacks on .run().
+            # Silently swallowing this caused G10 ingestion to disable globally
+            # with zero alarm (see /api/admin/metrics — g10_silent_drops).
+            # Log once, flip the suppression flag, bump the counter, and fall
+            # back so the agent call still succeeds.  Also emit to the
+            # centralized exception_collector so SelfHealingDispatcher /
+            # ExceptionWatcher pick up the pattern and can surface it in the
+            # operator /health feed — a future schema drift must not silently
+            # degrade G10 ingestion a second time.  Intentionally NOT
+            # broadened to bare Exception: the goal is graceful-degrade on a
+            # known langchain-version mismatch, not hide every failure.
+            get_ans._g10_callbacks_unsupported = True
+            get_ans._g10_silent_drops = (
+                getattr(get_ans, '_g10_silent_drops', 0) + 1)
+            _payload_preview = (str(query or ''))[:100]
+            app.logger.warning(
+                "[G10] agent_chain.run(callbacks=) raised TypeError; "
+                "G10 training ingestion disabled for this process. "
+                "exc=%r payload=%r count=%d",
+                _cb_te, _payload_preview, get_ans._g10_silent_drops,
+                extra={
+                    'component': 'AgentInteractionIngestor',
+                    'action': 'record_interaction_failed',
+                    'silent_drops': get_ans._g10_silent_drops,
+                })
+            try:
+                from exception_collector import record_exception
+                record_exception(
+                    _cb_te, module=__name__, function='get_ans',
+                    component='AgentInteractionIngestor',
+                    action='record_interaction_failed',
+                    silent_drops=get_ans._g10_silent_drops,
+                    payload_preview=_payload_preview,
+                )
+            except Exception:
+                # Fire-and-forget — never let telemetry break the agent.
+                pass
+            ans = agent_chain.run({'input': query})
+    except Exception as _agent_err:
+        # G13: Report text-modality generation failures to the learner so
+        # the modality router can re-weight future routing decisions.
+        # submit_output_feedback(status='error') lands on /v1/corrections and
+        # also fires the C1 hive-hint lookup.  Fire-and-forget: never mask
+        # the underlying agent error.
+        try:
+            from integrations.agent_engine.world_model_bridge import (
+                get_world_model_bridge as _g_wmb,
+            )
+            _bridge = _g_wmb()
+            _elapsed_s = time.time() - agent_chain_start_time
+            _bridge.submit_output_feedback(
+                output_modality='text',
+                status='error',
+                context=(query or '')[:2000],
+                model_used='langchain-agent',
+                error_message=f'{type(_agent_err).__name__}: {str(_agent_err)[:500]}',
+                generation_time_seconds=float(_elapsed_s),
+                user_id=str(user_id),
+            )
+        except Exception as _fb_err:
+            app.logger.debug(
+                f"[get_ans] submit_output_feedback skipped: {_fb_err}")
+        raise
     app.logger.info("time taken by chain agent run %s seconds",
                     time.time() - agent_chain_start_time)
+
+    # G13 (success-side): empty / trivial / fallback replies are ALSO weak
+    # text outputs worth tagging for router adjustment.  We only flag truly
+    # empty or the sentinel "model_not_available" / exception-shaped strings
+    # — genuine short replies shouldn't be penalised.
+    try:
+        _ans_text = str(ans or '').strip()
+        _looks_empty = (len(_ans_text) == 0)
+        _looks_error = any(
+            marker in _ans_text.lower()
+            for marker in ('model_not_available', 'internal server error',
+                           '[tool_error]', 'exception:', 'traceback')
+        )
+        if _looks_empty or _looks_error:
+            from integrations.agent_engine.world_model_bridge import (
+                get_world_model_bridge as _g_wmb2,
+            )
+            _bridge2 = _g_wmb2()
+            _bridge2.submit_output_feedback(
+                output_modality='text',
+                status='error',
+                context=(query or '')[:2000],
+                model_used='langchain-agent',
+                error_message='empty_or_degenerate_reply' if _looks_empty
+                else f'error_markers_in_reply: {_ans_text[:300]}',
+                generation_time_seconds=float(
+                    time.time() - agent_chain_start_time),
+                user_id=str(user_id),
+            )
+    except Exception as _fb_err2:
+        app.logger.debug(
+            f"[get_ans] success-side feedback skipped: {_fb_err2}")
     end_time = time.time()
     elapse_time = end_time-start_time
     app.logger.info(
@@ -5175,6 +5562,25 @@ def _persist_language(lang: str) -> bool:
     directly."""
     from core.user_lang import set_preferred_lang
     return set_preferred_lang(lang)
+
+
+def _vision_keyword_override(prompt: str) -> bool:
+    """Safety net that overrides the draft classifier's `is_casual`
+    verdict when the user's prompt clearly needs vision.
+
+    Thin wrapper — the canonical keyword set + compiled regex live
+    in core.constants.VISION_INTENT_PATTERN so the single source of
+    truth is a constant file that multiple callers can import.
+
+    Returns True → caller should fall through to the full LangChain
+    tool path (Visual_Context_Camera / parse_visual_context becomes
+    reachable).  Returns False → keep the draft's standby reply.
+    """
+    try:
+        from core.constants import prompt_needs_vision
+        return prompt_needs_vision(prompt or '')
+    except Exception:
+        return False
 
 
 def _chat_reply(user_id, request_id, response_text: str, **payload):
@@ -5564,6 +5970,15 @@ def chat():
     probe = data.get('probe', None)
     intermediate = data.get('intermediate', None)
     speculative = data.get('speculative', False)
+    # Tier ladder preference forwarded from Nunba Demopage toggle (see
+    # routes/hartos_backend_adapter.py + routes/chatbot_routes.py).
+    # Values: 'local_only' | 'auto' | 'hive_preferred'.  Default 'auto'
+    # preserves today's behavior for every existing caller (old Nunba
+    # builds, direct HTTP clients, MCP bridge, tests).  Validated on
+    # Nunba side too; we revalidate here to keep HARTOS self-contained.
+    intelligence_preference = data.get('intelligence_preference', 'auto')
+    if intelligence_preference not in ('local_only', 'auto', 'hive_preferred'):
+        intelligence_preference = 'auto'
     # Draft-first dispatch: Qwen3.5-0.8B standby reply + delegate signal.
     # Default ON — the dispatcher gracefully returns 'no_draft_model' when
     # the 0.8B isn't loaded and we transparently fall through to the normal
@@ -5807,6 +6222,7 @@ def chat():
                 str(prompt_id) if prompt_id else str(request_id or 'anon'),
                 agent_persona=custom_prompt or None,
                 preferred_lang=preferred_lang,
+                user_pref=intelligence_preference,
             )
             # Only commit when the dispatcher actually produced a reply.
             # no_draft_model / circuit breaker / guardrail block all leave
@@ -5843,6 +6259,23 @@ def chat():
                     _is_agentic_orchestration = True
                     # Fall through — do NOT return the draft reply; the
                     # create_agent branch below runs in this same request.
+                elif _vision_keyword_override(prompt):
+                    # Vision safety-net: the 0.8B draft has no sight,
+                    # so a `is_casual=True` draft reply to "can you see
+                    # me?" would be a confabulation.  When the prompt
+                    # clearly asks for camera/scene/screen access, force
+                    # the full LangChain tool path so
+                    # `Visual_Context_Camera` (parse_visual_context)
+                    # can run.  Single-source regex lives in
+                    # core.constants.VISION_INTENT_PATTERN.
+                    app.logger.info(
+                        'draft classifier returned casual but prompt '
+                        'matches VISION_INTENT_PATTERN — falling through '
+                        'to LangChain tool path for Visual_Context_Camera'
+                    )
+                    # Fall through — do NOT return the draft standby
+                    # reply; the tool-based path below will run and the
+                    # VLM tool will produce a grounded answer.
                 else:
                     return _chat_reply(
                         user_id, request_id, result['response'],
@@ -8431,6 +8864,29 @@ def main():
     """
     # Boot integrity verification (deferred from import time)
     hevolve_verify_boot()
+
+    # Guardrail hash verification — refuse to boot with tampered
+    # hive_guardrails values unless HEVOLVE_GUARDRAIL_HASH_ENFORCE=0
+    # (dev override). The module-level call inside hive_guardrails is
+    # self-consistent at pristine import; this explicit boot re-check
+    # surfaces any post-import monkey-patch or dynamic module substitution
+    # before any ConstitutionalFilter entry point has a chance to run.
+    try:
+        from security.hive_guardrails import (
+            enforce_guardrail_integrity,
+            get_guardrail_hash,
+        )
+        enforce_guardrail_integrity()
+        logging.getLogger('hevolve_social').info(
+            "[Guardrail] hash verified: %s", get_guardrail_hash()[:16] + '...')
+    except RuntimeError:
+        # enforce_guardrail_integrity already logged CRITICAL and we want
+        # the hard abort to propagate — this is a guardian-angel integrity
+        # check and we refuse to boot.
+        raise
+    except Exception as e:
+        logging.getLogger('hevolve_social').warning(
+            f"[Guardrail] hash verification skipped (import error): {e}")
 
     _validate_startup()
 
