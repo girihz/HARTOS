@@ -39,16 +39,18 @@ def fresh_catalog() -> ModelCatalog:
 class TestPopulateTtsCatalog:
     """Tests for populate_tts_catalog from integrations.channels.media.tts_router."""
 
-    # ENGINE_REGISTRY currently has 10 engines (luxtts removed — poor naturalness):
-    #   chatterbox_turbo, cosyvoice3, f5_tts, indic_parler,
+    # ENGINE_REGISTRY currently has 11 engines (luxtts removed — poor
+    # naturalness; omnivoice added — universal 646-lang voice-clone):
+    #   chatterbox_turbo, cosyvoice3, f5_tts, indic_parler, omnivoice,
     #   chatterbox_ml, pocket_tts, espeak, makeittalk, piper, kokoro
-    EXPECTED_COUNT = 10
+    EXPECTED_COUNT = 11
 
     EXPECTED_IDS = {
         'tts-chatterbox-turbo',
         'tts-cosyvoice3',
         'tts-f5-tts',
         'tts-indic-parler',
+        'tts-omnivoice',
         'tts-chatterbox-ml',
         'tts-pocket-tts',
         'tts-kokoro',
@@ -512,9 +514,9 @@ class TestPopulateFromSubsystems:
 
     Expected totals from the built-in _populate_* methods (no extra
     application-registered populators):
-        TTS      : 11  (ENGINE_REGISTRY — chatterbox_turbo/ml, luxtts,
-                       cosyvoice3, f5_tts, indic_parler, pocket_tts,
-                       kokoro, espeak, makeittalk, piper)
+        TTS      : 11  (ENGINE_REGISTRY — chatterbox_turbo/ml,
+                       cosyvoice3, f5_tts, indic_parler, omnivoice,
+                       pocket_tts, kokoro, espeak, makeittalk, piper)
         STT      : 11  (5 faster-whisper + 6 sherpa-onnx)
         VLM      :  5  (qwen3vl, qwen08b caption, minicpm-v2, mobilevlm, clip)
         VideoGen :  2  (wan2gp, ltx2)
@@ -522,7 +524,7 @@ class TestPopulateFromSubsystems:
         Total    : 31
     """
 
-    EXPECTED_TTS_COUNT = 10
+    EXPECTED_TTS_COUNT = 11
     EXPECTED_STT_COUNT = 11
     EXPECTED_VLM_COUNT = 5  # +1 for qwen08b caption model
     EXPECTED_VIDEOGEN_COUNT = 2
