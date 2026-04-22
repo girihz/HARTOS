@@ -51,6 +51,13 @@ PERSONAS = {
         'audience': 'developers',
         'cadence': 'weekly',
     },
+    'bootstrap_quest_contest_host': {
+        'name': 'Quest',
+        'kind': 'contest-host',
+        'goal_type': 'marketing',
+        'audience': 'developers',
+        'cadence': 'weekly',
+    },
 }
 
 
