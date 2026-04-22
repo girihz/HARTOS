@@ -328,6 +328,41 @@ class TestAppRegistryHealth(unittest.TestCase):
         self.assertIn('desktop_app', h['types'])
 
 
+class TestNativeAppsContainsNunba(unittest.TestCase):
+    """Nunba must be in bootstrap.NATIVE_APPS so AppRegistry picks it
+    up when `shutil.which('nunba')` resolves on an installed HART OS
+    system, making it a first-class native agentic client the runtime
+    can dispatch to. Regression guard for the native-app contract —
+    the e2e smoke test (tests/e2e-os-smoke.sh checks #16/#17) verifies
+    the install-time side; this enforces the bootstrap-time side."""
+
+    def test_nunba_registered_when_binary_present(self):
+        from unittest.mock import patch
+        from core.platform.app_registry import AppRegistry
+        from core.platform.bootstrap import _register_native_apps
+
+        reg = AppRegistry()
+        # Pretend every binary shutil.which() is asked about exists
+        # so _register_native_apps registers every NATIVE_APPS entry.
+        with patch('core.platform.bootstrap.shutil.which',
+                   lambda exe: f'/nix/store/fake/{exe}'):
+            _register_native_apps(reg)
+
+        nunba = reg.get('nunba')
+        self.assertIsNotNone(nunba, "Nunba missing from NATIVE_APPS")
+        self.assertEqual(nunba.type, 'desktop_app')
+        # HART-OS-first app — LiquidUI can reach the Flask API on :5000
+        # and the runtime dispatches agentic calls to backend :6777.
+        self.assertEqual(nunba.entry.get('exec'), 'nunba')
+        self.assertIn('http', nunba.entry,
+                      "Nunba manifest missing http surface for LiquidUI")
+        self.assertIn('backend', nunba.entry,
+                      "Nunba manifest missing backend URL for agentic runtime")
+        self.assertIn('linux', nunba.platforms)
+        self.assertIn('windows', nunba.platforms)
+        self.assertIn('macos', nunba.platforms)
+
+
 # ═══════════════════════════════════════════════════════════════
 # OS Feature Panel Registrations (P0/P1 OS Credibility)
 # ═══════════════════════════════════════════════════════════════

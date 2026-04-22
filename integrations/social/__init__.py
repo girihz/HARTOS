@@ -9,6 +9,17 @@ logger = logging.getLogger('hevolve_social')
 # Lazy imports to avoid circular dependencies
 _social_bp = None
 
+# ── Idempotency sentinel (2026-04-19) ──────────────────────────────
+# init_social is expensive: registers ~18 blueprints, seeds DB tables,
+# starts gossip/peer discovery, pulls autogen→openai→langchain via
+# init_agent_engine.  Flask's register_blueprint raises on duplicate
+# name, so a second call would crash the app.  Defend against double-
+# init by tracking whether we've already run.  (Nunba's main.py has
+# its own idempotency guard too; this is belt-and-suspenders for any
+# downstream caller that imports this module and calls init_social
+# again — tests, reloader, future cloud entry.)
+_INIT_DONE = False
+
 
 def get_social_blueprint():
     global _social_bp
@@ -19,7 +30,17 @@ def get_social_blueprint():
 
 
 def init_social(app):
-    """Initialize the social network module. Call after app = Flask(...)."""
+    """Initialize the social network module. Call after app = Flask(...).
+
+    This function is idempotent — calling it twice is safe.  The second
+    call short-circuits and logs a debug message.  Rationale: this call
+    registers 18+ blueprints, and Flask rejects duplicate blueprint
+    names; skipping the second call is less surprising than raising."""
+    global _INIT_DONE
+    if _INIT_DONE:
+        logger.debug("init_social: already initialized, skipping second call")
+        return
+    _INIT_DONE = True
     # Block dev mode on central
     import os as _os_boot
     node_tier = _os_boot.environ.get('HEVOLVE_NODE_TIER', 'flat')
@@ -323,12 +344,27 @@ def init_social(app):
         except Exception as e:
             logger.debug(f"HevolveSocial coding agent init skipped: {e}")
 
-    # Start unified agent engine (marketing, coding goals via unified daemon)
-    try:
-        from integrations.agent_engine import init_agent_engine
-        init_agent_engine(app)
-    except Exception as e:
-        logger.warning(f"HevolveSocial agent engine init skipped: {e}")
+    # Start unified agent engine (marketing, coding goals via unified daemon).
+    # Gated behind HEVOLVE_AGENT_ENGINE_ENABLED=true (default: false).
+    #
+    # Why gated (2026-04-19): init_agent_engine imports agent_baseline_service
+    # which imports helper which imports autogen which imports openai/langchain/
+    # transformers.  On a cold frozen-bundle boot this chain + import-lock
+    # contention with the Nunba hartos-init thread stalled `_bg_import` for
+    # 240s+.  The agent engine is only meaningful on hive/central nodes —
+    # flat desktop users get no value from it, so defaulting it OFF restores
+    # fast boot for 95%+ of installs.  Cloud/regional/central deployments
+    # should set HEVOLVE_AGENT_ENGINE_ENABLED=true in their env.
+    import os as _os_ae
+    if _os_ae.environ.get('HEVOLVE_AGENT_ENGINE_ENABLED', 'false').lower() == 'true':
+        try:
+            from integrations.agent_engine import init_agent_engine
+            init_agent_engine(app)
+            logger.info("HevolveSocial agent engine initialized")
+        except Exception as e:
+            logger.warning(f"HevolveSocial agent engine init skipped: {e}")
+    else:
+        logger.debug("HevolveSocial agent engine: gated OFF (set HEVOLVE_AGENT_ENGINE_ENABLED=true to enable)")
 
     # Register with central registry if configured
     import os
