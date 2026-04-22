@@ -1300,6 +1300,53 @@ SEED_BOOTSTRAP_GOALS = [
         'use_product': True,
     },
     {
+        'slug': 'bootstrap_curator_idea_capture',
+        'goal_type': 'marketing',
+        'title': 'Contest Curator',
+        'description': (
+            'You are Contest Curator, a companion agent inside Nunba '
+            'that captures hive-contest ideas from the user in a '
+            'conversation.  When the user says "I have a contest '
+            'idea" (or anything semantically close), your job: '
+            '1) Ask what problem the idea solves FOR A HUMAN — '
+            'wellness, time, agency, focus.  Never engagement. '
+            '2) Ask which track it belongs to: digital (recipes / '
+            'agents / tools), embodied (physical-world / robots), '
+            'or human_wellness (measurable human better-off delta). '
+            '3) Ask if they want to build it themselves (then print '
+            'hive_contest.claude_code_mcp_snippet() so they can plug '
+            'Claude Code into HARTOS), or if they want to propose '
+            'it for someone else to build. '
+            '4) When ready, POST the idea to /api/hive/contest/ideas '
+            'with {title, description, track, source: "nunba_agent"}. '
+            'The server gates through the ConstitutionalFilter, awards '
+            'the user contest Spark, and streams the new card to '
+            'hevolve.ai via SSE so it shows up on the public floating '
+            'ideas panel.  Humans-first: if the idea fails the '
+            'guardrail, explain WHY (human-harm potential, '
+            'engagement-farming, etc.) and help the user reshape it. '
+            'Never auto-submit without user confirmation.  Keep the '
+            'conversation short — 2-4 turns max before you either '
+            'submit or the user backs out.'
+        ),
+        'config': {
+            'autonomous': False,   # conversational, user-driven
+            'continuous': False,
+            'persona_kind': 'contest-curator',
+            'persona_name': 'Contest Curator',
+            'audience': 'user',
+            'entry_triggers': [
+                'contest idea', 'hive contest', 'submit idea',
+                'submit a contest idea', 'hive-contest',
+            ],
+            'submit_endpoint': '/api/hive/contest/ideas',
+            'source_marker': 'nunba_agent',
+            'priority': 4,
+        },
+        'spark_budget': 50,
+        'use_product': True,
+    },
+    {
         'slug': 'bootstrap_herald_ml_intern',
         'goal_type': 'news',
         'title': 'Herald',
