@@ -406,6 +406,24 @@ jobs:
           tag_name: "v${{ github.event.inputs.version }}"
           files: /tmp/release-artifacts/*
 
+      - name: Attach to rolling 'nightly' release (push to main)
+        # Keeps docs.hevolve.ai/downloads/ links like
+        # /releases/latest/download/hart-os-desktop.iso resolvable
+        # between tagged releases.  workflow_dispatch handles the
+        # immutable vX.Y.Z tagging path; this one keeps the rolling
+        # pointer fresh.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: "HART OS Nightly"
+          prerelease: true
+          files: /tmp/release-artifacts/*
+          body: |
+            Rolling nightly build of HART OS from the main branch.
+            These artifacts are overwritten on every push — for a
+            pinned version, see the vX.Y.Z tagged releases.
+
   # ═══════════════════════════════════════════════════════════
   # 3a. Build universal installers (fast Go cross-compile)
   # ═══════════════════════════════════════════════════════════
