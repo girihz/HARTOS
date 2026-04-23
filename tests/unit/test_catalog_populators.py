@@ -602,3 +602,103 @@ class TestPopulateFromSubsystems:
             assert str(entry.model_type) in valid_types, (
                 f"Entry {entry.id} has unrecognised model_type: {entry.model_type!r}"
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ModelCatalog.override() — cross-populator amendment API (task #330 H5)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestModelCatalogOverride:
+    """Tests for ModelCatalog.override() — the single-writer amendment path.
+
+    override() replaces direct ``entry.field = value`` mutation by populators
+    that need to amend another populator's already-registered entry. It
+    preserves the catalog's lock + dirty-flag + logging invariants.
+    """
+
+    def _entry(self):
+        from integrations.service_tools.model_catalog import ModelEntry
+        return ModelEntry(
+            id='test-model',
+            name='Test Model',
+            model_type='llm',
+            tags=['initial'],
+            supports_cpu=False,
+            idle_timeout_s=600.0,
+        )
+
+    def test_override_updates_fields(self):
+        cat = fresh_catalog()
+        cat.register(self._entry(), persist=False)
+        ok = cat.override('test-model',
+                          tags=['a', 'b'],
+                          supports_cpu=True,
+                          idle_timeout_s=300.0)
+        assert ok is True
+        entry = cat.get('test-model')
+        assert entry.tags == ['a', 'b']
+        assert entry.supports_cpu is True
+        assert entry.idle_timeout_s == 300.0
+
+    def test_override_missing_model_returns_false(self):
+        cat = fresh_catalog()
+        ok = cat.override('not-registered', tags=['x'])
+        assert ok is False
+
+    def test_override_unknown_field_raises(self):
+        cat = fresh_catalog()
+        cat.register(self._entry(), persist=False)
+        with pytest.raises(ValueError) as ei:
+            cat.override('test-model', nonexistent_field=1)
+        assert 'nonexistent_field' in str(ei.value)
+        # Entry must be untouched on validation failure
+        assert cat.get('test-model').tags == ['initial']
+
+    def test_override_sets_dirty_flag(self):
+        cat = fresh_catalog()
+        cat.register(self._entry(), persist=False)
+        cat._dirty = False
+        cat.override('test-model', tags=['new'])
+        assert cat._dirty is True
+
+    def test_override_persist_false_by_default(self, tmp_path):
+        # Default persist=False must not write the JSON file.
+        path = tmp_path / 'cat.json'
+        cat = ModelCatalog(catalog_path=str(path))
+        cat.register(self._entry(), persist=False)
+        assert not path.exists()
+        cat.override('test-model', tags=['x'])
+        assert not path.exists()
+
+    def test_override_persist_true_writes_file(self, tmp_path):
+        path = tmp_path / 'cat.json'
+        cat = ModelCatalog(catalog_path=str(path))
+        cat.register(self._entry(), persist=False)
+        cat.override('test-model', persist=True, tags=['x'])
+        assert path.exists()
+
+    def test_override_is_concurrent_safe(self):
+        # Serialised access under _lock: N override() calls from threads
+        # must leave the final entry fully consistent (no torn writes).
+        import threading
+        cat = fresh_catalog()
+        cat.register(self._entry(), persist=False)
+
+        def _worker(i):
+            cat.override('test-model',
+                         tags=[f'worker-{i}'],
+                         idle_timeout_s=float(i))
+
+        threads = [threading.Thread(target=_worker, args=(i,))
+                   for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        entry = cat.get('test-model')
+        # Final tags must match SOME worker's write (not torn between two).
+        assert len(entry.tags) == 1
+        assert entry.tags[0].startswith('worker-')
+        # idle_timeout_s must be an int-valued float in [0, 19].
+        assert 0.0 <= entry.idle_timeout_s <= 19.0
