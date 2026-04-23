@@ -175,6 +175,16 @@ def get_contest_info() -> Dict[str, Any]:
             'constitutional guardrail.  A flashy agent that ignores '
             'human outcomes scores zero.  Humans are always in control.'
         ),
+        'co_creation_principle': (
+            'We are a startup constrained by resources to validate every '
+            'feature alone — so we co-create with the community.  You can '
+            'trust the open code, the public ledger of every Spark, the '
+            'crowdsourced compute economy, and the constitutional '
+            'guardrails — even if you do not know the strangers shipping '
+            'work alongside you.  The system is the trust.  Share the '
+            'contest with friends and family who have hardware skills, '
+            'a domain to embody, or a wellness intent to ship.'
+        ),
         'public_url': public_url,
         'starts_at': window['start'].isoformat(),
         'ends_at': window['end'].isoformat(),
@@ -191,6 +201,10 @@ def get_contest_info() -> Dict[str, Any]:
                     'Publish a CREATE→REUSE recipe to the app_marketplace',
                     'Ship an expert agent to the expert_agents network',
                     'Prove a benchmark lift on the public leaderboard',
+                    'Wrap any vendor SDK as a hive tool (cloud APIs, '
+                    'data sources, payment rails, vector DBs, etc.) — '
+                    'startup-constrained team needs the community to '
+                    'cover the long tail of integrations',
                 ],
             },
             {
@@ -207,6 +221,13 @@ def get_contest_info() -> Dict[str, Any]:
                     'Register a robot skill via intelligence_api',
                     'Submit a verified embodied episode (success-rate ≥ 0.7)',
                     'Port an existing digital recipe to an embodied adapter',
+                    'Bridge any BLE / USB / serial hardware that ships '
+                    'an SDK — EEG headsets, smart-home sensors, medical '
+                    'devices, accessibility hardware.  The hive needs '
+                    'these integrations to perceive the real world.',
+                    'Publish an SDK adapter for a robot platform '
+                    '(LeRobot, ROS, Unitree, Spot, custom arms) so '
+                    'embodied recipes execute on more bodies',
                 ],
             },
             {
@@ -239,10 +260,15 @@ def get_contest_info() -> Dict[str, Any]:
             '   {"mcp":{"hartos":{"command":"hart","args":["mcp","serve"]}}}',
             '3) Register for the contest: '
             '   POST /api/hive/contest/join { track: "digital" | "embodied" | "human_wellness" }',
-            '4) Ship.  Publish a recipe, register a robot skill, run an '
-            '   agent whose outcome the guardrail attests as human-'
-            '   positive.  Every scoring event lands in your wallet as '
-            '   season_spark — which is the leaderboard.',
+            '4) Ship.  Publish a recipe, register a robot skill, wrap '
+            '   a vendor SDK, bridge a BLE/EEG/hardware device, or '
+            '   run an agent whose outcome the guardrail attests as '
+            '   human-positive.  Every scoring event lands in your '
+            '   wallet as season_spark — which is the leaderboard.',
+            f'5) Share {public_url} with one friend or family member '
+            '   who has hardware skills, a domain to embody, or a '
+            '   wellness intent to ship.  The hive is sized by who '
+            '   shows up; co-creation beats solo every time.',
         ],
         'prize_model': {
             'spark_split_90_9_1': (
