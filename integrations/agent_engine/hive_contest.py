@@ -77,18 +77,21 @@ SCORE_WEIGHTS: Dict[ContestTrack, Dict[str, float]] = {
         'agents_adopted':     50.0,
         'benchmarks_proven':  25.0,
         'season_spark':        1.0,
+        'ideas_submitted':    10.0,
     },
     ContestTrack.EMBODIED: {
         'robot_episodes_success': 75.0,
         'robot_skills_registered': 40.0,
         'gpu_hours_served':         5.0,
         'season_spark':             1.0,
+        'ideas_submitted':         10.0,
     },
     ContestTrack.HUMAN_WELLNESS: {
         'wellness_outcomes_attested':  120.0,
         'human_corrections_accepted':   30.0,
         'benchmarks_proven':            15.0,
         'season_spark':                  1.0,
+        'ideas_submitted':              10.0,
     },
 }
 
@@ -233,6 +236,7 @@ EVENT_TYPES = frozenset({
     'gpu_hour_served',
     'wellness_outcome_attested',
     'human_correction_accepted',
+    'idea_submitted',
 })
 
 
@@ -251,6 +255,7 @@ def _event_weight(event_type: str, track: ContestTrack) -> float:
         'gpu_hour_served': 'gpu_hours_served',
         'wellness_outcome_attested': 'wellness_outcomes_attested',
         'human_correction_accepted': 'human_corrections_accepted',
+        'idea_submitted': 'ideas_submitted',
     }
     key = key_map.get(event_type)
     return float(w.get(key, 0.0)) if key else 0.0
@@ -397,6 +402,7 @@ def _track_event_source_types(track: ContestTrack) -> List[str]:
         'gpu_hours_served':            'contest:gpu_hour_served',
         'wellness_outcomes_attested':  'contest:wellness_outcome_attested',
         'human_corrections_accepted':  'contest:human_correction_accepted',
+        'ideas_submitted':             'contest:idea_submitted',
     }
     return [reverse[k] for k in SCORE_WEIGHTS[track] if k in reverse]
 
@@ -456,6 +462,160 @@ def register_participant(
         'already_registered': False,
         'track': track.value,
     }
+
+
+# ─── Idea submissions ─────────────────────────────────────────────────
+
+# Ideas are just SocialPosts with content_type='contest_idea' — we
+# deliberately reuse the social Post/vote/comment infrastructure so
+# every idea gets discovery, ranking, and discussion for free.  No
+# shadow table.  The source_channel field carries the track.
+
+IDEA_CONTENT_TYPE = 'contest_idea'
+
+
+def submit_idea(
+    db,
+    user_id: str,
+    title: str,
+    description: str,
+    track: ContestTrack = ContestTrack.DIGITAL,
+    source: str = 'ui',
+) -> Dict[str, Any]:
+    """Submit a contest idea.
+
+    Pipeline — all on existing infra, no new tables:
+      1. ConstitutionalFilter screens title + description
+      2. SocialPost row with content_type='contest_idea',
+         source_channel='contest:<track>' — feeds, boost, voting,
+         comments all just work via the social path.
+      3. ResonanceService.award_spark(source_type='contest:idea_submitted')
+         — wallet/leaderboard updates land in the existing ledger.
+      4. EventBus 'contest.idea_submitted' — hevolve.ai's floating UI
+         subscribes via the same pattern as other realtime events.
+
+    Source argument lets us distinguish 'ui' (clicked-page submission),
+    'nunba_agent' (user spoke to Nunba's contest curator), and
+    'mcp_agent' (Claude Code plugin).  Stored in the Spark ledger's
+    description so reports can count per-channel.
+    """
+    title = (title or '').strip()
+    description = (description or '').strip()
+    if not title or not description:
+        return {'ok': False, 'reason': 'title+description required'}
+    if len(title) > 200:
+        title = title[:200]
+    if len(description) > 4000:
+        description = description[:4000]
+
+    # Constitutional gate — contest ideas must still pass guardrails.
+    try:
+        from security.hive_guardrails import ConstitutionalFilter
+        passed, reason = ConstitutionalFilter.check_prompt(
+            f'{title}\n\n{description}'
+        )
+        if not passed:
+            logger.info(f'contest idea blocked: {reason}')
+            return {'ok': False, 'reason': f'blocked: {reason}'}
+    except ImportError:
+        pass
+
+    try:
+        from integrations.social.models import SocialPost
+    except ImportError:
+        return {'ok': False, 'reason': 'social models unavailable'}
+
+    post = SocialPost(
+        author_id=str(user_id),
+        title=title,
+        content=description,
+        content_type=IDEA_CONTENT_TYPE,
+        source_channel=f'contest:{track.value}',
+    )
+    try:
+        db.add(post)
+        db.flush()
+    except Exception as exc:
+        logger.debug(f'contest idea post insert failed: {exc}')
+        return {'ok': False, 'reason': 'db insert failed'}
+
+    # Award Spark via the canonical event path — NOT a parallel ledger.
+    amount = score_event(
+        db, user_id=str(user_id),
+        event_type='idea_submitted', track=track,
+        source_id=getattr(post, 'id', None),
+        description=f'idea:{title[:80]} via={source}',
+    )
+
+    # Realtime fanout for the Hevolve floating UI.
+    try:
+        from core.platform.events import emit_event
+        emit_event('contest.idea_submitted', {
+            'post_id': getattr(post, 'id', None),
+            'track': track.value,
+            'title': title[:200],
+            'preview': description[:180],
+            'user_id': str(user_id),
+            'source': source,
+            'spark_awarded': amount,
+        })
+    except Exception as exc:
+        logger.debug(f'contest idea event emit failed: {exc}')
+
+    return {
+        'ok': True,
+        'post_id': getattr(post, 'id', None),
+        'track': track.value,
+        'spark_awarded': amount,
+    }
+
+
+def list_ideas(
+    db,
+    track: Optional[ContestTrack] = None,
+    limit: int = 50,
+    since_iso: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return recently-submitted contest ideas ordered by score desc.
+
+    The hevolve.ai floating UI calls this for the initial fill; it then
+    subscribes to 'contest.idea_submitted' EventBus events for
+    incremental drops.
+    """
+    try:
+        from integrations.social.models import SocialPost
+    except ImportError:
+        return []
+
+    q = db.query(SocialPost).filter(
+        SocialPost.content_type == IDEA_CONTENT_TYPE,
+        SocialPost.is_hidden.is_(False) if hasattr(SocialPost, 'is_hidden') else True,
+    )
+    if track is not None:
+        q = q.filter(SocialPost.source_channel == f'contest:{track.value}')
+    if since_iso:
+        try:
+            cutoff = datetime.fromisoformat(since_iso.rstrip('Z'))
+            q = q.filter(SocialPost.created_at >= cutoff)
+        except ValueError:
+            pass
+    q = q.order_by(SocialPost.score.desc(), SocialPost.created_at.desc()).limit(
+        min(max(1, int(limit or 50)), 200)
+    )
+    rows = q.all()
+    out: List[Dict[str, Any]] = []
+    for p in rows:
+        d = p.to_dict() if hasattr(p, 'to_dict') else {
+            'id': getattr(p, 'id', None),
+            'title': getattr(p, 'title', ''),
+            'content': getattr(p, 'content', ''),
+            'score': getattr(p, 'score', 0) or 0,
+        }
+        sc = getattr(p, 'source_channel', '') or ''
+        d['track'] = sc.replace('contest:', '') if sc.startswith('contest:') else 'unknown'
+        d['preview'] = (d.get('content') or '')[:240]
+        out.append(d)
+    return out
 
 
 # ─── Module-level sugar ────────────────────────────────────────────────
