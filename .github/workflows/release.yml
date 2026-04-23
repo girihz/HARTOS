@@ -654,38 +654,52 @@ jobs:
       # ─────────────────────────────────────────────────────────────
       # Optional SSH mirror — hevolve.ai/docs.hevolve.ai on own server
       # ─────────────────────────────────────────────────────────────
-      # Fires only when ALL four secrets are set on the repo.  With any
-      # missing, the step skips cleanly so the Pages deploy above is
-      # still the authoritative live URL.
+      # Accepts EITHER key-based OR password-based auth, whichever is
+      # configured.  Required secrets:
+      #   HEVOLVE_DOCS_SSH_HOST   server hostname
+      #   HEVOLVE_DOCS_SSH_USER   ssh user
+      #   HEVOLVE_DOCS_SSH_PATH   absolute web-root path on server
       #
-      # Secrets to add in GitHub -> Settings -> Secrets and variables
-      # -> Actions:
-      #   HEVOLVE_DOCS_SSH_HOST   the hevolve.ai web server hostname
-      #   HEVOLVE_DOCS_SSH_USER   the ssh user (e.g. deploy)
-      #   HEVOLVE_DOCS_SSH_KEY    the PRIVATE key (openssh format, ed25519
-      #                           recommended).  The matching public key
-      #                           must be in ~/.ssh/authorized_keys on the
-      #                           server.
-      #   HEVOLVE_DOCS_SSH_PATH   absolute path on the server, e.g.
-      #                           /var/www/docs.hevolve.ai
+      # Pick ONE of these auth methods:
+      #   HEVOLVE_DOCS_SSH_KEY    openssh-format PRIVATE key (ed25519
+      #                           recommended).  The matching public
+      #                           key must be in ~/.ssh/authorized_keys
+      #                           on the server.
+      #   HEVOLVE_DOCS_SSH_PASS   ssh password.  sshpass is installed
+      #                           at runtime.  Requires sshd config
+      #                           PasswordAuthentication yes.
+      #
       # Optional:
       #   HEVOLVE_DOCS_SSH_PORT   ssh port, defaults to 22
+      #   HEVOLVE_DOCS_KNOWN_HOSTS  seed known_hosts entries
+      #
+      # If both KEY and PASS are set, KEY wins (more secure).
       - name: Check SSH mirror configuration
         id: ssh_cfg
         run: |
-          if [ -n "${{ secrets.HEVOLVE_DOCS_SSH_HOST }}" ] \
-             && [ -n "${{ secrets.HEVOLVE_DOCS_SSH_USER }}" ] \
-             && [ -n "${{ secrets.HEVOLVE_DOCS_SSH_KEY }}" ] \
-             && [ -n "${{ secrets.HEVOLVE_DOCS_SSH_PATH }}" ]; then
+          host='${{ secrets.HEVOLVE_DOCS_SSH_HOST }}'
+          user='${{ secrets.HEVOLVE_DOCS_SSH_USER }}'
+          path='${{ secrets.HEVOLVE_DOCS_SSH_PATH }}'
+          key_set='${{ secrets.HEVOLVE_DOCS_SSH_KEY }}'
+          pass_set='${{ secrets.HEVOLVE_DOCS_SSH_PASS }}'
+          auth=''
+          if [ -n "$key_set" ]; then
+            auth='key'
+          elif [ -n "$pass_set" ]; then
+            auth='pass'
+          fi
+          if [ -n "$host" ] && [ -n "$user" ] && [ -n "$path" ] && [ -n "$auth" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "::notice title=SSH mirror::Deploying _site/ to ${{ secrets.HEVOLVE_DOCS_SSH_USER }}@${{ secrets.HEVOLVE_DOCS_SSH_HOST }}:${{ secrets.HEVOLVE_DOCS_SSH_PATH }}"
+            echo "auth=$auth" >> "$GITHUB_OUTPUT"
+            echo "::notice title=SSH mirror::Deploying _site/ to ${{ secrets.HEVOLVE_DOCS_SSH_USER }}@${{ secrets.HEVOLVE_DOCS_SSH_HOST }}:${{ secrets.HEVOLVE_DOCS_SSH_PATH }} (auth=$auth)"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=SSH mirror::Skipped — add HEVOLVE_DOCS_SSH_HOST/USER/KEY/PATH secrets to enable."
+            echo "auth=none" >> "$GITHUB_OUTPUT"
+            echo "::notice title=SSH mirror::Skipped — need HEVOLVE_DOCS_SSH_HOST + USER + PATH + (KEY or PASS) secrets to enable."
           fi
 
       - name: Install SSH key
-        if: steps.ssh_cfg.outputs.enabled == 'true'
+        if: steps.ssh_cfg.outputs.enabled == 'true' && steps.ssh_cfg.outputs.auth == 'key'
         uses: shimataro/ssh-key-action@v2
         with:
           key: ${{ secrets.HEVOLVE_DOCS_SSH_KEY }}
@@ -698,13 +712,43 @@ jobs:
               Port ${{ secrets.HEVOLVE_DOCS_SSH_PORT || '22' }}
               StrictHostKeyChecking accept-new
 
-      - name: Rsync _site to hevolve web server
-        if: steps.ssh_cfg.outputs.enabled == 'true'
+      - name: Install sshpass (password auth)
+        if: steps.ssh_cfg.outputs.enabled == 'true' && steps.ssh_cfg.outputs.auth == 'pass'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+          mkdir -p ~/.ssh
+          if [ -n "${{ secrets.HEVOLVE_DOCS_KNOWN_HOSTS }}" ]; then
+            echo "${{ secrets.HEVOLVE_DOCS_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+          fi
+          chmod 700 ~/.ssh
+          touch ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Rsync _site via key
+        if: steps.ssh_cfg.outputs.enabled == 'true' && steps.ssh_cfg.outputs.auth == 'key'
         run: |
           set -euo pipefail
-          # Ensure the trailing slash on _site/ so rsync copies contents,
-          # not the _site directory itself.
+          # Trailing slash on _site/ -> rsync copies contents, not the
+          # _site directory itself.
           rsync -az --delete --human-readable --stats \
             _site/ \
             hevolve_docs_target:'${{ secrets.HEVOLVE_DOCS_SSH_PATH }}'
-          echo "::notice title=SSH mirror::Pushed to ${{ secrets.HEVOLVE_DOCS_SSH_HOST }}:${{ secrets.HEVOLVE_DOCS_SSH_PATH }}"
+          echo "::notice title=SSH mirror::Pushed via key to ${{ secrets.HEVOLVE_DOCS_SSH_HOST }}:${{ secrets.HEVOLVE_DOCS_SSH_PATH }}"
+
+      - name: Rsync _site via password
+        if: steps.ssh_cfg.outputs.enabled == 'true' && steps.ssh_cfg.outputs.auth == 'pass'
+        env:
+          SSHPASS: ${{ secrets.HEVOLVE_DOCS_SSH_PASS }}
+        run: |
+          set -euo pipefail
+          PORT='${{ secrets.HEVOLVE_DOCS_SSH_PORT || '22' }}'
+          # sshpass reads the password from the SSHPASS env var (-e),
+          # so it never hits argv or the process listing.
+          # -o StrictHostKeyChecking=accept-new trusts first-seen keys
+          # (same posture as the key path's ssh-config above).
+          sshpass -e rsync -az --delete --human-readable --stats \
+            -e "ssh -p $PORT -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+            _site/ \
+            '${{ secrets.HEVOLVE_DOCS_SSH_USER }}@${{ secrets.HEVOLVE_DOCS_SSH_HOST }}:${{ secrets.HEVOLVE_DOCS_SSH_PATH }}'
+          echo "::notice title=SSH mirror::Pushed via password to ${{ secrets.HEVOLVE_DOCS_SSH_HOST }}:${{ secrets.HEVOLVE_DOCS_SSH_PATH }}"
