@@ -205,6 +205,33 @@ class AutoResearchEngine:
             except Exception:
                 pass
 
+            # RSI-5: ε-greedy exploration arm.  When HEVOLVE_RSI_EXPLORE=1
+            # and the sampled coin lands in the explore bucket, swap the
+            # incremental-tuning prompt stance for a radical-mutation
+            # stance.  The LLM remains the code mutator (no parallel
+            # code-generator path), but the instruction distribution
+            # shifts — this is the cheapest honest wiring of the
+            # stochastic arm without inventing a second mutation backend.
+            # Safety: the candidate still passes RSI-1 + RSI-2 gates
+            # inside commit_improvement before promotion.
+            exploration_hint = ''
+            try:
+                from integrations.agent_engine.exploration_arm import (
+                    select_strategy,
+                )
+                if select_strategy() == 'explore':
+                    exploration_hint = (
+                        "\nEXPLORATION MODE: propose a RADICAL / "
+                        "ARCHITECTURAL change this iteration — not an "
+                        "incremental tweak.  Favor ideas that reshape "
+                        "the approach; safety gates still run before "
+                        "promotion, so a failed bold change costs "
+                        "nothing while a successful one opens the "
+                        "search space.\n"
+                    )
+            except Exception:
+                pass
+
             task = (
                 f"You are running an autonomous research loop.\n\n"
                 f"TARGET FILE: {session.target_file}\n"
@@ -215,6 +242,7 @@ class AutoResearchEngine:
                 f"ITERATION: {session.current_iteration}/{session.max_iterations}\n\n"
                 f"EXPERIMENT HISTORY:\n{history_summary}\n\n"
                 f"{benchmark_hint}"
+                f"{exploration_hint}"
                 f"RUN COMMAND: {session.run_command}\n\n"
                 f"YOUR TASK:\n"
                 f"1. Analyze what worked and what didn't from the history above\n"

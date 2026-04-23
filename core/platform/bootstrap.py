@@ -53,6 +53,20 @@ def bootstrap_platform(extensions_dir: Optional[str] = None) -> ServiceRegistry:
     registry.register('events', EventBus, singleton=True)
     bus = registry.get('events')
 
+    # RSI-4: realtime self-improvement trigger.  Binds the usage-signal
+    # tracker to EventBus topics so chat-turn / goal-failed / tool-error
+    # signals feed the autoresearch cadence axis.  bind_to_bus() itself
+    # is cheap (n callbacks, no threads); the enqueue leg only fires
+    # when HEVOLVE_RSI_REALTIME=1 — so wiring it unconditionally keeps
+    # the tracker's counters populated for dashboards even when the
+    # promotion arm is off.  Promoted candidates still pass RSI-1 +
+    # RSI-2 gates inside autoevolve_code_tools.commit_improvement.
+    try:
+        from integrations.agent_engine.rsi_trigger import get_rsi_trigger
+        get_rsi_trigger().bind_to_bus()
+    except Exception as e:
+        logger.debug('rsi_trigger bind skipped: %s', e)
+
     # CacheService — unified in-memory + optional disk cache
     registry.register('cache', CacheService, singleton=True)
 
