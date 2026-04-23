@@ -365,7 +365,10 @@ How does the hive make it possible?"></textarea>
 </section>
 
 <div class="footer">
-  Source of truth: <code>integrations/agent_engine/hive_contest.py</code> ·
+  Public canonical page: <a id="public-url-link"
+    href="https://hevolve.ai/hive_contest" target="_blank">
+    hevolve.ai/hive_contest</a> ·
+  Source: <code>integrations/agent_engine/hive_contest.py</code> ·
   <a href="/api/hive/contest/info">API /info</a> ·
   <a href="/api/hive/contest/leaderboard">API /leaderboard</a> ·
   Quest posts weekly standings.
@@ -428,6 +431,17 @@ How does the hive make it possible?"></textarea>
       }
 
       renderTracks(info.tracks || []);
+      // Public canonical URL — env-overridable on the server, surfaced
+      // here so a staging deploy can route the footer link to the
+      // matching staging app page automatically.
+      const link = $('#public-url-link');
+      if (link && info.public_url) {
+        link.href = info.public_url;
+        try {
+          const u = new URL(info.public_url);
+          link.textContent = (u.host + u.pathname).replace(/\/$/, '');
+        } catch (_e) { link.textContent = info.public_url; }
+      }
     } catch (e) {
       $('#contest-tagline').textContent =
         'Couldn\'t reach /api/hive/contest/info — is HART OS running on this host?';
