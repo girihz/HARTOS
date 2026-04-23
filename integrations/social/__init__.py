@@ -101,6 +101,16 @@ def init_social(app):
     except Exception as e:
         logger.warning(f"HevolveSocial hive contest blueprint skipped: {e}")
 
+    # Register hive contest UI (single-page local view — reads the same
+    # /api/hive/contest/* endpoints, used by the HART shell panel and
+    # by a direct browser visit for operators).
+    try:
+        from .ui_hive_contest import hive_contest_ui_bp
+        app.register_blueprint(hive_contest_ui_bp)
+        logger.info("HevolveSocial hive contest UI registered at /hive-contest")
+    except Exception as e:
+        logger.warning(f"HevolveSocial hive contest UI blueprint skipped: {e}")
+
     # Register MCP tool registry blueprint (servers, tools, discover)
     try:
         from .api_mcp import mcp_bp
