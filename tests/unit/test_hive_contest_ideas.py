@@ -33,6 +33,72 @@ def test_idea_submitted_event_type_registered():
     assert 'idea_submitted' in hc.EVENT_TYPES
 
 
+# ── Public canonical URL ───────────────────────────────────────────
+
+def test_contest_public_url_default(monkeypatch):
+    """Without env override, URL defaults to hevolve.ai/hive_contest."""
+    monkeypatch.delenv('HEVOLVE_CONTEST_PUBLIC_URL', raising=False)
+    assert hc.get_contest_public_url() == 'https://hevolve.ai/hive_contest'
+
+
+def test_contest_public_url_env_override(monkeypatch):
+    """A staging deploy overrides via HEVOLVE_CONTEST_PUBLIC_URL."""
+    monkeypatch.setenv(
+        'HEVOLVE_CONTEST_PUBLIC_URL',
+        'https://staging.hevolve.ai/hive_contest',
+    )
+    assert hc.get_contest_public_url() == (
+        'https://staging.hevolve.ai/hive_contest'
+    )
+
+
+def test_contest_public_url_falls_back_on_empty(monkeypatch):
+    """Empty/whitespace env falls through to the default — not empty."""
+    monkeypatch.setenv('HEVOLVE_CONTEST_PUBLIC_URL', '   ')
+    assert hc.get_contest_public_url() == 'https://hevolve.ai/hive_contest'
+
+
+def test_contest_info_exposes_public_url(monkeypatch):
+    """get_contest_info() carries the public_url so every consumer
+    (local UI footer, hevolve.ai React, API callers) gets the same
+    canonical destination."""
+    monkeypatch.delenv('HEVOLVE_CONTEST_PUBLIC_URL', raising=False)
+    info = hc.get_contest_info()
+    assert info['public_url'] == 'https://hevolve.ai/hive_contest'
+    # how_to_join[0] must lead with the canonical page — workflow
+    # surfaces read this as the CTA.
+    assert any(
+        'hevolve.ai/hive_contest' in line for line in info['how_to_join']
+    )
+
+
+def test_quest_prompt_uses_canonical_url_not_docs():
+    """Regression: Quest's description should NOT hardcode
+    docs.hevolve.ai/hive-contest as the CTA — that page redirects.
+    Instead the prompt instructs Quest to read from
+    get_contest_public_url()."""
+    from integrations.agent_engine.goal_seeding import SEED_BOOTSTRAP_GOALS
+    quest = next(g for g in SEED_BOOTSTRAP_GOALS
+                 if g['slug'] == 'bootstrap_quest_contest_host')
+    desc = quest['description']
+    assert 'get_contest_public_url' in desc
+    assert 'hevolve.ai/hive_contest' in desc
+
+
+def test_docs_page_has_redirect_to_app_page():
+    """docs.hevolve.ai/hive-contest/ must bounce to the app page so
+    old links keep landing users somewhere live."""
+    import os as _os
+    path = _os.path.join(_ROOT, 'docs', 'hive-contest.md')
+    with open(path, 'r', encoding='utf-8') as fh:
+        body = fh.read()
+    assert 'hevolve.ai/hive_contest' in body
+    # Three converging redirect channels for robustness
+    assert 'http-equiv="refresh"' in body
+    assert '<link rel="canonical"' in body
+    assert 'window.location.replace' in body
+
+
 def test_ideas_submitted_weight_per_track():
     for track in (hc.ContestTrack.DIGITAL,
                   hc.ContestTrack.EMBODIED,
