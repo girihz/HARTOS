@@ -1,6 +1,23 @@
+<!-- Auto-redirect from docs.hevolve.ai/hive-contest/ to the live app
+     page at hevolve.ai/hive_contest.  Both meta-refresh and
+     canonical+JS so search-engine indexers, browsers, and JS-disabled
+     readers all converge on the same place.  See
+     integrations/agent_engine/hive_contest.get_contest_public_url()
+     for the canonical URL (env-overridable). -->
+<meta http-equiv="refresh" content="0; url=https://hevolve.ai/hive_contest">
+<link rel="canonical" href="https://hevolve.ai/hive_contest">
+<script>window.location.replace("https://hevolve.ai/hive_contest");</script>
+
 # Hive Contest — Open Beta
 
 > **Plug your Claude Code into HARTOS. Score by making humans actually better off — in pixels or in the physical world.**
+>
+> **The live contest page is at [hevolve.ai/hive_contest](https://hevolve.ai/hive_contest).**
+> If your browser didn't redirect, click the link above. The doc below
+> stays as a developer reference for the underlying module
+> (`integrations/agent_engine/hive_contest.py`); the contest itself —
+> floating ideas wall, leaderboard, submit form, Claude Code MCP
+> snippet — lives on the app page.
 
 ## Why this contest exists
 
