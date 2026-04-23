@@ -56,6 +56,35 @@ class ContestTrack(str, Enum):
     HUMAN_WELLNESS = 'human_wellness'
 
 
+# ─── Public canonical URL — single source of truth ────────────────────
+#
+# Every workflow that wants to send a user to "the contest page" reads
+# this value: Quest's weekly post, the Contest Curator agent, the
+# Claude-Code MCP onramp snippet, the local /hive-contest footer, the
+# docs build, the channel inbox card.  Override via env for staging /
+# preview deployments.
+#
+# The docs page at https://docs.hevolve.ai/hive-contest/ now redirects
+# to this canonical app URL via a meta-refresh in docs/hive-contest.md
+# so older links from posts / blogs still land on the live page.
+
+DEFAULT_CONTEST_PUBLIC_URL = 'https://hevolve.ai/hive_contest'
+
+
+def get_contest_public_url() -> str:
+    """Canonical hosted contest URL (env-overridable).
+
+    Workflows MUST go through this function instead of hardcoding the
+    URL — that way a single env var swaps the destination across every
+    surface (Quest's posts, Curator's chat replies, the local UI page
+    footer, the docs site).
+    """
+    return (
+        os.environ.get('HEVOLVE_CONTEST_PUBLIC_URL', '').strip()
+        or DEFAULT_CONTEST_PUBLIC_URL
+    )
+
+
 # Score weights per track — tunable without schema changes.
 #
 # DIGITAL: skewed toward published artifacts (recipes, agents) so the
@@ -134,6 +163,7 @@ def get_contest_info() -> Dict[str, Any]:
     onramp snippet.  Rendered by /api/hive/contest/info and by
     docs/hive-contest.md build step."""
     window = get_contest_window()
+    public_url = get_contest_public_url()
     return {
         'name': 'Hive Contest — Open Beta',
         'tagline': (
@@ -145,6 +175,7 @@ def get_contest_info() -> Dict[str, Any]:
             'constitutional guardrail.  A flashy agent that ignores '
             'human outcomes scores zero.  Humans are always in control.'
         ),
+        'public_url': public_url,
         'starts_at': window['start'].isoformat(),
         'ends_at': window['end'].isoformat(),
         'tracks': [
@@ -199,6 +230,9 @@ def get_contest_info() -> Dict[str, Any]:
             t.value: dict(w) for t, w in SCORE_WEIGHTS.items()
         },
         'how_to_join': [
+            f'0) Open the contest page: {public_url} '
+            '   (or talk to the Contest Curator agent inside Nunba — '
+            '   say "I have a contest idea" to get walked through it).',
             '1) Install Nunba / HART OS from https://docs.hevolve.ai/downloads/',
             '   or clone https://github.com/hertz-ai/HARTOS and run locally.',
             '2) Point your Claude Code at the local HARTOS MCP server:',
