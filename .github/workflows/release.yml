@@ -650,3 +650,61 @@ jobs:
             --field https_enforced=true || true
         env:
           GH_TOKEN: ${{ github.token }}
+
+      # ─────────────────────────────────────────────────────────────
+      # Optional SSH mirror — hevolve.ai/docs.hevolve.ai on own server
+      # ─────────────────────────────────────────────────────────────
+      # Fires only when ALL four secrets are set on the repo.  With any
+      # missing, the step skips cleanly so the Pages deploy above is
+      # still the authoritative live URL.
+      #
+      # Secrets to add in GitHub -> Settings -> Secrets and variables
+      # -> Actions:
+      #   HEVOLVE_DOCS_SSH_HOST   the hevolve.ai web server hostname
+      #   HEVOLVE_DOCS_SSH_USER   the ssh user (e.g. deploy)
+      #   HEVOLVE_DOCS_SSH_KEY    the PRIVATE key (openssh format, ed25519
+      #                           recommended).  The matching public key
+      #                           must be in ~/.ssh/authorized_keys on the
+      #                           server.
+      #   HEVOLVE_DOCS_SSH_PATH   absolute path on the server, e.g.
+      #                           /var/www/docs.hevolve.ai
+      # Optional:
+      #   HEVOLVE_DOCS_SSH_PORT   ssh port, defaults to 22
+      - name: Check SSH mirror configuration
+        id: ssh_cfg
+        run: |
+          if [ -n "${{ secrets.HEVOLVE_DOCS_SSH_HOST }}" ] \
+             && [ -n "${{ secrets.HEVOLVE_DOCS_SSH_USER }}" ] \
+             && [ -n "${{ secrets.HEVOLVE_DOCS_SSH_KEY }}" ] \
+             && [ -n "${{ secrets.HEVOLVE_DOCS_SSH_PATH }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=SSH mirror::Deploying _site/ to ${{ secrets.HEVOLVE_DOCS_SSH_USER }}@${{ secrets.HEVOLVE_DOCS_SSH_HOST }}:${{ secrets.HEVOLVE_DOCS_SSH_PATH }}"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=SSH mirror::Skipped — add HEVOLVE_DOCS_SSH_HOST/USER/KEY/PATH secrets to enable."
+          fi
+
+      - name: Install SSH key
+        if: steps.ssh_cfg.outputs.enabled == 'true'
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.HEVOLVE_DOCS_SSH_KEY }}
+          known_hosts: ${{ secrets.HEVOLVE_DOCS_KNOWN_HOSTS || '' }}
+          if_key_exists: replace
+          config: |
+            Host hevolve_docs_target
+              HostName ${{ secrets.HEVOLVE_DOCS_SSH_HOST }}
+              User ${{ secrets.HEVOLVE_DOCS_SSH_USER }}
+              Port ${{ secrets.HEVOLVE_DOCS_SSH_PORT || '22' }}
+              StrictHostKeyChecking accept-new
+
+      - name: Rsync _site to hevolve web server
+        if: steps.ssh_cfg.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          # Ensure the trailing slash on _site/ so rsync copies contents,
+          # not the _site directory itself.
+          rsync -az --delete --human-readable --stats \
+            _site/ \
+            hevolve_docs_target:'${{ secrets.HEVOLVE_DOCS_SSH_PATH }}'
+          echo "::notice title=SSH mirror::Pushed to ${{ secrets.HEVOLVE_DOCS_SSH_HOST }}:${{ secrets.HEVOLVE_DOCS_SSH_PATH }}"
