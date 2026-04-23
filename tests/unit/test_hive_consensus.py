@@ -249,7 +249,7 @@ def test_upgrade_proposal_rejects_when_any_vote_fails(tmp_path, monkeypatch):
          _stub_vote_fail('_vote_local_probe', 'no leaderboard'), \
          _stub_vote_ok('_vote_peer_probe_quorum'):
         decision = hive_consensus.HiveConsensus.upgrade_proposal(
-            agent_id='atlas',
+            prompt_id='atlas',
             goal_type='coding',
             new_content='New prompt — help users write code.',
         )
@@ -272,7 +272,7 @@ def test_upgrade_proposal_approves_when_all_four_pass(tmp_path, monkeypatch):
          _stub_vote_ok('_vote_local_probe'), \
          _stub_vote_ok('_vote_peer_probe_quorum'):
         decision = hive_consensus.HiveConsensus.upgrade_proposal(
-            agent_id='sage',
+            prompt_id='sage',
             goal_type='learning',
             new_content='Coordinate learning goals across the hive.',
         )
@@ -297,7 +297,7 @@ def test_upgrade_proposal_rejects_protected_file_edit(tmp_path, monkeypatch):
          _stub_vote_ok('_vote_local_probe'), \
          _stub_vote_ok('_vote_peer_probe_quorum'):
         decision = hive_consensus.HiveConsensus.upgrade_proposal(
-            agent_id='scout',
+            prompt_id='scout',
             goal_type='ip_protection',
             new_content='Innocuous text.',
             target_files=['security/hive_guardrails.py'],

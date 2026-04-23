@@ -754,6 +754,68 @@ except ImportError:
 except Exception as e:
     app.logger.warning(f"Resource Governor start skipped: {e}")
 
+# Central Orchestrator Client — heartbeat to hevolve.ai central + master
+# kill-switch polling.  Env-gated: no-op when HEVOLVE_CENTRAL_ORCHESTRATOR_URL
+# is unset (default flat-mode install), so we burn ZERO resources on a
+# poll loop nobody asked for.  When configured, the client posts small
+# heartbeats (node_id + guardrail_hash + benchmark best-scores + halted
+# flag), polls /halt for a master-signed stop signal, and routes that
+# through HiveCircuitBreaker.halt_network() — which itself verifies the
+# master-key signature before tripping.  See docs/ml_intern_brief §5-D.
+try:
+    from core import central_orchestrator_client as _coc_mod
+    _coc = _coc_mod.get_client()
+    if _coc.is_configured():
+        if _coc.start():
+            app.logger.info(
+                "Central Orchestrator Client started "
+                "(env-gated: HEVOLVE_CENTRAL_ORCHESTRATOR_URL set)"
+            )
+            # Watchdog — catch silent thread death.  Expected interval
+            # is 2× heartbeat (heartbeat loop wakes at min(heartbeat,
+            # halt_poll, 5s) so 120s gives comfortable headroom without
+            # triggering on a single missed poll.
+            try:
+                from security.node_watchdog import get_watchdog
+                _wd = get_watchdog()
+                if _wd:
+                    _wd.register(
+                        'central_orchestrator_client',
+                        expected_interval=120,
+                        restart_fn=_coc.start,
+                        stop_fn=_coc.stop,
+                    )
+                    app.logger.info(
+                        "Central Orchestrator Client registered with watchdog"
+                    )
+            except ImportError:
+                pass
+            except Exception as e:
+                app.logger.debug(
+                    f"Central Orchestrator watchdog registration skipped: {e}"
+                )
+            # atexit — signal the loop to exit cleanly on process shutdown.
+            # Daemon thread exits with the process regardless; this just
+            # flushes any in-flight heartbeat.
+            import atexit as _atexit
+            _atexit.register(_coc.stop)
+        else:
+            # start() returned False — either already running, or node
+            # tier is 'central' itself (brief's design: central doesn't
+            # self-heartbeat).  Both paths log inside start().
+            pass
+    else:
+        app.logger.debug(
+            "Central Orchestrator Client inactive "
+            "(HEVOLVE_CENTRAL_ORCHESTRATOR_URL unset) — flat-mode default"
+        )
+except ImportError:
+    app.logger.debug(
+        "Central Orchestrator Client not available, skipping"
+    )
+except Exception as e:
+    app.logger.warning(f"Central Orchestrator Client init skipped: {e}")
+
 # Instruction Queue API — never miss a user instruction
 try:
     from integrations.agent_engine.instruction_queue import (
