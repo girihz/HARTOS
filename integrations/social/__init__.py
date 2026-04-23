@@ -239,6 +239,16 @@ def init_social(app):
     except Exception as e:
         logger.debug(f"Thought experiments blueprint skipped: {e}")
 
+    # Register encounter (P2P BLE meetup + mutual-like icebreaker) blueprint.
+    # PR-A alpha skeleton — in-memory state; DB migration v38 lands
+    # in PR-A beta.  Full design: project_encounter_icebreaker.md.
+    try:
+        from .encounter_api import encounter_bp
+        app.register_blueprint(encounter_bp)
+        logger.info("HevolveSocial encounter registered at /api/social/encounter/")
+    except Exception as e:
+        logger.debug(f"HevolveSocial encounter blueprint skipped: {e}")
+
     # NOTE: compute_pledge_bp (api_compute_pledge.py) was consolidated into tracker_bp
     # and the stale file deleted 2026-04-15. All pledge endpoints live at
     # /api/social/tracker/experiments/*/pledge* and /api/social/tracker/pledges/*

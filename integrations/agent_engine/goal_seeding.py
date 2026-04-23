@@ -1476,6 +1476,117 @@ SEED_BOOTSTRAP_GOALS = [
         'spark_budget': 80,
         'use_product': True,
     },
+    {
+        # ── Encounter Icebreaker Agent ──
+        # Full design: Claude-memory/project_encounter_icebreaker.md
+        # On a physical-world mutual-like encounter (two nearby Nunba
+        # users both swiped 'like' on each other's avatar card), draft
+        # a short warm opener grounded in shared interests pulled from
+        # each user's on-device memory graph + their opt-in vibe tags.
+        # ALWAYS drafts only — never auto-sends.  User must approve the
+        # draft via /api/social/encounter/icebreaker/approve before it
+        # is delivered.  Constitutional filter + cultural wisdom check
+        # run on every draft; rejected drafts fall back to a neutral
+        # "Hey, nice to actually be across the room from you" template.
+        'slug': 'encounter_icebreaker_agent',
+        'goal_type': 'social',
+        'title': 'Encounter Icebreaker',
+        'description': (
+            'On a physical-world mutual-like encounter, draft a short '
+            'personalized opener for the user to approve. '
+            '1) Subscribe to the com.hevolve.encounter.match WAMP topic, '
+            '2) Pull 2-3 shared interest tags via recall_memory filtered '
+            'to the matched user + the opt-in vibe_tags they exposed, '
+            '3) Generate a <=220-char draft via the main LLM; run it '
+            'through cultural_wisdom_filter and constitutional_filter, '
+            '4) Publish top draft to com.hevolve.encounter.icebreaker '
+            'with {match_id, draft_text, rationale, alt_drafts}, '
+            '5) Wait for user approval or decline — never auto-send; '
+            'on decline, record the reason into the memory graph so '
+            'future drafts avoid the pattern. '
+            '6) If any constitutional/cultural gate flags the draft, '
+            'fall back to a neutral template rather than re-attempting '
+            'to route around the guardrail.'
+        ),
+        'config': {
+            'autonomous': False,          # user must approve each draft
+            'continuous': True,
+            'persona_kind': 'encounter-companion',
+            'persona_name': 'Encounter Companion',
+            'audience': 'adult',          # 18+ age gate enforced server-side
+            'cadence': 'event',           # triggered by WAMP match topic
+            'priority': 6,
+            'trigger_wamp_topic': 'com.hevolve.encounter.match',
+            # Nunba local agent routing: draft is produced on the
+            # matched user's own device (privacy-local), never cloud.
+            'nunba_agent_id': 'local_encounter_companion',
+            'require_consent': True,
+            'camera_consent_required': False,  # NO camera for encounter
+            'no_autosend': True,
+            'ephemeral_context': True,         # match/sighting purged
+                                                # after draft is sent
+                                                # or declined
+            'constitutional_gates': [
+                'consent_required',
+                'ephemeral_context',
+                'no_autosend',
+                'trust_quarantine_check',
+                'cultural_wisdom_filter',
+            ],
+            'max_draft_length_chars': 220,
+            'draft_expires_sec': 86400,        # 24h unsent = auto-decline
+        },
+        'spark_budget': 120,
+        'use_product': True,
+    },
+    {
+        # ── Conversational Social-Media Management Agent ──
+        # Full design: Claude-memory/project_encounter_icebreaker.md §11
+        # User converses naturally ("this looks cool to post, not this")
+        # with the agent; it learns preferences into the memory graph
+        # and drafts/schedules posts via the existing social_bp posting
+        # infrastructure.  Never auto-publishes — every post requires a
+        # final user approval tap, same as the icebreaker flow.
+        'slug': 'social_media_curator_agent',
+        'goal_type': 'social',
+        'title': 'Social Media Curator',
+        'description': (
+            'Help the user curate, caption, and schedule social-media '
+            'posts via natural conversation. '
+            '1) Listen to user voice/text feedback on candidate media '
+            '("this one\'s cool, that one skip, caption with a hiking '
+            'vibe, post Friday morning"), '
+            '2) Persist preferences via remember() under namespace '
+            'media_agent_prefs so future sessions carry forward, '
+            '3) Use the portrait auto-arranger scorer for aesthetic '
+            'and diversity ordering, '
+            '4) Draft captions + platform-specific copy via the main '
+            'LLM with cultural_wisdom_filter, '
+            '5) Stage scheduled posts via the existing social_bp '
+            'posting API — NEVER auto-publish; user approves each one. '
+            '6) Respect platform mix: no single channel dominates '
+            'without user opt-in.'
+        ),
+        'config': {
+            'autonomous': False,
+            'continuous': True,
+            'persona_kind': 'media-curator',
+            'persona_name': 'Media Curator',
+            'audience': 'adult',
+            'cadence': 'event',
+            'priority': 5,
+            'nunba_agent_id': 'local_media_curator',
+            'require_consent': True,
+            'no_autosend': True,
+            'constitutional_gates': [
+                'consent_required',
+                'no_autosend',
+                'cultural_wisdom_filter',
+            ],
+        },
+        'spark_budget': 100,
+        'use_product': True,
+    },
 ]
 
 # ─── Loophole → Remediation Goal Map ───

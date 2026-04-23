@@ -257,3 +257,76 @@ def prompt_needs_vision(prompt: str) -> bool:
         return bool(VISION_INTENT_PATTERN.search(prompt))
     except Exception:
         return False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ENCOUNTER_TOPICS — WAMP topic namespace for the P2P encounter feature
+# (BLE rotating-pubkey discovery → autonomous sighting correlation →
+# avatar-only mutual-like swipe → icebreaker agent → map overlay).
+#
+# Full design in Claude-memory: project_encounter_icebreaker.md.
+#
+# Single source of truth — consumed by:
+#   - integrations.social.encounter_api (publish on swipe/match)
+#   - integrations.agent_engine.goal_seeding (encounter_icebreaker_agent
+#     subscribes to 'match' topic)
+#   - Nunba desktop wamp_router + landing-page crossbarWorker
+#   - Hevolve_React_Native AutobahnConnectionManager (subscribes to
+#     per-user 'sighting' and 'icebreaker' private topics)
+#
+# Per-user privacy scoping: 'sighting', 'swipe', 'icebreaker' are
+# always prefixed with the user_id by the publisher; 'match' publishes
+# TWO events (one per participant) so one user's subscription never
+# leaks the other's pubkey outside the matched pair.
+#
+# Do NOT inline duplicate topic strings; import from here.
+# ──────────────────────────────────────────────────────────────────────
+ENCOUNTER_TOPIC_SIGHTING: str = 'com.hevolve.encounter.sighting'
+ENCOUNTER_TOPIC_SWIPE: str = 'com.hevolve.encounter.swipe'
+ENCOUNTER_TOPIC_MATCH: str = 'com.hevolve.encounter.match'
+ENCOUNTER_TOPIC_ICEBREAKER: str = 'com.hevolve.encounter.icebreaker'
+
+ENCOUNTER_TOPICS: tuple = (
+    ENCOUNTER_TOPIC_SIGHTING,
+    ENCOUNTER_TOPIC_SWIPE,
+    ENCOUNTER_TOPIC_MATCH,
+    ENCOUNTER_TOPIC_ICEBREAKER,
+)
+
+# Invariant: all encounter topics share the canonical 'com.hevolve.
+# encounter.' prefix so crossbar ACL rules + log grepping are uniform.
+# A topic outside this prefix would not be scoped by the existing
+# WAMP router authorization (wamp_router.py _handle_publish per-topic
+# authorization, Task #301), so drift here is a security regression.
+_ENCOUNTER_PREFIX = 'com.hevolve.encounter.'
+assert all(t.startswith(_ENCOUNTER_PREFIX) for t in ENCOUNTER_TOPICS), (
+    f"ENCOUNTER_TOPICS must all share prefix {_ENCOUNTER_PREFIX!r}: "
+    f"{[t for t in ENCOUNTER_TOPICS if not t.startswith(_ENCOUNTER_PREFIX)]}"
+)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ENCOUNTER feature tunables — physical-world sighting correlation.
+# A beacon is treated as a SIGHTING (autonomous pairing of the real
+# person in front of the user with their rotating pubkey) only when
+# ALL three conditions hold together.  Loosening any one of these
+# degrades to random-pairs-in-a-crowd; tightening any one degrades to
+# never-fires.  Values tuned for phone-in-hand, face-to-face scenario.
+# Pocket-mode (low motion detected on both devices) relaxes compass
+# tolerance to ±90° per BleSightingDetector rules.
+#
+# Consumed by:
+#   - Hevolve_React_Native BleSightingDetector (Kotlin port of same)
+#   - integrations.social.encounter_api.ENCOUNTER_SIGHTING_RULES
+#   - tests.unit.test_sighting_correlation
+# ──────────────────────────────────────────────────────────────────────
+ENCOUNTER_SIGHTING_RSSI_PEAK_DBM: int = -55      # ~1.5m line-of-sight
+ENCOUNTER_SIGHTING_MIN_DWELL_SEC: int = 3        # both parties slowed/stopped
+ENCOUNTER_SIGHTING_COMPASS_TOL_DEG: int = 30     # devices facing within cone
+ENCOUNTER_PUBKEY_ROTATION_SEC: int = 15 * 60     # 15 min / relaunch / geo-shift
+ENCOUNTER_DISCOVERABLE_TTL_SEC: int = 4 * 60 * 60  # 4h auto-off
+ENCOUNTER_DISCOVERABLE_MAX_TOGGLES_24H: int = 6
+ENCOUNTER_SIGHTING_EXPIRES_SEC: int = 24 * 60 * 60  # swipe grace window
+ENCOUNTER_MATCH_WINDOW_SEC: int = 5 * 60         # both sightings must be
+                                                  # within this window to match
+ENCOUNTER_DRAFT_MAX_CHARS: int = 220             # icebreaker length cap
