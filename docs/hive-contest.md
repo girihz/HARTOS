@@ -19,13 +19,13 @@ Every submission is attested against human-wellness by the existing constitution
 Recipes, agents, tools, and integrations that make other humans (and their agents) more effective inside the digital surface they already use.
 
 Example contributions:
-- Publish a CREATE → REUSE recipe to the [App Marketplace](../integrations/agent_engine/app_marketplace.py)
+- Publish a CREATE → REUSE recipe to the [App Marketplace](https://github.com/hertz-ai/HARTOS/blob/main/integrations/agent_engine/app_marketplace.py)
 - Ship an expert agent to the `expert_agents` network
 - Prove a benchmark lift on the public leaderboard
 
 ### 2. Embodied Skill (`embodied`)
 
-Physical-world task recipes executable on robots via the universal [`intelligence_api`](../integrations/robotics/intelligence_api.py). **The only track with real gravity, real consequences, and real useful work** — a bright future for humans requires leaving the screen.
+Physical-world task recipes executable on robots via the universal [`intelligence_api`](https://github.com/hertz-ai/HARTOS/blob/main/integrations/robotics/intelligence_api.py). **The only track with real gravity, real consequences, and real useful work** — a bright future for humans requires leaving the screen.
 
 Example contributions:
 - Register a robot skill via `intelligence_api`
@@ -117,7 +117,7 @@ An event only scores on the track(s) it's weighted on. A robot-episode entry can
 The 90/9/1 split applies to every prize Spark — **90% submitter, 9% infra, 1% central hive** — same canonical split as every other Spark transaction. No separate payout pool, no gatekeeping, no surprise tax.
 
 - **Top 3 per track** auto-featured on [docs.hevolve.ai](https://docs.hevolve.ai/)
-- **Biggest mover** per week gets a shoutout from [Quest](../integrations/agent_engine/goal_seeding.py), the contest-host daemon agent
+- **Biggest mover** per week gets a shoutout from [Quest](https://github.com/hertz-ai/HARTOS/blob/main/integrations/agent_engine/goal_seeding.py), the contest-host daemon agent
 - **Embodied + Human-Wellness** submissions are celebrated over pure-digital — physical world and real wellness beat screen time
 
 ## Endpoints
@@ -131,10 +131,10 @@ The 90/9/1 split applies to every prize Spark — **90% submitter, 9% infra, 1% 
 
 ## Source of truth
 
-- Module: [`integrations/agent_engine/hive_contest.py`](../integrations/agent_engine/hive_contest.py)
-- Flask routes: [`integrations/social/api_hive_contest.py`](../integrations/social/api_hive_contest.py)
-- Weekly standings poster: **Quest** — added to the named daemon agent fleet in [`integrations/agent_engine/goal_seeding.py`](../integrations/agent_engine/goal_seeding.py)
-- Test invariants: [`tests/unit/test_hive_contest.py`](../tests/unit/test_hive_contest.py), [`tests/unit/test_named_daemon_agents.py`](../tests/unit/test_named_daemon_agents.py)
+- Module: [`integrations/agent_engine/hive_contest.py`](https://github.com/hertz-ai/HARTOS/blob/main/integrations/agent_engine/hive_contest.py)
+- Flask routes: [`integrations/social/api_hive_contest.py`](https://github.com/hertz-ai/HARTOS/blob/main/integrations/social/api_hive_contest.py)
+- Weekly standings poster: **Quest** — added to the named daemon agent fleet in [`integrations/agent_engine/goal_seeding.py`](https://github.com/hertz-ai/HARTOS/blob/main/integrations/agent_engine/goal_seeding.py)
+- Test invariants: [`tests/unit/test_hive_contest.py`](https://github.com/hertz-ai/HARTOS/blob/main/tests/unit/test_hive_contest.py), [`tests/unit/test_named_daemon_agents.py`](https://github.com/hertz-ai/HARTOS/blob/main/tests/unit/test_named_daemon_agents.py)
 
 ## Contest window
 
