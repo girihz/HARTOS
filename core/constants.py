@@ -330,3 +330,47 @@ ENCOUNTER_SIGHTING_EXPIRES_SEC: int = 24 * 60 * 60  # swipe grace window
 ENCOUNTER_MATCH_WINDOW_SEC: int = 5 * 60         # both sightings must be
                                                   # within this window to match
 ENCOUNTER_DRAFT_MAX_CHARS: int = 220             # icebreaker length cap
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CHAT_TOPICS — WAMP topic namespace for cross-device chat mirroring
+# (U1-U8 workstream, task ledger #389).
+#
+# chat.new  — a new assistant or user message was persisted.  Payload
+#             carries the full ChatMessage row (seq, msg_id, user_id,
+#             agent_id, role, content, request_id, lang, device_id,
+#             attachments, created_at).  Every device subscribed to the
+#             per-user topic mirrors the row into its local view.
+# chat.ack  — a subscriber ACKs receipt up to seq=N.  Used by the server
+#             to decide when a message can be evicted from the hot cache
+#             (the durable row stays in the DB for cursor-pull replay).
+#
+# Per-user scoping: publisher MUST suffix the user_id so a subscriber
+# can ONLY see their own messages.  Enforced by Nunba's wamp_router
+# _handle_publish per-topic authorization (Task #301).
+#
+# Do NOT inline duplicate topic strings; import from here.
+# ──────────────────────────────────────────────────────────────────────
+CHAT_TOPIC_NEW: str = 'com.hertzai.hevolve.chat.new'
+CHAT_TOPIC_ACK: str = 'com.hertzai.hevolve.chat.ack'
+
+CHAT_TOPICS: tuple = (
+    CHAT_TOPIC_NEW,
+    CHAT_TOPIC_ACK,
+)
+
+# Invariant mirrors ENCOUNTER_TOPICS: shared prefix = uniform ACL.  The
+# existing chat-reply topic 'com.hertzai.hevolve.chat.{user_id}' at
+# hart_intelligence_entry.py:2174,4211 uses the same prefix — per-user
+# suffixing happens at publish-time, not at constant-definition time.
+_CHAT_PREFIX = 'com.hertzai.hevolve.chat.'
+assert all(t.startswith(_CHAT_PREFIX) for t in CHAT_TOPICS), (
+    f"CHAT_TOPICS must all share prefix {_CHAT_PREFIX!r}: "
+    f"{[t for t in CHAT_TOPICS if not t.startswith(_CHAT_PREFIX)]}"
+)
+
+# Cursor-pull tunables — bound the worst-case pull size so a freshly-
+# restored device doesn't stall on a 10k-message replay, and so a
+# malicious cursor=0 pull can't exfiltrate the whole table.
+CHAT_CURSOR_PULL_MAX_ROWS: int = 500
+CHAT_CURSOR_PULL_MAX_BYTES: int = 2 * 1024 * 1024  # 2 MB body cap

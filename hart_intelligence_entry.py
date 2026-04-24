@@ -5711,8 +5711,8 @@ def _chat_reply(user_id, request_id, response_text: str, **payload):
         # or draft-first early returns, so we save here — the ONE place every
         # reply goes through. The user prompt comes via the 'user_prompt' kwarg
         # from callers that have it (most /chat paths do).
+        _prompt = payload.pop('user_prompt', '')
         try:
-            _prompt = payload.pop('user_prompt', '')
             if _prompt and response_text:
                 _mem = get_memory(user_id=user_id)
                 if _mem and hasattr(_mem, 'save_context'):
@@ -5723,6 +5723,41 @@ def _chat_reply(user_id, request_id, response_text: str, **payload):
                     )
         except Exception as _mem_err:
             app.logger.debug(f"_chat_reply: memory save skipped: {_mem_err}")
+
+        # U1-U8 cross-device mirroring (task #389): submit persist + WAMP
+        # publish for both sides of the turn to the chat_messages
+        # executor — the chat response is already serialized and on its
+        # way to the client; the DB write and chat.new fan-out must not
+        # add latency to this path.  On worker saturation we fall back
+        # to inline (see persist_and_publish_async).  request_id links
+        # the (user, assistant) pair for downstream dedup.  device_id /
+        # agent_id / lang / attachments are optional; callers pass them
+        # via **payload when known.
+        try:
+            from integrations.social import chat_messages as _cm
+            _dev = payload.get('device_id')
+            _agent = payload.get('agent_id')
+            _prompt_id = payload.get('prompt_id')
+            _lang_hint = (payload.get('preferred_lang')
+                          or payload.get('language') or _lang)
+            _atts = payload.get('attachments')
+            _rid = str(request_id) if request_id is not None else None
+            if _prompt:
+                _cm.persist_and_publish_async(
+                    str(user_id), 'user', _prompt,
+                    agent_id=_agent, prompt_id=_prompt_id,
+                    request_id=_rid, device_id=_dev,
+                    lang=_lang_hint, attachments=_atts,
+                )
+            _cm.persist_and_publish_async(
+                str(user_id), 'assistant', response_text,
+                agent_id=_agent, prompt_id=_prompt_id,
+                request_id=_rid, device_id=_dev,
+                lang=_lang_hint, attachments=None,
+            )
+        except Exception as _chat_sync_err:
+            app.logger.debug(
+                f"_chat_reply: chat-sync mirror skipped: {_chat_sync_err}")
 
     payload['response'] = response_text
     return jsonify(payload)

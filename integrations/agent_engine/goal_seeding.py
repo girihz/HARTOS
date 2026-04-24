@@ -1489,7 +1489,11 @@ SEED_BOOTSTRAP_GOALS = [
         # run on every draft; rejected drafts fall back to a neutral
         # "Hey, nice to actually be across the room from you" template.
         'slug': 'encounter_icebreaker_agent',
-        'goal_type': 'social',
+        # 'content_gen' is the registered goal_type (goal_manager.py:1093)
+        # whose prompt builder + tool tags best fit icebreaker drafting.
+        # The 'encounter' specialization comes from config below
+        # (persona_kind, trigger_wamp_topic, constitutional_gates).
+        'goal_type': 'content_gen',
         'title': 'Encounter Icebreaker',
         'description': (
             'On a physical-world mutual-like encounter, draft a short '
@@ -1548,7 +1552,12 @@ SEED_BOOTSTRAP_GOALS = [
         # infrastructure.  Never auto-publishes — every post requires a
         # final user approval tap, same as the icebreaker flow.
         'slug': 'social_media_curator_agent',
-        'goal_type': 'social',
+        # Same rationale as encounter_icebreaker_agent: reuse the
+        # registered 'content_gen' type (goal_manager.py:1093) rather
+        # than inventing an unregistered 'social' type that would fail
+        # seed_bootstrap_goals silently.  Curator behavior lives in
+        # config.persona_kind + config.constitutional_gates.
+        'goal_type': 'content_gen',
         'title': 'Social Media Curator',
         'description': (
             'Help the user curate, caption, and schedule social-media '

@@ -112,67 +112,77 @@ def test_social_media_curator_goal_has_no_autosend():
 # ══════════════════════════════════════════════════════════════════════
 
 
-def _fake_require_auth(fn):
-    """Test-only decorator: reads X-Test-User-Id header instead of JWT.
+_TEST_TOKEN_PREFIX = 'TEST-USER-'  # Authorization: Bearer TEST-USER-<id>
 
-    Defined at module scope so it can be injected BEFORE encounter_api
-    is imported — the @require_auth decorator resolves to the real
-    function at import time, so patching after import is a no-op.
+
+class _MockDB:
+    """Minimum duck-type for the db object require_auth pulls from
+    _get_user_from_token.  Real require_auth calls .commit() / .close()
+    / .is_active / .rollback() — mock them all as no-ops so the
+    decorator's db lifecycle doesn't AttributeError.
     """
-    from functools import wraps as _w
-    from flask import g as _g, jsonify as _j, request as _req
 
-    @_w(fn)
-    def inner(*args, **kwargs):
-        hdr = _req.headers.get('X-Test-User-Id')
-        if not hdr:
-            return _j({'success': False,
-                       'error': 'Missing or invalid Authorization header'}), 401
-        _g.user = SimpleNamespace(id=int(hdr))
-        _g.user_id = hdr
-        _g.db = None
-        return fn(*args, **kwargs)
-    return inner
+    is_active = True
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def _fake_get_user_from_token(token):
+    """Test-mode replacement for auth._get_user_from_token.
+
+    Accepts 'TEST-USER-<N>' tokens (set by our test client) and returns
+    a minimal user + mock db pair.  Patching this internal function —
+    instead of swapping the @require_auth decorator by module-reload —
+    is robust to test collection order.  The real require_auth keeps
+    all its logic (Bearer prefix check, g.user population, db
+    lifecycle); we only replace the token → user resolver.
+    """
+    if not isinstance(token, str) or not token.startswith(_TEST_TOKEN_PREFIX):
+        return None, None
+    try:
+        uid = int(token[len(_TEST_TOKEN_PREFIX):])
+    except ValueError:
+        return None, None
+    return (
+        SimpleNamespace(id=uid, is_admin=False, is_moderator=False),
+        _MockDB(),
+    )
 
 
 @pytest.fixture
-def app():
-    """Minimal Flask app with just the encounter blueprint.
+def app(monkeypatch):
+    """Minimal Flask app with just the encounter blueprint mounted.
 
-    Forces a fresh import of encounter_api with require_auth patched
-    at the auth module level, so the decorators on view functions pick
-    up the test-mode auth.  Restores both modules in teardown.
+    The real require_auth decorator runs (bearer check, token
+    resolution, g.user population, db lifecycle) with
+    _get_user_from_token swapped for a test-mode version.  No module
+    reloading, no blueprint reconstruction — robust to test
+    collection order and parallel execution.
     """
-    import importlib
-    import sys as _sys
-
     from flask import Flask
 
-    # Drop any previously cached encounter_api so re-import picks up
-    # the patched require_auth symbol.
-    _sys.modules.pop('integrations.social.encounter_api', None)
-
     from integrations.social import auth as _auth_mod
-    _orig_require = _auth_mod.require_auth
-    _auth_mod.require_auth = _fake_require_auth
-    try:
-        # Fresh import now that the cached copy is dropped — decorators
-        # resolve to the patched require_auth at this point.
-        from integrations.social import encounter_api
-        encounter_api.ENCOUNTER_STORE.clear()
+    from integrations.social import encounter_api
 
-        flask_app = Flask(__name__)
-        flask_app.config['TESTING'] = True
-        flask_app.register_blueprint(encounter_api.encounter_bp)
+    monkeypatch.setattr(
+        _auth_mod, '_get_user_from_token', _fake_get_user_from_token,
+    )
 
-        # Stash module ref on app so tests can reach ENCOUNTER_STORE.
-        flask_app.encounter_module = encounter_api  # type: ignore[attr-defined]
-        yield flask_app
-    finally:
-        _auth_mod.require_auth = _orig_require
-        # Purge cached test-mode module so other tests that import
-        # integrations.social don't get the patched blueprint.
-        _sys.modules.pop('integrations.social.encounter_api', None)
+    encounter_api.ENCOUNTER_STORE.clear()
+    flask_app = Flask(__name__)
+    flask_app.config['TESTING'] = True
+    flask_app.register_blueprint(encounter_api.encounter_bp)
+    flask_app.encounter_module = encounter_api  # type: ignore[attr-defined]
+    yield flask_app
+    # Blueprint registration is per-app; garbage-collected with flask_app.
+    encounter_api.ENCOUNTER_STORE.clear()
 
 
 @pytest.fixture
@@ -181,7 +191,8 @@ def client(app):
 
 
 def _as_user(uid: int) -> dict:
-    return {'X-Test-User-Id': str(uid)}
+    """Auth header that pairs with _fake_get_user_from_token above."""
+    return {'Authorization': f'Bearer {_TEST_TOKEN_PREFIX}{uid}'}
 
 
 # ══════════════════════════════════════════════════════════════════════

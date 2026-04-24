@@ -3336,7 +3336,16 @@ class UserChannelBinding(Base):
 
 
 class ConversationEntry(Base):
-    """Unified conversation history across all channels."""
+    """Unified conversation history across all channels.
+
+    Also serves as the canonical row for cross-device chat mirroring
+    (U1-U9 workstream, task #389).  ``id`` is the monotonic cursor used
+    by ``/api/chat-sync/pull?since=<id>``; every device subscribes to
+    ``com.hertzai.hevolve.chat.new.<user_id>`` and dedups incoming
+    payloads by ``msg_id``.  New rows are appended here by the chat
+    hot path (`_chat_reply`, `world_model_bridge._persist_to_conversation_entry`)
+    and by channel adapters (`integrations/channels/response/router.py`).
+    """
     __tablename__ = 'conversation_entries'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -3347,6 +3356,15 @@ class ConversationEntry(Base):
     agent_id = Column(String(64), nullable=True, index=True)
     prompt_id = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=func.now(), index=True)
+
+    # U1 cross-device sync columns — all nullable for backward compat with
+    # rows written before the U-series migration.  Legacy rows pulled via
+    # cursor-pull get a synthesized msg_id on the fly (seq-based fallback).
+    msg_id = Column(String(32), nullable=True, unique=True, index=True)
+    request_id = Column(String(64), nullable=True, index=True)  # pairs user↔assistant
+    device_id = Column(String(64), nullable=True, index=True)   # origin device (U6)
+    lang = Column(String(10), nullable=True)                     # TTS replay hint
+    attachments = Column(JSON, nullable=True)                    # U9: [{file_id, sha256, name, mime, size}]
 
     user = relationship('User', backref='conversation_entries')
 
@@ -3359,6 +3377,11 @@ class ConversationEntry(Base):
             'content': self.content,
             'agent_id': self.agent_id,
             'prompt_id': self.prompt_id,
+            'msg_id': self.msg_id,
+            'request_id': self.request_id,
+            'device_id': self.device_id,
+            'lang': self.lang,
+            'attachments': self.attachments,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 
