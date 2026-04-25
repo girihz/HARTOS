@@ -2,38 +2,43 @@
 
 Augments tests/unit/test_encounter_api.py (23 functional tests) with
 focused adversarial cases on the privacy + lifecycle invariants the
-design doc (project_encounter_icebreaker.md) treats as blocking:
+design doc (project_encounter_icebreaker.md) treats as blocking.
 
-  * Discoverable TTL auto-off — advance time past expires_at, peer
-    must no longer be sightable (the stalker-walks-away invariant).
-  * Match-window enforcement — sightings outside
-    ENCOUNTER_MATCH_WINDOW_SEC must NOT mutual-match even when both
-    sides like (the "I swiped yes a week ago" replay invariant).
-  * Sighting expiry — once a sighting passes expires_at the swipe
-    must 410 (the ephemeral-state-vanishes invariant).
-  * Pubkey rotation — when peer rotates their pubkey, the OLD
-    pubkey must no longer resolve a sighting (the rotating-handle
-    invariant; the whole point of rotation is unlinkability).
+Time-control approach
+---------------------
+NO mocks or monkeypatches on production code.  Production runs with
+its real `datetime.utcnow()` clock.  When a test needs to verify
+behavior against state that production naturally produces only after
+hours of wall-time (TTL expiry, sighting auto-expiry, match-window
+boundaries), the test seeds that state DIRECTLY into the in-memory
+SQLite engine via the existing `app.test_engine`.
 
-Time is controlled via monkeypatching `encounter_api._now_dt` rather
-than freezegun (not in HARTOS's dep set).  Each test gets a fresh
-in-memory SQLite engine via the existing `app` fixture so DB state
-does NOT bleed across cases.
+The seeded state is identical in shape to what production writes;
+only the timestamps are positioned where the test needs them.  The
+endpoint under test runs unmodified production code against that
+state.  This is the standard arrange-act-assert pattern with a
+fixture-shaped arrange step — no parallel test path, no production
+patching, no time mocking.
+
+Helpers `_seed_pref` and `_seed_sighting` are the only test-only
+writers; they accept whatever fields the test wants to position and
+fill the rest with neutral defaults so each test stays focused.
 """
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 from datetime import datetime, timedelta
 
 # Re-use the rich `app` / `client` / `_as_user` fixtures from the
 # functional suite — same fake-auth, same fresh in-memory engine,
-# same _make_discoverable / _register_pubkey helpers.  Keeping a
-# single fixture surface (one truth) avoids the parallel-test-fixture
-# anti-pattern.
+# same _make_discoverable / _register_pubkey helpers.  Single fixture
+# surface, no parallel test setup.
 from .test_encounter_api import (  # noqa: F401, E402
     _as_user,
     _make_discoverable,
+    _matched_pair,
     _register_pubkey,
     _setup_mutual_sighting,
     app,
@@ -49,10 +54,94 @@ if PROJECT_ROOT not in sys.path:
 from core import constants as C  # noqa: E402
 
 
-def _patch_clock(monkeypatch, now_dt):
-    """Set encounter_api._now_dt to return a fixed datetime."""
-    from integrations.social import encounter_api
-    monkeypatch.setattr(encounter_api, '_now_dt', lambda: now_dt)
+# ══════════════════════════════════════════════════════════════════════
+# Test-only state seeders.
+#
+# These insert a DiscoverablePref / EncounterSighting row directly
+# against the fixture's in-memory engine, in whatever shape the test
+# wants.  The shape matches what production writes — `set_discoverable`
+# would produce the same row given enough time passing, the seeders
+# just position the timestamp exactly where the test needs it.
+# Production code (the /sighting and /swipe handlers) reads the
+# seeded state via real DB queries; nothing in production is patched.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _seed_pref(
+    engine,
+    *,
+    user_id,
+    enabled,
+    expires_at,
+    current_pubkey,
+    age_claim_18=True,
+    face_visible=False,
+    avatar_style='studio_ghibli',
+    vibe_tags=None,
+):
+    from sqlalchemy.orm import sessionmaker
+
+    from integrations.social.models import DiscoverablePref
+
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    s = Session()
+    try:
+        s.add(DiscoverablePref(
+            user_id=str(user_id),
+            enabled=enabled,
+            expires_at=expires_at,
+            current_pubkey=current_pubkey,
+            pubkey_registered_at=datetime.utcnow(),
+            age_claim_18=age_claim_18,
+            face_visible=face_visible,
+            avatar_style=avatar_style,
+            vibe_tags=vibe_tags or [],
+            toggle_window_start=datetime.utcnow(),
+        ))
+        s.commit()
+    finally:
+        s.close()
+
+
+def _seed_sighting(
+    engine,
+    *,
+    owner_user_id,
+    peer_user_id,
+    peer_pubkey,
+    sighted_at,
+    expires_at,
+    swipe_decision='pending',
+    rssi_peak=-40,
+    dwell_sec=4,
+    lat=12.97,
+    lng=77.59,
+):
+    from sqlalchemy.orm import sessionmaker
+
+    from integrations.social.models import EncounterSighting
+
+    Session = sessionmaker(bind=engine, expire_on_commit=False)
+    s = Session()
+    sid = f"sight_{secrets.token_urlsafe(12)}"
+    try:
+        s.add(EncounterSighting(
+            id=sid,
+            owner_user_id=str(owner_user_id),
+            peer_user_id=str(peer_user_id),
+            peer_pubkey=peer_pubkey,
+            rssi_peak=rssi_peak,
+            dwell_sec=dwell_sec,
+            lat=lat,
+            lng=lng,
+            sighted_at=sighted_at,
+            swipe_decision=swipe_decision,
+            expires_at=expires_at,
+        ))
+        s.commit()
+    finally:
+        s.close()
+    return sid
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -60,32 +149,40 @@ def _patch_clock(monkeypatch, now_dt):
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_discoverable_auto_off_after_ttl_blocks_sighting(client, monkeypatch):
-    """After the TTL elapses, a sighting against the now-expired peer
-    must 404 'peer not discoverable' — same neutral message as a peer
-    who never enabled in the first place (no leak about why).
-    """
+def test_discoverable_auto_off_after_ttl_blocks_sighting(client, app):
+    """Peer's discoverable_prefs.expires_at is in the past — same
+    state production produces after wall-time elapses past TTL.  A
+    sighting against this peer must 404 'peer not discoverable'
+    (neutral message — no leak about why)."""
     pk = 'aabbccdd' * 4
-    t0 = datetime(2026, 4, 25, 12, 0, 0)
-    _patch_clock(monkeypatch, t0)
-
-    _make_discoverable(client, 20)
-    _register_pubkey(client, 20, pk)
-
-    # Sighting at t0 succeeds.
+    _seed_pref(
+        app.test_engine,
+        user_id=20,
+        enabled=True,
+        expires_at=datetime.utcnow() - timedelta(minutes=1),
+        current_pubkey=pk,
+    )
     r = client.post(
         '/api/social/encounter/sighting',
         json={'peer_pubkey': pk, 'rssi_peak': -40, 'dwell_sec': 4},
         headers=_as_user(10),
     )
-    assert r.status_code == 200
+    assert r.status_code == 404
+    assert r.get_json()['error'] == 'peer not discoverable'
 
-    # Advance past TTL — peer's discoverable expires_at lapsed.
-    t_after = t0 + timedelta(
-        seconds=C.ENCOUNTER_DISCOVERABLE_TTL_SEC + 60,
+
+def test_discoverable_disabled_pref_blocks_sighting(client, app):
+    """Even if expires_at is in the future, an explicitly-disabled
+    pref must 404.  Defends against the "user toggled off but the
+    expiry hasn't arrived yet" case."""
+    pk = 'eeff0011' * 4
+    _seed_pref(
+        app.test_engine,
+        user_id=20,
+        enabled=False,
+        expires_at=datetime.utcnow() + timedelta(hours=1),
+        current_pubkey=pk,
     )
-    _patch_clock(monkeypatch, t_after)
-
     r = client.post(
         '/api/social/encounter/sighting',
         json={'peer_pubkey': pk, 'rssi_peak': -40, 'dwell_sec': 4},
@@ -100,46 +197,48 @@ def test_discoverable_auto_off_after_ttl_blocks_sighting(client, monkeypatch):
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_sightings_outside_match_window_do_not_match(client, monkeypatch):
+def test_sightings_outside_match_window_do_not_match(client, app):
     """Two reciprocal 'like' sightings far apart in time must NOT
-    create a match — even when both swipe like.  The whole reason
-    the window exists is to refuse forced-pairing-via-replay.
-    """
+    create a match — even when both swipe like.  The window exists
+    to refuse forced-pairing-via-replay."""
     pk_a = 'aaaa1111' * 4
     pk_b = 'bbbb2222' * 4
+    now = datetime.utcnow()
 
-    t0 = datetime(2026, 4, 25, 12, 0, 0)
-    _patch_clock(monkeypatch, t0)
-    _make_discoverable(client, 1)
-    _make_discoverable(client, 2)
-    _register_pubkey(client, 1, pk_a)
-    _register_pubkey(client, 2, pk_b)
-
-    # User 1 sees user 2 at t0.
-    r1 = client.post(
-        '/api/social/encounter/sighting',
-        json={'peer_pubkey': pk_b, 'rssi_peak': -40, 'dwell_sec': 4},
-        headers=_as_user(1),
+    # Both peers discoverable.
+    _seed_pref(
+        app.test_engine,
+        user_id=1, enabled=True,
+        expires_at=now + timedelta(hours=1),
+        current_pubkey=pk_a,
     )
-    assert r1.status_code == 200
-    s1 = r1.get_json()['data']['sighting_id']
+    _seed_pref(
+        app.test_engine,
+        user_id=2, enabled=True,
+        expires_at=now + timedelta(hours=1),
+        current_pubkey=pk_b,
+    )
 
-    # Advance well beyond the match window.
-    t_far = t0 + timedelta(
+    # Sighting #1 was seen long ago; sighting #2 is recent.
+    far_in_past = now - timedelta(
         seconds=C.ENCOUNTER_MATCH_WINDOW_SEC + 600,
     )
-    _patch_clock(monkeypatch, t_far)
-
-    # User 2 sees user 1 — at a time outside the window.
-    r2 = client.post(
-        '/api/social/encounter/sighting',
-        json={'peer_pubkey': pk_a, 'rssi_peak': -40, 'dwell_sec': 4},
-        headers=_as_user(2),
+    s1 = _seed_sighting(
+        app.test_engine,
+        owner_user_id=1, peer_user_id=2,
+        peer_pubkey=pk_b,
+        sighted_at=far_in_past,
+        expires_at=far_in_past + timedelta(seconds=C.ENCOUNTER_SIGHTING_EXPIRES_SEC),
     )
-    assert r2.status_code == 200
-    s2 = r2.get_json()['data']['sighting_id']
+    s2 = _seed_sighting(
+        app.test_engine,
+        owner_user_id=2, peer_user_id=1,
+        peer_pubkey=pk_a,
+        sighted_at=now,
+        expires_at=now + timedelta(seconds=C.ENCOUNTER_SIGHTING_EXPIRES_SEC),
+    )
 
-    # Both swipe like; reciprocal-check window-test must FAIL.
+    # Both swipe like — reciprocal-check is window-bounded.
     client.post(
         '/api/social/encounter/swipe',
         json={'sighting_id': s1, 'decision': 'like'},
@@ -151,10 +250,9 @@ def test_sightings_outside_match_window_do_not_match(client, monkeypatch):
         headers=_as_user(2),
     )
     assert r.status_code == 200
-    # No mutual match because sightings are out-of-window.
+    # No mutual match — sightings out-of-window.
     assert r.get_json()['data']['match_id'] is None
 
-    # /matches returns nothing for either side.
     for uid in (1, 2):
         m = client.get(
             '/api/social/encounter/matches', headers=_as_user(uid),
@@ -168,32 +266,25 @@ def test_sightings_outside_match_window_do_not_match(client, monkeypatch):
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_swipe_on_expired_sighting_410(client, monkeypatch):
-    """Sightings auto-expire after ENCOUNTER_SIGHTING_EXPIRES_SEC.
-    A swipe attempt on an expired row must 410 Gone (not 200) so the
-    client knows the row is past TTL and refuses to gamble on stale
-    state.
-    """
+def test_swipe_on_expired_sighting_410(client, app):
+    """A sighting whose expires_at has already passed must reject
+    swipes with 410 Gone — ephemeral state is past TTL."""
     pk = 'cafe' * 8
-    t0 = datetime(2026, 4, 25, 12, 0, 0)
-    _patch_clock(monkeypatch, t0)
-    _make_discoverable(client, 20)
-    _register_pubkey(client, 20, pk)
-
-    r = client.post(
-        '/api/social/encounter/sighting',
-        json={'peer_pubkey': pk, 'rssi_peak': -40, 'dwell_sec': 4},
-        headers=_as_user(10),
+    now = datetime.utcnow()
+    _seed_pref(
+        app.test_engine,
+        user_id=20, enabled=True,
+        expires_at=now + timedelta(hours=1),
+        current_pubkey=pk,
     )
-    assert r.status_code == 200
-    sid = r.get_json()['data']['sighting_id']
-
-    # Travel past the sighting's expires_at.
-    t_after = t0 + timedelta(
-        seconds=C.ENCOUNTER_SIGHTING_EXPIRES_SEC + 60,
+    sid = _seed_sighting(
+        app.test_engine,
+        owner_user_id=10,
+        peer_user_id=20,
+        peer_pubkey=pk,
+        sighted_at=now - timedelta(hours=25),
+        expires_at=now - timedelta(minutes=1),  # already expired
     )
-    _patch_clock(monkeypatch, t_after)
-
     r = client.post(
         '/api/social/encounter/swipe',
         json={'sighting_id': sid, 'decision': 'like'},
@@ -204,27 +295,25 @@ def test_swipe_on_expired_sighting_410(client, monkeypatch):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Pubkey rotation unlinkability
+# Pubkey rotation unlinkability — drives through the real
+# /register-pubkey endpoint twice; no time control needed.
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_old_pubkey_no_longer_resolves_after_rotation(
-    client, monkeypatch,
-):
-    """When a peer rotates their pubkey, the OLD pubkey must no
-    longer resolve a sighting — that's the WHOLE POINT of rotation
-    (unlinkability across observation windows).  Any test that
-    finds the old pubkey still resolving is a privacy regression.
-    """
+def test_old_pubkey_no_longer_resolves_after_rotation(client):
+    """When peer rotates their pubkey via /register-pubkey, the OLD
+    pubkey must no longer resolve a sighting.  Unlinkability across
+    observation windows is the WHOLE POINT of rotation.
+
+    No mocks: drives /discoverable + /register-pubkey live against
+    the test DB."""
     pk_old = 'old0' * 8
     pk_new = 'new1' * 8
-    t0 = datetime(2026, 4, 25, 12, 0, 0)
-    _patch_clock(monkeypatch, t0)
 
     _make_discoverable(client, 20)
     _register_pubkey(client, 20, pk_old)
 
-    # Sighting against pk_old works.
+    # Sighting on pk_old works.
     r = client.post(
         '/api/social/encounter/sighting',
         json={'peer_pubkey': pk_old, 'rssi_peak': -40, 'dwell_sec': 4},
@@ -232,11 +321,10 @@ def test_old_pubkey_no_longer_resolves_after_rotation(
     )
     assert r.status_code == 200
 
-    # Peer rotates pubkey.
+    # Peer rotates.
     _register_pubkey(client, 20, pk_new)
 
-    # Sighting against pk_old must now 404 — no DiscoverablePref row
-    # has current_pubkey == pk_old anymore.
+    # Sighting on pk_old now 404 — no DiscoverablePref has it.
     r = client.post(
         '/api/social/encounter/sighting',
         json={'peer_pubkey': pk_old, 'rssi_peak': -40, 'dwell_sec': 4},
@@ -244,7 +332,7 @@ def test_old_pubkey_no_longer_resolves_after_rotation(
     )
     assert r.status_code == 404
 
-    # Sighting against pk_new resolves.
+    # Sighting on pk_new resolves.
     r = client.post(
         '/api/social/encounter/sighting',
         json={'peer_pubkey': pk_new, 'rssi_peak': -40, 'dwell_sec': 4},
@@ -254,15 +342,13 @@ def test_old_pubkey_no_longer_resolves_after_rotation(
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Cross-user payload isolation on /matches
+# Cross-user payload isolation — drives real flow, no mocks.
 # ══════════════════════════════════════════════════════════════════════
 
 
 def test_unrelated_user_matches_endpoint_is_empty(client):
-    """A user who never sighted anyone must see /matches return [],
-    even if other users elsewhere in the system have matches.  No
-    cross-user enumeration via the matches list.
-    """
+    """A user who never sighted anyone must see /matches return []
+    even when other users have matches.  No cross-user enumeration."""
     s1, s2 = _setup_mutual_sighting(client)
     client.post(
         '/api/social/encounter/swipe',
@@ -275,7 +361,6 @@ def test_unrelated_user_matches_endpoint_is_empty(client):
         headers=_as_user(2),
     )
 
-    # User 99 is unrelated.
     r = client.get(
         '/api/social/encounter/matches', headers=_as_user(99),
     )
@@ -291,16 +376,14 @@ def test_unrelated_user_matches_endpoint_is_empty(client):
 
 
 def test_map_pins_skip_unmatched_pairs(client):
-    """An unmatched sighting (one-sided like) must NOT produce a
-    map pin.  Pins are post-match adornment only.
-    """
+    """A one-sided like must NOT produce a map pin.  Pins are
+    post-match adornment only."""
     s1, _ = _setup_mutual_sighting(client)
     client.post(
         '/api/social/encounter/swipe',
         json={'sighting_id': s1, 'decision': 'like'},
         headers=_as_user(1),
     )
-    # User 2 never swipes.
 
     r = client.get(
         '/api/social/encounter/map-pins', headers=_as_user(1),
@@ -317,22 +400,17 @@ def test_map_pins_skip_unmatched_pairs(client):
 
 
 def test_icebreaker_approve_after_decline_409(client):
-    """Once a side declines an icebreaker, attempting to approve a
-    new draft for the same side must 409 — declined state is
-    terminal so the agent's learn-from-decline signal isn't
-    overwritten by a later edge-case flip.
-    """
-    from .test_encounter_api import _matched_pair  # noqa: WPS433
-
+    """Once a side declines an icebreaker, approving a new draft for
+    the same side must 409 — declined state is terminal so the
+    learn-from-decline signal isn't overwritten by a later flip."""
     m = _matched_pair(client)
-    # Decline first.
     r = client.post(
         '/api/social/encounter/icebreaker/decline',
         json={'match_id': m, 'reason': 'not interested'},
         headers=_as_user(1),
     )
     assert r.status_code == 200
-    # Then attempt approve — must 409 (status terminal).
+
     r = client.post(
         '/api/social/encounter/icebreaker/approve',
         json={'match_id': m, 'text': 'changed my mind'},
