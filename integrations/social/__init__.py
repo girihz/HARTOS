@@ -101,6 +101,15 @@ def init_social(app):
     except Exception as e:
         logger.warning(f"HevolveSocial hive contest blueprint skipped: {e}")
 
+    # Register compute-earnings blueprint (idle-compute self-advertise +
+    # live drawer SSE + opted-in user wallet readback)
+    try:
+        from .api_compute_earnings import compute_earnings_bp
+        app.register_blueprint(compute_earnings_bp)
+        logger.info("HevolveSocial compute earnings registered at /api/compute/earnings/")
+    except Exception as e:
+        logger.warning(f"HevolveSocial compute earnings blueprint skipped: {e}")
+
     # Register hive contest UI (single-page local view — reads the same
     # /api/hive/contest/* endpoints, used by the HART shell panel and
     # by a direct browser visit for operators).
