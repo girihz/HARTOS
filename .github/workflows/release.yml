@@ -366,17 +366,20 @@ jobs:
           # SHA-256 checksum (always computed against the uncut ISO)
           sha256sum "$FILE" | sed "s|.*/||" > "/tmp/release-artifacts/${BASENAME}.sha256"
 
-          # Create .torrent with web seed. On push-to-main we target
-          # the rolling `nightly` tag (release is mutable, v1.0.0 is
-          # immutable). On workflow_dispatch we use the user-supplied
-          # version so the signed release gets its own torrent.
+          # Create .torrent with web seed.  workflow_dispatch ships a
+          # pinned tag (v1.0.0 etc) so the seed points at that exact
+          # release.  push-to-main ships through publish-nightly with
+          # a per-sha tag (`nightly-<sha>-<runid>`) marked
+          # `--latest=true`, so the seed uses /releases/latest/download/
+          # — GitHub redirects that to whatever release currently
+          # carries the latest flag, keeping the torrent's HTTP
+          # fallback resolvable across rebuilds.
           sudo apt-get install -y -qq mktorrent
           if [[ "${{ github.event_name }}" == 'workflow_dispatch' ]]; then
-            RELEASE_TAG="v${{ github.event.inputs.version }}"
+            WEBSEED="https://github.com/${{ github.repository }}/releases/download/v${{ github.event.inputs.version }}/${BASENAME}"
           else
-            RELEASE_TAG="nightly"
+            WEBSEED="https://github.com/${{ github.repository }}/releases/latest/download/${BASENAME}"
           fi
-          WEBSEED="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${BASENAME}"
           mktorrent -l 22 \
             -c "HART OS — Hevolve Hive Agentic Runtime. https://github.com/${{ github.repository }}" \
             -w "$WEBSEED" \
@@ -406,23 +409,14 @@ jobs:
           tag_name: "v${{ github.event.inputs.version }}"
           files: /tmp/release-artifacts/*
 
-      - name: Attach to rolling 'nightly' release (push to main)
-        # Keeps docs.hevolve.ai/downloads/ links like
-        # /releases/latest/download/hart-os-desktop.iso resolvable
-        # between tagged releases.  workflow_dispatch handles the
-        # immutable vX.Y.Z tagging path; this one keeps the rolling
-        # pointer fresh.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: nightly
-          name: "HART OS Nightly"
-          prerelease: true
-          files: /tmp/release-artifacts/*
-          body: |
-            Rolling nightly build of HART OS from the main branch.
-            These artifacts are overwritten on every push — for a
-            pinned version, see the vX.Y.Z tagged releases.
+      # NOTE: Push-to-main publishing of these ISOs is handled by the
+      # `publish-nightly` job below — it uploads the matrix artifacts
+      # to a unique-tagged release (`nightly-<sha>-<runid>`) and marks
+      # it `--latest=true`.  The previous "Attach to rolling 'nightly'
+      # release" step here tried to reuse the literal `nightly` tag,
+      # which the repo's release-immutability rule rejects with HTTP
+      # 422 ("tag_name was used by an immutable release").  Removed
+      # 2026-04-25 — see commit message for the failure log.
 
   # ═══════════════════════════════════════════════════════════
   # 3a. Build universal installers (fast Go cross-compile)
