@@ -620,13 +620,13 @@ except ImportError:
 except Exception as e:
     app.logger.warning(f"Provision init skipped: {e}")
 
-try:
-    from integrations.social.consent_service import register_consent_routes
-    register_consent_routes(app)
-except ImportError:
-    pass
-except Exception as e:
-    app.logger.warning(f"Consent service init skipped: {e}")
+# Legacy ``register_consent_routes`` block removed in the
+# consent-surface consolidation (orchestrator review acd11f55,
+# 2026-04-25).  The HTTP write surface for user consent now lives at
+# ``integrations.social.consent_api`` (consent_bp, JWT-authed,
+# append-only, mounted at ``/api/social/consent``).  ``init_social``
+# in ``integrations/social/__init__.py`` registers the new blueprint;
+# no extra wiring is required here.
 
 # MCP HTTP Bridge — exposes local MCP tools via REST for Nunba/external clients
 try:

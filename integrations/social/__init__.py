@@ -266,9 +266,12 @@ def init_social(app):
         logger.debug(f"HevolveSocial encounter blueprint skipped: {e}")
 
     # Register UserConsent UI blueprint (W0c F3 prereq).  JWT-authed,
-    # append-only consent surface for cloud_capability + future scopes.
-    # Distinct from consent_service.py's admin-style /api/consent/* —
-    # see consent_api.py module docstring for the relationship.
+    # append-only consent surface — the SINGLE HTTP write path for
+    # the user_consents table after the consent-surface consolidation
+    # (orchestrator review acd11f55, 2026-04-25).  consent_service.py
+    # retains the in-process ConsentService static-method API for
+    # internal callers; its legacy /api/consent/<user_id>/* HTTP
+    # route family was removed in the consolidation commit.
     try:
         from .consent_api import consent_bp
         app.register_blueprint(consent_bp)

@@ -3,6 +3,14 @@ HevolveSocial - User Consent Blueprint (W0c F3 prereq).
 
 JWT-authed, append-only consent surface for the UserConsent UI.
 
+Single HTTP surface for consent writes (orchestrator review acd11f55,
+2026-04-25): the legacy ``/api/consent/<user_id>/*`` route family in
+``consent_service.py`` was deprecated in this commit and this module
+is now the only HTTP write path for the ``user_consents`` table.
+``ConsentService`` static methods on ``consent_service.py`` are still
+the in-process write API for internal services and now share this
+module's APPEND-ONLY semantics.
+
 This is the WRITE path the cloud_capability scope (encounter_icebreaker
 agent + future cloud capabilities) reads at runtime via
 encounter_api._has_cloud_drafting_consent (encounter_api.py:616).
@@ -33,14 +41,17 @@ Privacy invariants:
     about whether the user has any consent rows at all).
 
 Relationship to integrations/social/consent_service.py:
-  * That module exposes /api/consent/<user_id>/* for admin-style
-    (path-arg) and uses UPSERT semantics + a CONSENT_TYPES allowlist
-    that pre-dates 'cloud_capability'.
-  * This module is the JWT-authed user-self-service surface required
-    by F3 and uses APPEND-ONLY semantics.  They write to the same
-    user_consents table but operate on disjoint consent_type sets
-    (this module's main caller is 'cloud_capability', not in the
-    older CONSENT_TYPES set).
+  * ``consent_service.py`` exposes the in-process ``ConsentService``
+    static methods (``grant_consent``, ``revoke_consent``,
+    ``check_consent``, ``list_consents``, ``set_payment_id``) used by
+    internal services (``revenue_tracker``, ``ai_governance``,
+    ``federated_aggregator``, ``lifecycle_hooks``).
+  * Both surfaces share APPEND-ONLY write semantics as of the
+    consolidation: every grant inserts a NEW row; ``granted_at`` is
+    never rewritten on an existing row.
+  * The legacy HTTP route family ``/api/consent/<user_id>/*`` from
+    ``consent_service.py`` was REMOVED in the consolidation; this
+    module is the single JWT-authed HTTP surface for consent writes.
 """
 from __future__ import annotations
 
