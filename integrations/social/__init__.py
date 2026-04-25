@@ -51,7 +51,14 @@ def init_social(app):
     from .models import init_db, DB_PATH
     try:
         init_db()
-        logger.info(f"HevolveSocial database initialized ({DB_PATH})")
+        # Apply pending schema migrations against the canonical DB so a
+        # daemon booting on a pre-existing v36/37/38 SQLite catches up
+        # to SCHEMA_VERSION (currently 39: users.voice_profile column).
+        # Idempotent — see tests/unit/test_voice_profile_migration.py.
+        # Brings HARTOS daemon parity with Nunba main.py per MEMORY.md.
+        from .migrations import run_migrations
+        run_migrations()
+        logger.info(f"HevolveSocial database initialized + migrated ({DB_PATH})")
     except Exception as e:
         logger.warning(f"HevolveSocial DB init failed (non-fatal): {e}")
 
