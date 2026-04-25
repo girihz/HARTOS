@@ -261,3 +261,79 @@ def test_non_ble_match_raises(session):
 
     with pytest.raises(ValueError):
         draft_icebreaker('community_match', '1', session)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Topology gate (consent-gated cloud, allow-by-default edge)
+#
+# Drives the same env var production reads (HEVOLVE_NODE_TIER) — no
+# monkeypatch on production code.  get_node_tier() reads env on every
+# call (uncached), so setenv before each draft_icebreaker call gives
+# us live tier control.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def test_flat_topology_allows_drafting_no_consent_needed(session):
+    """Flat = single user, single machine.  Drafting is unconditional —
+    the user IS the edge."""
+    mid = _seed_match(session, user_a=1, user_b=2)
+    out = draft_icebreaker(mid, '1', session, topology='flat')
+    assert out['draft']
+
+
+def test_regional_topology_allows_drafting_no_consent_needed(session):
+    """Regional = LAN cluster of user-trusted devices.  Still edge."""
+    mid = _seed_match(session, user_a=1, user_b=2)
+    out = draft_icebreaker(mid, '1', session, topology='regional')
+    assert out['draft']
+
+
+def test_central_topology_without_consent_raises_permission_error(session):
+    """Central = cloud.  Drafting needs explicit cloud-capability
+    consent; refusing without it surfaces a PermissionError the
+    endpoint maps to 403."""
+    mid = _seed_match(session, user_a=1, user_b=2)
+    with pytest.raises(PermissionError) as exc:
+        draft_icebreaker(mid, '1', session, topology='central')
+    assert 'cloud_capability' in str(exc.value)
+
+
+def test_central_topology_with_explicit_consent_allows(session):
+    mid = _seed_match(session, user_a=1, user_b=2)
+    out = draft_icebreaker(
+        mid, '1', session,
+        topology='central',
+        cloud_consent_check=lambda uid: uid == '1',
+    )
+    assert out['draft']
+
+
+def test_central_topology_consent_check_returning_false_raises(session):
+    mid = _seed_match(session, user_a=1, user_b=2)
+    with pytest.raises(PermissionError):
+        draft_icebreaker(
+            mid, '1', session,
+            topology='central',
+            cloud_consent_check=lambda uid: False,
+        )
+
+
+def test_central_topology_consent_check_per_user(session):
+    """Consent is per-user; user 1 may have opted in while user 2 has
+    not.  The check is invoked with viewer_user_id."""
+    mid = _seed_match(session, user_a=1, user_b=2)
+    consent = {'1': True, '2': False}
+
+    out = draft_icebreaker(
+        mid, '1', session,
+        topology='central',
+        cloud_consent_check=lambda uid: consent.get(uid, False),
+    )
+    assert out['draft']
+
+    with pytest.raises(PermissionError):
+        draft_icebreaker(
+            mid, '2', session,
+            topology='central',
+            cloud_consent_check=lambda uid: consent.get(uid, False),
+        )

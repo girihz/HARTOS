@@ -49,6 +49,39 @@ logger = logging.getLogger('hevolve_social')
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Edge / cloud topology gate.
+#
+# Drafting reads the user's memory_graph + runs LLM inference with
+# their personal context.  Allowed unconditionally on user-trusted
+# edge zones (flat = single machine; regional = LAN cluster).  On
+# central topology (cloud), drafting is consent-gated rather than
+# prohibited — if the user explicitly opted into cloud-capability
+# for this feature (UserConsent row, consent_type='cloud_capability'
+# with scope='*' or 'encounter_icebreaker', granted=True, revoked_at
+# IS NULL), drafting is allowed; otherwise PermissionError.
+#
+# Callers inject the consent check as a callable so the service
+# stays pure (no DB-shape coupling).  encounter_api.icebreaker_draft
+# wires the real UserConsent query; tests pass a deterministic
+# lambda.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _topology() -> str:
+    """Return current node tier, defaulting to 'flat' on any error.
+
+    Wraps security.key_delegation.get_node_tier so a missing security
+    package (HARTOS minimal-install) doesn't break drafting on the
+    one topology it's most likely deployed in (flat).
+    """
+    try:
+        from security.key_delegation import get_node_tier
+        return get_node_tier()
+    except Exception:  # noqa: BLE001
+        return 'flat'
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Templates — neutral fallbacks used when no LLM is available.
 #
 # Stored as a tuple so iteration order is stable for the alt_drafts
@@ -130,6 +163,8 @@ def draft_icebreaker(
     viewer_user_id: str,
     db_session,
     llm_callback: Optional[Callable[[dict], str]] = None,
+    cloud_consent_check: Optional[Callable[[str], bool]] = None,
+    topology: Optional[str] = None,
 ) -> dict:
     """Produce a draft icebreaker for the given match, viewed from the
     side of `viewer_user_id`.
@@ -144,6 +179,17 @@ def draft_icebreaker(
                       raising, its output is used as the primary draft;
                       its failure is logged and the deterministic
                       template is used instead (NEVER the bare error).
+        cloud_consent_check: optional callable taking a user_id and
+                      returning True iff that user has explicitly
+                      consented to cloud-capability for this feature
+                      (UserConsent row, consent_type='cloud_capability'
+                      with scope='*' or 'encounter_icebreaker',
+                      granted=True, revoked_at IS NULL).
+                      Required when this process is running in
+                      central topology — drafting reads memory_graph
+                      + runs LLM with personal context, so cloud
+                      execution requires explicit per-user opt-in.
+                      Ignored on flat / regional (user-trusted edge).
 
     Returns:
         {
@@ -158,7 +204,22 @@ def draft_icebreaker(
     Raises:
         ValueError: when match_id doesn't exist, isn't a BLE match, or
                     viewer_user_id isn't one of the match parties.
+        PermissionError: when running in central topology and the
+                    viewer hasn't opted into cloud-capability for
+                    this feature (consent-gated, not prohibited).
     """
+    tier = topology if topology is not None else _topology()
+    if tier == 'central':
+        ok = bool(
+            cloud_consent_check
+            and cloud_consent_check(viewer_user_id)
+        )
+        if not ok:
+            raise PermissionError(
+                "central-topology drafting requires user "
+                "cloud_capability consent for encounter_icebreaker",
+            )
+
     match = db_session.query(Encounter).filter_by(
         id=match_id, context_type='ble',
     ).first()

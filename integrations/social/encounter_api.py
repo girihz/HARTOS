@@ -546,6 +546,28 @@ def map_pins():
 # "regenerate" before approving).  Returns the same shape the agent
 # publishes on com.hevolve.encounter.icebreaker.
 
+def _has_cloud_drafting_consent(user_id: str) -> bool:
+    """Lookup helper for icebreaker_service.draft_icebreaker.
+
+    True iff the user has an active UserConsent row for cloud-
+    capability scoped to the encounter_icebreaker feature (or '*').
+    Used only when the HARTOS process is in central topology — the
+    service ignores the check on flat / regional (user-trusted edge).
+    """
+    from .models import UserConsent
+    try:
+        row = g.db.query(UserConsent).filter_by(
+            user_id=user_id,
+            consent_type='cloud_capability',
+            granted=True,
+        ).filter(
+            UserConsent.scope.in_(['*', 'encounter_icebreaker']),
+        ).filter(UserConsent.revoked_at.is_(None)).first()
+        return row is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @encounter_bp.route('/encounter/icebreaker/draft', methods=['POST'])
 @require_auth
 def icebreaker_draft():
@@ -558,7 +580,12 @@ def icebreaker_draft():
         return _err('match_id required')
     from .icebreaker_service import draft_icebreaker
     try:
-        out = draft_icebreaker(match_id, uid, g.db)
+        out = draft_icebreaker(
+            match_id, uid, g.db,
+            cloud_consent_check=_has_cloud_drafting_consent,
+        )
+    except PermissionError as pe:
+        return _err(str(pe), 403)
     except ValueError as ve:
         return _err(str(ve), 404)
     except Exception as exc:  # noqa: BLE001
