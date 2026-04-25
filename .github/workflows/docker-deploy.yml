@@ -125,47 +125,45 @@ jobs:
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
     steps:
-      - name: Deploy to <deploy-host> (central instance)
+      # All host-specific facts (hostname, port, user, password, repo
+      # path, master-key path, log/image volume paths) live in repo
+      # secrets so a public reader of this file learns only the
+      # generic shape of the deploy — not the attack surface.  Sudo
+      # runs without password (host sudoers config); workflow doesn't
+      # pipe DEPLOY_PASSWORD into sudo -S.
+      - name: Deploy to central instance
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           password: ${{ secrets.DEPLOY_PASSWORD }}
           port: ${{ secrets.DEPLOY_PORT }}
-          # docker build --no-cache on the 8GB langchain_gpt image
-          # routinely runs 25-40 min; 60m gives headroom + the 30-step
-          # health-check loop afterward.
+          # --no-cache rebuild on the 8GB langchain_gpt image runs
+          # ~25-40 min; 60m headroom + health-check loop afterward.
           command_timeout: 60m
+          envs: REPO_PATH,MASTER_KEY_PATH,LOGS_PATH,IMAGES_PATH
           script: |
             set -e
-            # Canonical clone path on <deploy-host> — the repo dir
-            # carries untracked release_manifest.json + .env + config.json
-            # that the central image bake-in needs.  git pull --ff-only
-            # leaves untracked files alone; aborts on local divergence.
-            cd <deploy-repo-path>
-
+            cd "$REPO_PATH"
+            # ff-only preserves the untracked files in the clone dir
+            # (.env, release_manifest.json, config.json) and aborts
+            # if a host hot-fix has diverged from origin/main.
             git pull --ff-only origin main
-
-            # Mirror the host's manual deploy pattern (sathish has
-            # NOPASSWD sudo for docker + the master-key file read).
             docker build --no-cache -t langchain_gpt:main .
-
             sudo docker stop langchain 2>/dev/null || true
             sudo docker rm   langchain 2>/dev/null || true
             sudo docker run -d --name langchain --restart unless-stopped \
               -p 6777:6777 \
               --env-file .env \
-              -e HEVOLVE_MASTER_PRIVATE_KEY="$(sudo cat <master-key-path>)" \
+              -e HEVOLVE_MASTER_PRIVATE_KEY="$(sudo cat "$MASTER_KEY_PATH")" \
               -v "$(pwd)/config.json:/app/config.json:ro" \
               -v "$(pwd)/release_manifest.json:/app/release_manifest.json:ro" \
-              -v <deploy-logs-path>:/app/logs \
-              -v <deploy-images-path>:/app/output_images \
+              -v "$LOGS_PATH:/app/logs" \
+              -v "$IMAGES_PATH:/app/output_images" \
               langchain_gpt:main
-
-            # Health check — /status is the canonical liveness probe.
             for i in $(seq 1 30); do
               if curl -fsS http://localhost:6777/status >/dev/null 2>&1; then
-                echo "[OK] HARTOS healthy on :6777"
+                echo "[OK] central instance healthy on :6777"
                 docker ps --filter name=langchain --format '  Status: {{.Status}}'
                 exit 0
               fi
@@ -174,3 +172,8 @@ jobs:
             echo "[FAIL] Health check timed out — dumping recent container logs"
             docker logs --tail 100 langchain || true
             exit 1
+        env:
+          REPO_PATH:       ${{ secrets.DEPLOY_REPO_PATH }}
+          MASTER_KEY_PATH: ${{ secrets.DEPLOY_MASTER_KEY_PATH }}
+          LOGS_PATH:       ${{ secrets.DEPLOY_LOGS_PATH }}
+          IMAGES_PATH:     ${{ secrets.DEPLOY_IMAGES_PATH }}
