@@ -247,7 +247,15 @@ class GoalManager:
                 # bootstrap_slug (config) when present, else the goal.id.
                 # That's what the brief's correlation-id contract names
                 # `prompt_id` — the stable identifier across sessions.
-                cfg = goal.config or {}
+                # AgentGoal column is `config_json` (see Hevolve_Database
+                # sql/models.py:3199); `goal.config` does NOT exist.
+                # Fallback chain handles the test-stub case where the
+                # mock may set either name.
+                cfg = (
+                    getattr(goal, 'config_json', None)
+                    or getattr(goal, 'config', None)
+                    or {}
+                )
                 prompt_id = cfg.get('bootstrap_slug') or str(goal.id)
                 # Build the proposed-content preview from the persona
                 # fields actually changing — so a title-only tweak only

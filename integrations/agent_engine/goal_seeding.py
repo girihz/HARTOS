@@ -1565,7 +1565,7 @@ SEED_BOOTSTRAP_GOALS = [
             '1) Listen to user voice/text feedback on candidate media '
             '("this one\'s cool, that one skip, caption with a hiking '
             'vibe, post Friday morning"), '
-            '2) Persist preferences via remember() under namespace '
+            '2) Save user preferences via remember() under namespace '
             'media_agent_prefs so future sessions carry forward, '
             '3) Use the portrait auto-arranger scorer for aesthetic '
             'and diversity ordering, '

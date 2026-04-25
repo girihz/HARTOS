@@ -374,7 +374,13 @@ class TestGoalManagerUpdate(unittest.TestCase):
 
     def test_update_goal_fields(self):
         """update_goal can update arbitrary persona fields once consensus approves."""
-        fake = FakeGoal(id='20', title='Old', description='Old desc')
+        # goal_type is required by the consensus gate (it routes the
+        # local_probe vote per goal_type).  Mock both attrs so the
+        # gate sees a real-shaped goal.
+        fake = FakeGoal(
+            id='20', title='Old', description='Old desc',
+            goal_type='marketing', config_json={'bootstrap_slug': 'test_20'},
+        )
         # Persona updates (title/description) go through HiveConsensus.
         # Stub it to approved so this test covers the FIELD-WRITE logic,
         # not the gate. A dedicated test below exercises the gate.
@@ -424,7 +430,14 @@ class TestGoalManagerUpdate(unittest.TestCase):
         vote is rejected; the goal row is left unchanged and the
         failure reason is returned to the caller so the dashboard can
         show WHY."""
-        fake = FakeGoal(id='40', title='Original', description='Original desc')
+        # goal_type + config_json present so the consensus gate can build
+        # its prompt_id correlation key (gate reads both per the brief
+        # correlation-id contract; absent attrs would error before the
+        # vote even runs).
+        fake = FakeGoal(
+            id='40', title='Original', description='Original desc',
+            goal_type='marketing', config_json={'bootstrap_slug': 'test_40'},
+        )
         # HiveConsensus votes "no" — e.g. constitutional filter tripped
         rejected_decision = MagicMock(
             approved=False,
