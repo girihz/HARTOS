@@ -206,6 +206,8 @@ def test_all_routes_require_auth(client):
             {'sighting_id': 'x', 'decision': 'like'}),
         ('GET', '/api/social/encounter/matches', {}),
         ('GET', '/api/social/encounter/map-pins', {}),
+        ('POST', '/api/social/encounter/icebreaker/draft',
+            {'match_id': 'x'}),
         ('POST', '/api/social/encounter/icebreaker/approve',
             {'match_id': 'x', 'text': 'hi'}),
         ('POST', '/api/social/encounter/icebreaker/decline',
@@ -552,3 +554,57 @@ def test_topics_endpoint_matches_constants(client):
     assert topics['swipe'] == C.ENCOUNTER_TOPIC_SWIPE
     assert topics['match'] == C.ENCOUNTER_TOPIC_MATCH
     assert topics['icebreaker'] == C.ENCOUNTER_TOPIC_ICEBREAKER
+
+
+# ══════════════════════════════════════════════════════════════════════
+# /icebreaker/draft (closes #399)
+# ══════════════════════════════════════════════════════════════════════
+
+
+def test_icebreaker_draft_returns_payload(client):
+    """Match exists and viewer is a party — endpoint returns the
+    drafting service's full payload (draft, alts, rationale, source)."""
+    m = _matched_pair(client)
+    r = client.post(
+        '/api/social/encounter/icebreaker/draft',
+        json={'match_id': m},
+        headers=_as_user(1),
+    )
+    assert r.status_code == 200
+    data = r.get_json()['data']
+    assert data['draft']  # non-empty
+    assert data['source'] in {'template', 'llm'}
+    assert isinstance(data['alt_drafts'], list)
+    assert len(data['alt_drafts']) == 2
+    assert data['length'] == len(data['draft'])
+    assert data['length'] <= C.ENCOUNTER_DRAFT_MAX_CHARS
+
+
+def test_icebreaker_draft_non_participant_404(client):
+    """Non-party viewer must 404 (the drafting service raises
+    ValueError; the endpoint maps that to 404)."""
+    m = _matched_pair(client)
+    r = client.post(
+        '/api/social/encounter/icebreaker/draft',
+        json={'match_id': m},
+        headers=_as_user(99),
+    )
+    assert r.status_code == 404
+
+
+def test_icebreaker_draft_unknown_match_404(client):
+    r = client.post(
+        '/api/social/encounter/icebreaker/draft',
+        json={'match_id': 'match_does_not_exist'},
+        headers=_as_user(1),
+    )
+    assert r.status_code == 404
+
+
+def test_icebreaker_draft_missing_match_id_400(client):
+    r = client.post(
+        '/api/social/encounter/icebreaker/draft',
+        json={},
+        headers=_as_user(1),
+    )
+    assert r.status_code == 400

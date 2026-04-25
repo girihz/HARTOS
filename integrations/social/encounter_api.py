@@ -538,6 +538,38 @@ def map_pins():
 # Per-side state lives in the encounter row's `payload` JSON column.
 # ──────────────────────────────────────────────────────────────────────
 
+# /icebreaker/draft — generate a candidate opener for the match without
+# sending it.  Wraps icebreaker_service.draft_icebreaker, which is
+# also the entry point the seeded encounter_icebreaker_agent uses
+# server-side when the match WAMP topic fires.  This endpoint exists
+# so the SPA can request a fresh draft on demand (e.g., user taps
+# "regenerate" before approving).  Returns the same shape the agent
+# publishes on com.hevolve.encounter.icebreaker.
+
+@encounter_bp.route('/encounter/icebreaker/draft', methods=['POST'])
+@require_auth
+def icebreaker_draft():
+    uid = _user_id()
+    if uid is None:
+        return _err('unauthenticated', 401)
+    body = _json()
+    match_id = str(body.get('match_id', ''))
+    if not match_id:
+        return _err('match_id required')
+    from .icebreaker_service import draft_icebreaker
+    try:
+        out = draft_icebreaker(match_id, uid, g.db)
+    except ValueError as ve:
+        return _err(str(ve), 404)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            'encounter.icebreaker draft failed match=%s uid=%s: %s',
+            match_id, uid, exc,
+        )
+        return _err('draft_failed', 500)
+    return _ok(out)
+
+
 @encounter_bp.route('/encounter/icebreaker/approve', methods=['POST'])
 @require_auth
 def icebreaker_approve():
