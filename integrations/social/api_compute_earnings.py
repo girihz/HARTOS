@@ -174,19 +174,29 @@ def list_earnings(uid):
 # --- SSE -- live drawer fan-out -------------------------------------
 
 @compute_earnings_bp.route('/stream', methods=['GET'])
+@require_auth
 def stream():
     """Server-Sent Events feed for the live earnings drawer.
 
-    Subscribes to platform EventBus topic `compute.task_settled`
-    (already emitted by revenue_aggregator.settle_metered_api_costs
-    after every Spark write).  Same shape as HiveContest's
+    AUTH REQUIRED.  Subscribes to platform EventBus topic
+    `compute.task_settled` (emitted by
+    revenue_aggregator.settle_metered_api_costs after every Spark
+    write).  Same shape as HiveContest's
     /api/hive/contest/ideas/stream -- single canonical SSE pattern.
 
-    Public stream: the payload is anonymized (operator_id is NOT raw
-    user_id; secret_redactor is wired upstream of the WMB path that
-    feeds this).  An authenticated client-side filter does the
-    'mine vs hive-wide' decision.
+    Privacy: the upstream payload contains a raw `operator_id` (the
+    PeerNode operator user id).  This route filters server-side so
+    only events whose `operator_id` matches the authenticated session
+    are forwarded to the client.  Client-side filtering alone would
+    have leaked every node settlement to any anonymous listener --
+    caught in self-review before commit.
     """
+    user = getattr(g, 'user', None)
+    requester_id = getattr(user, 'id', None) if user else None
+    if not requester_id:
+        return jsonify({'error': 'auth required'}), 401
+    requester_id = str(requester_id)
+
     import json as _json
     import queue as _queue
     import time as _time
@@ -202,8 +212,14 @@ def stream():
         bus = None
 
     def _on_event(_topic, payload):
+        # Defense-in-depth scope guard: forward only this user's
+        # settlement events.  Anonymous listeners cannot reach this
+        # closure (route is auth'd), but explicit filter prevents a
+        # logged-in user from seeing other users' rows even if the
+        # auth layer is later bypassed.
         try:
-            q.put_nowait(payload or {})
+            if payload and str(payload.get('operator_id') or '') == requester_id:
+                q.put_nowait(payload)
         except _queue.Full:
             pass
 

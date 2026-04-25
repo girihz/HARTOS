@@ -234,6 +234,24 @@ def test_endpoint_returns_only_own_rows(monkeypatch):
 
 # --- #4 SSE endpoint contract --------------------------------------
 
+def test_sse_requires_auth():
+    """Anonymous SSE listeners would otherwise see every node's
+    settlement (privacy regression caught in self-review)."""
+    gen = _flask_app_with_blueprint()
+    app = next(gen)
+    try:
+        client = app.test_client()
+        r = client.get('/api/compute/earnings/stream',
+                       headers={'Accept': 'text/event-stream'})
+        assert r.status_code == 401, (
+            f'unauthenticated SSE must 401, got {r.status_code}: '
+            f'{r.get_data(as_text=True)[:200]}'
+        )
+    finally:
+        try: next(gen)
+        except StopIteration: pass
+
+
 def test_sse_emits_keepalive_immediately(monkeypatch):
     """The SSE stream starts with a `ping` event so the client knows
     the connection is established (matches HiveContest pattern)."""
@@ -244,7 +262,10 @@ def test_sse_emits_keepalive_immediately(monkeypatch):
         # Open stream -- generator yields the first ping then blocks
         # on the queue.  We read the first chunk only.
         with client.get('/api/compute/earnings/stream',
-                        headers={'Accept': 'text/event-stream'},
+                        headers={
+                            'Accept': 'text/event-stream',
+                            'X-Test-User-Id': 'u_test_sse',
+                        },
                         buffered=False) as r:
             # The streaming response is ready; read the initial chunk
             it = r.response
