@@ -484,6 +484,85 @@ def test_swipe_double_409(client):
     assert r.status_code == 409
 
 
+def test_swipe_idempotent_when_match_already_persisted(app, client):
+    """Regression for encounter_api.py:516 UnboundLocalError.
+
+    The existing-row branch (line 490) is reached when an Encounter row
+    with the deterministic BLE context_id already exists at the time
+    the second user swipes 'like'.  Before the fix, this branch only
+    bound `matched_id` and left `match` undefined, so the subsequent
+    `_publish_match(match)` call raised UnboundLocalError → HTTP 500.
+
+    Repro path here pre-seeds the Encounter row with the exact
+    context_id the swipe handler will compute (hash of sighting_ids),
+    then runs the swipe.  After the fix, the swipe must return 200,
+    surface the pre-seeded match's id as match_id, and the publisher
+    call must complete without raising.
+    """
+    import hashlib
+    from sqlalchemy.orm import sessionmaker
+
+    from integrations.social.encounter_api import (
+        _icebreaker_payload_init, _new_id, _now_dt,
+    )
+    from integrations.social.models import Encounter
+
+    s1, s2 = _setup_mutual_sighting(client)
+    # The swipe handler computes ctx_id from the sighting + reciprocal
+    # ids, sorted internally.  Mirror that logic so the pre-seeded row
+    # collides on the same context_id.
+    combined = ':'.join(sorted([s1, s2]))
+    ctx_id = hashlib.sha1(combined.encode('utf-8')).hexdigest()[:32]
+    a_uid, b_uid = sorted(('1', '2'))
+
+    SessionFactory = sessionmaker(
+        bind=app.test_engine, expire_on_commit=False,
+    )
+    seed_session = SessionFactory()
+    pre_seeded_id = _new_id('match')
+    seed_session.add(Encounter(
+        id=pre_seeded_id,
+        user_a_id=a_uid,
+        user_b_id=b_uid,
+        context_type='ble',
+        context_id=ctx_id,
+        encounter_count=1,
+        is_mutual_aware=True,
+        bond_level=1,
+        payload=_icebreaker_payload_init(),
+        first_at=_now_dt(),
+        latest_at=_now_dt(),
+    ))
+    seed_session.commit()
+    seed_session.close()
+
+    # User 1 likes first — reciprocal lookup finds nothing yet (s2 still
+    # 'pending'), so the match-creation block doesn't execute.
+    r1 = client.post(
+        '/api/social/encounter/swipe',
+        json={'sighting_id': s1, 'decision': 'like'},
+        headers=_as_user(1),
+    )
+    assert r1.status_code == 200
+    assert r1.get_json()['data']['match_id'] is None
+
+    # User 2 likes — reciprocal is s1, ctx_id matches the pre-seeded
+    # row, the existing-branch fires.  Before the fix this raised 500.
+    r2 = client.post(
+        '/api/social/encounter/swipe',
+        json={'sighting_id': s2, 'decision': 'like'},
+        headers=_as_user(2),
+    )
+    assert r2.status_code == 200, (
+        f'duplicate-match swipe must not 500: '
+        f'{r2.status_code} {r2.get_json()}'
+    )
+    data = r2.get_json()['data']
+    assert data['match_id'] == pre_seeded_id, (
+        'should surface the pre-seeded match, not create a new row'
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════
 # icebreaker approve / decline
 # ══════════════════════════════════════════════════════════════════════

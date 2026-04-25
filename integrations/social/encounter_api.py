@@ -488,7 +488,12 @@ def swipe():
                 context_id=ctx_id,
             ).first()
             if existing is not None:
-                matched_id = existing.id
+                # Re-swipe inside the same match-window: bind the
+                # already-persisted Encounter so the publisher below
+                # has a row to broadcast.  Without this assignment
+                # `match` is unbound and `_publish_match(match)` raises
+                # UnboundLocalError on the duplicate-mutual-like path.
+                match = existing
             else:
                 match = Encounter(
                     id=_new_id('match'),
@@ -506,7 +511,7 @@ def swipe():
                     latest_at=now,
                 )
                 g.db.add(match)
-                matched_id = match.id
+            matched_id = match.id
 
     g.db.commit()
     if matched_id is not None:
