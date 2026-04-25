@@ -170,6 +170,63 @@ def _icebreaker_side_for(match: Encounter, uid: str) -> Optional[str]:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# WAMP publishers — routed via core.peer_link.message_bus, same path
+# chat_messages.publish_new uses (chat_messages.py:282).  Lazy import
+# + best-effort: a missing message_bus must never break the request.
+#
+# Topic format: f"{ENCOUNTER_TOPIC_*}.{user_id}" — per-user suffix
+# matches the chat-sync convention (chat_messages.py:300) and the
+# wamp_router subscription-authorization pattern (wamp_router.py — every
+# topic ending with `.<viewer_uid>` is delivered only to that viewer).
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _publish_to_topic(topic: str, payload: dict) -> None:
+    """Publish to a single WAMP topic via message_bus.  Silent on failure
+    (missing peer_link is not a request failure)."""
+    try:
+        from core.peer_link.message_bus import get_message_bus
+    except ImportError:
+        logger.debug('encounter_api: message_bus unavailable for %s', topic)
+        return
+    try:
+        bus = get_message_bus()
+        bus.publish(topic, payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug('encounter_api: publish %s failed: %s', topic, exc)
+
+
+def _publish_match(match: Encounter) -> None:
+    """Fire encounter.match WAMP for both participants.  One per
+    user_id — the wamp_router authorization layer confines each
+    topic to its named viewer."""
+    payload = _match_to_dict(match)
+    for uid in (match.user_a_id, match.user_b_id):
+        if uid:
+            _publish_to_topic(f"{ENCOUNTER_TOPIC_MATCH}.{uid}", payload)
+
+
+def _publish_icebreaker(match: Encounter, side: str, status: str) -> None:
+    """Fire encounter.icebreaker WAMP for both participants when a side
+    flips to sent / declined.  The likee learns about a sent draft;
+    the agent on either device learns about a decline (so it can
+    update its memory_graph learn-from-decline signal)."""
+    p = match.payload or {}
+    payload = {
+        'match_id': match.id,
+        'side': side,
+        'status': status,
+        'icebreaker_a': p.get('icebreaker_a') or {},
+        'icebreaker_b': p.get('icebreaker_b') or {},
+    }
+    for uid in (match.user_a_id, match.user_b_id):
+        if uid:
+            _publish_to_topic(
+                f"{ENCOUNTER_TOPIC_ICEBREAKER}.{uid}", payload,
+            )
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Test hook — kept for fixture compatibility; each test creates a fresh
 # in-memory SQLite engine so this is now a no-op.  Preserved so the
 # existing `app` fixture's `encounter_api.ENCOUNTER_STORE.clear()` call
@@ -452,6 +509,11 @@ def swipe():
                 matched_id = match.id
 
     g.db.commit()
+    if matched_id is not None:
+        # Live notification to BOTH matched users — the SPA / RN
+        # subscribers open the icebreaker draft modal on receipt.
+        # Best-effort: a missing message_bus must not fail the swipe.
+        _publish_match(match)
     return _ok({
         'sighting_id': sighting_id,
         'decision': decision,
@@ -638,6 +700,7 @@ def icebreaker_approve():
     # values; flag the column dirty so the change persists.
     flag_modified(match, 'payload')
     g.db.commit()
+    _publish_icebreaker(match, side, 'sent')
 
     logger.info(
         'encounter.icebreaker sent side=%s match=%s len=%d',
@@ -674,6 +737,7 @@ def icebreaker_decline():
     match.latest_at = _now_dt()
     flag_modified(match, 'payload')
     g.db.commit()
+    _publish_icebreaker(match, side, 'declined')
 
     return _ok({'match_id': match_id, 'status': 'declined'})
 
