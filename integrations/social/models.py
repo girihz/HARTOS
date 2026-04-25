@@ -243,6 +243,7 @@ try:
         ShareableLink, ShareEvent, UserConsent, MarketplaceListing,
         ListingReview, MCPServer, MCPTool, ComputePledge, PledgeConsumption,
         UserChannelBinding, ConversationEntry, ChannelPresence,
+        DiscoverablePref, EncounterSighting,
     )
 except ImportError:
     # Standalone/Docker mode: sql package not installed, use local definitions
@@ -267,4 +268,5 @@ except ImportError:
         ShareableLink, ShareEvent, UserConsent, MarketplaceListing,
         ListingReview, MCPServer, MCPTool, ComputePledge, PledgeConsumption,
         UserChannelBinding, ConversationEntry, ChannelPresence,
+        DiscoverablePref, EncounterSighting,
     )

@@ -115,61 +115,54 @@ def test_social_media_curator_goal_has_no_autosend():
 _TEST_TOKEN_PREFIX = 'TEST-USER-'  # Authorization: Bearer TEST-USER-<id>
 
 
-class _MockDB:
-    """Minimum duck-type for the db object require_auth pulls from
-    _get_user_from_token.  Real require_auth calls .commit() / .close()
-    / .is_active / .rollback() — mock them all as no-ops so the
-    decorator's db lifecycle doesn't AttributeError.
-    """
-
-    is_active = True
-
-    def commit(self):
-        pass
-
-    def rollback(self):
-        pass
-
-    def close(self):
-        pass
-
-
-def _fake_get_user_from_token(token):
-    """Test-mode replacement for auth._get_user_from_token.
-
-    Accepts 'TEST-USER-<N>' tokens (set by our test client) and returns
-    a minimal user + mock db pair.  Patching this internal function —
-    instead of swapping the @require_auth decorator by module-reload —
-    is robust to test collection order.  The real require_auth keeps
-    all its logic (Bearer prefix check, g.user population, db
-    lifecycle); we only replace the token → user resolver.
-    """
-    if not isinstance(token, str) or not token.startswith(_TEST_TOKEN_PREFIX):
-        return None, None
-    try:
-        uid = int(token[len(_TEST_TOKEN_PREFIX):])
-    except ValueError:
-        return None, None
-    return (
-        SimpleNamespace(id=uid, is_admin=False, is_moderator=False),
-        _MockDB(),
-    )
-
-
 @pytest.fixture
 def app(monkeypatch):
-    """Minimal Flask app with just the encounter blueprint mounted.
+    """Minimal Flask app with the encounter blueprint mounted on top of
+    a fresh in-memory SQLite engine.
 
-    The real require_auth decorator runs (bearer check, token
-    resolution, g.user population, db lifecycle) with
-    _get_user_from_token swapped for a test-mode version.  No module
-    reloading, no blueprint reconstruction — robust to test
-    collection order and parallel execution.
+    Each request handler gets its OWN sqlalchemy Session (require_auth
+    closes the session in its after-request cleanup, so reusing one
+    session across requests would hit a closed connection on the
+    second call).  Sessions all share the same in-memory engine so DB
+    state persists for the duration of the test.
+
+    The `_fake_get_user_from_token` swap preserves all of require_auth's
+    real logic (Bearer parsing, g.user/g.db population, commit/rollback
+    lifecycle); only the token → (user, session) resolver is faked.
     """
     from flask import Flask
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
 
     from integrations.social import auth as _auth_mod
     from integrations.social import encounter_api
+    # Import models AFTER auth so the module-load order matches prod.
+    from integrations.social.models import (  # noqa: F401
+        DiscoverablePref, Encounter, EncounterSighting,
+    )
+
+    engine = create_engine('sqlite:///:memory:')
+    # Use the metadata of any encounter model — Base is shared across
+    # whichever path (canonical sql.models or the _models_local
+    # fallback) the models.py router resolved.  create_all builds
+    # every registered table; SQLite in-memory is fast enough.
+    EncounterSighting.__table__.metadata.create_all(engine)
+    SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def _fake_get_user_from_token(token):
+        if not isinstance(token, str) or not token.startswith(_TEST_TOKEN_PREFIX):
+            return None, None
+        try:
+            uid = int(token[len(_TEST_TOKEN_PREFIX):])
+        except ValueError:
+            return None, None
+        # Fresh session per request so require_auth's after-request
+        # close() doesn't poison subsequent requests.  All sessions
+        # share the engine so DB state is shared across requests.
+        return (
+            SimpleNamespace(id=uid, is_admin=False, is_moderator=False),
+            SessionFactory(),
+        )
 
     monkeypatch.setattr(
         _auth_mod, '_get_user_from_token', _fake_get_user_from_token,
@@ -180,9 +173,10 @@ def app(monkeypatch):
     flask_app.config['TESTING'] = True
     flask_app.register_blueprint(encounter_api.encounter_bp)
     flask_app.encounter_module = encounter_api  # type: ignore[attr-defined]
+    flask_app.test_engine = engine  # type: ignore[attr-defined]
     yield flask_app
-    # Blueprint registration is per-app; garbage-collected with flask_app.
     encounter_api.ENCOUNTER_STORE.clear()
+    engine.dispose()
 
 
 @pytest.fixture

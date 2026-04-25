@@ -8,7 +8,7 @@ from .models import get_engine, Base
 
 logger = logging.getLogger('hevolve_social')
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 
 
 def get_schema_version(engine) -> int:
@@ -816,3 +816,82 @@ def run_migrations():
                     "v38 migration: %s skipped (may already exist): %s",
                     label, e)
         set_schema_version(engine, 38)
+
+    if current < 39:
+        # v39: BLE encounter persistence — replaces the in-memory
+        # _EncounterStore in encounter_api.py with real DB tables.
+        # Adds two new tables (discoverable_prefs, encounter_sightings)
+        # and extends `encounters` with lat / lng / payload columns so
+        # post-match BLE rows persist in the canonical encounter graph
+        # (context_type='ble') with their map pin and per-side
+        # icebreaker state.  Per-statement commit (PostgreSQL-safe).
+        logger.info("HevolveSocial: migrating to v39 "
+                    "(BLE encounter persistence — discoverable_prefs, "
+                    "encounter_sightings, encounters.lat/lng/payload)")
+        _v39_stmts = [
+            ("""CREATE TABLE IF NOT EXISTS discoverable_prefs (
+                user_id VARCHAR(64) PRIMARY KEY REFERENCES users(id),
+                enabled BOOLEAN DEFAULT 0 NOT NULL,
+                enabled_at DATETIME,
+                expires_at DATETIME,
+                age_claim_18 BOOLEAN DEFAULT 0 NOT NULL,
+                face_visible BOOLEAN DEFAULT 0 NOT NULL,
+                avatar_style VARCHAR(64) DEFAULT 'studio_ghibli',
+                vibe_tags JSON,
+                toggle_count_24h INTEGER DEFAULT 0,
+                toggle_window_start DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_toggle_at DATETIME,
+                current_pubkey VARCHAR(128),
+                pubkey_registered_at DATETIME,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+             )""",
+             "CREATE TABLE discoverable_prefs"),
+            ("CREATE INDEX IF NOT EXISTS ix_discoverable_prefs_expires_at "
+             "ON discoverable_prefs(expires_at)",
+             "CREATE INDEX expires_at"),
+            ("CREATE INDEX IF NOT EXISTS ix_discoverable_prefs_current_pubkey "
+             "ON discoverable_prefs(current_pubkey)",
+             "CREATE INDEX current_pubkey"),
+            ("""CREATE TABLE IF NOT EXISTS encounter_sightings (
+                id VARCHAR(64) PRIMARY KEY,
+                owner_user_id VARCHAR(64) NOT NULL REFERENCES users(id),
+                peer_user_id VARCHAR(64) REFERENCES users(id),
+                peer_pubkey VARCHAR(128) NOT NULL,
+                rssi_peak INTEGER,
+                dwell_sec INTEGER,
+                lat FLOAT,
+                lng FLOAT,
+                sighted_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                swipe_decision VARCHAR(10) DEFAULT 'pending',
+                expires_at DATETIME NOT NULL
+             )""",
+             "CREATE TABLE encounter_sightings"),
+            ("CREATE INDEX IF NOT EXISTS ix_encounter_sightings_owner_user_id "
+             "ON encounter_sightings(owner_user_id)",
+             "CREATE INDEX owner_user_id"),
+            ("CREATE INDEX IF NOT EXISTS ix_encounter_sightings_peer_user_id "
+             "ON encounter_sightings(peer_user_id)",
+             "CREATE INDEX peer_user_id"),
+            ("CREATE INDEX IF NOT EXISTS ix_encounter_sightings_owner_sighted "
+             "ON encounter_sightings(owner_user_id, sighted_at)",
+             "CREATE INDEX owner_sighted"),
+            ("CREATE INDEX IF NOT EXISTS ix_encounter_sightings_peer_pubkey "
+             "ON encounter_sightings(peer_pubkey)",
+             "CREATE INDEX peer_pubkey"),
+            ("ALTER TABLE encounters ADD COLUMN lat FLOAT",
+             "ADD COLUMN encounters.lat"),
+            ("ALTER TABLE encounters ADD COLUMN lng FLOAT",
+             "ADD COLUMN encounters.lng"),
+            ("ALTER TABLE encounters ADD COLUMN payload JSON",
+             "ADD COLUMN encounters.payload"),
+        ]
+        for sql, label in _v39_stmts:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text(sql))
+                    conn.commit()
+            except Exception as e:
+                logger.warning(
+                    "v39 migration: %s skipped (may already exist): %s",
+                    label, e)
+        set_schema_version(engine, 39)

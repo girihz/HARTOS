@@ -1,5 +1,5 @@
 """
-HevolveSocial - Encounter Icebreaker Blueprint (PR-A alpha skeleton)
+HevolveSocial - Encounter Icebreaker Blueprint (PR-A — DB-backed).
 
 Physical-world P2P encounter flow: two nearby Nunba users both set
 'discoverable' on Hevolve Android, their phones do autonomous BLE
@@ -12,6 +12,17 @@ Full design: Claude-memory/project_encounter_icebreaker.md
 Seeded agent goal: integrations.agent_engine.goal_seeding
  .SEED_BOOTSTRAP_GOALS[slug='encounter_icebreaker_agent']
 
+Persistence (v39 — see migrations.py):
+  * discoverable_prefs        per-user toggle state + rotating pubkey
+  * encounter_sightings       ephemeral pre-match swipe state (24h TTL)
+  * encounters (extended)     durable post-match record with
+                              context_type='ble', lat/lng map pin,
+                              payload JSON for per-side icebreaker state.
+  Mutual matches upsert into the canonical `encounters` table so they
+  participate in the same bond_level / is_mutual_aware progression as
+  community / post / region encounters — single graph, single SwarmCanvas
+  surface, no parallel match concept.
+
 Endpoints all mounted at /api/social/encounter/*  (JWT-auth required):
 
   POST /discoverable     enable/disable broadcast + TTL + age gate
@@ -22,6 +33,8 @@ Endpoints all mounted at /api/social/encounter/*  (JWT-auth required):
   GET  /map-pins         post-match encounter pins the user kept visible
   POST /icebreaker/approve   send approved draft (agent integration: PR-C)
   POST /icebreaker/decline   reject draft; agent learns from reason
+  POST /register-pubkey  phone registers current rotating pubkey
+  GET  /topics           WAMP topic constants
 
 Invariants enforced server-side (the blocking privacy gates):
 
@@ -38,27 +51,17 @@ Invariants enforced server-side (the blocking privacy gates):
   6. All pubkeys are rotating (scheme rotates every
      ENCOUNTER_PUBKEY_ROTATION_SEC on the phone); server stores only
      the rotating value, never the user's master identity.
-
-STORAGE (this PR-A alpha):
-  In-process dicts + threading.RLock.  NOT DB-backed yet — that lands
-  in PR-A beta along with the migration v38.  Persistence is
-  process-lifetime only; suitable for dev + CI smoke tests, NOT for
-  production regional/central nodes.  The shape of the in-memory
-  records matches the planned schema 1:1 so the PR-A beta swap is
-  mechanical.
-
-  The ENCOUNTER_STORE sentinel is exposed at module-level so tests
-  can reach in and assert state without going through HTTP.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
-import threading
-import time
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from flask import Blueprint, g, jsonify, request
+from sqlalchemy.orm.attributes import flag_modified
 
 from core.constants import (
     ENCOUNTER_DISCOVERABLE_MAX_TOGGLES_24H,
@@ -71,7 +74,13 @@ from core.constants import (
     ENCOUNTER_TOPIC_SIGHTING,
     ENCOUNTER_TOPIC_SWIPE,
 )
+
 from .auth import require_auth
+from .models import (
+    DiscoverablePref,
+    Encounter,
+    EncounterSighting,
+)
 
 logger = logging.getLogger('hevolve_social')
 
@@ -79,53 +88,9 @@ encounter_bp = Blueprint('encounter', __name__, url_prefix='/api/social')
 
 
 # ──────────────────────────────────────────────────────────────────────
-# ENCOUNTER_STORE — in-memory skeleton state (PR-A alpha only).
-# Replaced by DB models in PR-A beta (migration v38).
-#
-# Shape matches the target SQLAlchemy model shape 1:1 so the swap in
-# PR-A beta is a drop-in replacement, not a refactor.
+# Tiny helpers — response shape mirrors the rest of /api/social/*.
 # ──────────────────────────────────────────────────────────────────────
-class _EncounterStore:
-    """Process-lifetime encounter state.  RLock-guarded.
 
-    Not thread-stress-tested; the real concurrency story is the DB
-    in PR-A beta.  This is enough for dev + single-worker pytest.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        # user_id -> dict(enabled, enabled_at, expires_at,
-        #                 age_claim_18, face_visible, avatar_style,
-        #                 vibe_tags, toggle_count_24h, last_toggle_at)
-        self.discoverable: dict[int, dict[str, Any]] = {}
-        # sighting_id -> dict(owner_user_id, peer_pubkey, rssi_peak,
-        #                     dwell_sec, lat, lng, sighted_at,
-        #                     swipe_decision, expires_at)
-        self.sightings: dict[str, dict[str, Any]] = {}
-        # match_id -> dict(user_a, user_b, lat, lng, matched_at,
-        #                  icebreaker_a_status, icebreaker_b_status,
-        #                  map_pin_visible)
-        self.matches: dict[str, dict[str, Any]] = {}
-        # rotating_pubkey (hex) -> user_id  (reverse index; rotated
-        # entries expire after ENCOUNTER_PUBKEY_ROTATION_SEC)
-        self.pubkey_to_user: dict[str, tuple[int, float]] = {}
-
-    def clear(self) -> None:
-        """Test-only: reset the store."""
-        with self._lock:
-            self.discoverable.clear()
-            self.sightings.clear()
-            self.matches.clear()
-            self.pubkey_to_user.clear()
-
-
-ENCOUNTER_STORE = _EncounterStore()
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Tiny helpers mirroring the rest of the social blueprints' style so
-# response shapes are consistent across /api/social/*.
-# ──────────────────────────────────────────────────────────────────────
 def _ok(data: Any = None, meta: Any = None, status: int = 200):
     r: dict[str, Any] = {'success': True}
     if data is not None:
@@ -143,18 +108,16 @@ def _json() -> dict[str, Any]:
     return request.get_json(force=True, silent=True) or {}
 
 
-def _now() -> float:
-    return time.time()
+def _now_dt() -> datetime:
+    return datetime.utcnow()
 
 
-def _user_id() -> Optional[int]:
-    """Resolve current user id from auth context populated by
-    require_auth (sets g.user + g.user_id).  Returns None if unauth.
+def _user_id() -> Optional[str]:
+    """Resolve current user_id as string (matches schema's String(64)).
 
-    User ids in HevolveSocial are VARCHAR(64) in some paths (see
-    agent_bridge) and INT in others; we coerce to a consistent string
-    hash key for match-row pairing so ordering (user_a, user_b) is
-    lexicographic-stable regardless of backing type.
+    Auth populates `g.user` with an id that may be int (legacy local
+    test fixtures) or str (real DB rows).  Coerce to str so DB queries
+    match the FK column type.  Returns None if not authenticated.
     """
     user = getattr(g, 'user', None)
     if user is None:
@@ -162,18 +125,7 @@ def _user_id() -> Optional[int]:
     uid = getattr(user, 'id', None)
     if uid is None and isinstance(user, dict):
         uid = user.get('id')
-    if uid is None:
-        return None
-    # HevolveSocial User.id is a string on some deployments (VARCHAR
-    # primary key to allow UUID agents).  Fall back to g.user_id
-    # (already stringified by require_auth) if the raw value isn't
-    # coerceable to int.
-    try:
-        return int(uid)
-    except (TypeError, ValueError):
-        # Hash-stable int for pairing.  Not cryptographic — just need
-        # a deterministic ordering so (A,B) and (B,A) collapse.
-        return hash(str(uid)) & 0x7FFFFFFF
+    return str(uid) if uid is not None else None
 
 
 def _new_id(prefix: str) -> str:
@@ -181,18 +133,73 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_urlsafe(12)}"
 
 
+def _ble_pair_context_id(sighting_a_id: str, sighting_b_id: str) -> str:
+    """Deterministic context_id for the BLE match's encounters row.
+
+    Hashes the two sighting ids sorted so (A,B) and (B,A) collapse to
+    the same row.  sha1 is fine — this is just a discriminator, not a
+    secret.  Truncate to 32 chars to fit in encounters.context_id
+    (VARCHAR(64)).
+    """
+    combined = ":".join(sorted([sighting_a_id, sighting_b_id]))
+    return hashlib.sha1(combined.encode('utf-8')).hexdigest()[:32]
+
+
+def _icebreaker_payload_init() -> dict[str, Any]:
+    """Initial JSON payload for a fresh BLE encounters row."""
+    return {
+        'icebreaker_a': {
+            'status': 'pending', 'text': None,
+            'sent_at': None, 'decline_reason': None,
+        },
+        'icebreaker_b': {
+            'status': 'pending', 'text': None,
+            'sent_at': None, 'decline_reason': None,
+        },
+        'map_pin_visible': True,
+    }
+
+
+def _icebreaker_side_for(match: Encounter, uid: str) -> Optional[str]:
+    """Return 'a' or 'b' for which side of the match `uid` represents."""
+    if match.user_a_id == uid:
+        return 'a'
+    if match.user_b_id == uid:
+        return 'b'
+    return None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test hook — kept for fixture compatibility; each test creates a fresh
+# in-memory SQLite engine so this is now a no-op.  Preserved so the
+# existing `app` fixture's `encounter_api.ENCOUNTER_STORE.clear()` call
+# does not need to change shape during the v39 swap.
+# ──────────────────────────────────────────────────────────────────────
+
+class _NoopStore:
+    """Vestige of the pre-v39 in-memory store.  All persistence now
+    lives in the DB; tests get a fresh engine per fixture."""
+
+    def clear(self) -> None:  # noqa: D401 — kept for fixture parity
+        return None
+
+
+ENCOUNTER_STORE = _NoopStore()
+
+
 # ──────────────────────────────────────────────────────────────────────
 # /discoverable — toggle the BLE broadcast + age + TTL state.
 # ──────────────────────────────────────────────────────────────────────
+
 @encounter_bp.route('/encounter/discoverable', methods=['GET'])
 @require_auth
 def get_discoverable():
     uid = _user_id()
     if uid is None:
         return _err('unauthenticated', 401)
-    with ENCOUNTER_STORE._lock:
-        state = ENCOUNTER_STORE.discoverable.get(uid)
-    if not state:
+    pref = g.db.query(DiscoverablePref).filter_by(user_id=uid).first()
+    now = _now_dt()
+    if not pref:
         return _ok({
             'enabled': False,
             'expires_at': None,
@@ -203,18 +210,20 @@ def get_discoverable():
             'avatar_style': 'studio_ghibli',
             'vibe_tags': [],
         })
-    now = _now()
-    remaining = max(0, int((state.get('expires_at') or now) - now))
-    still_on = bool(state.get('enabled')) and remaining > 0
+    remaining = (
+        max(0, int((pref.expires_at - now).total_seconds()))
+        if pref.expires_at else 0
+    )
+    still_on = bool(pref.enabled) and remaining > 0
     return _ok({
         'enabled': still_on,
-        'expires_at': state.get('expires_at'),
+        'expires_at': pref.expires_at.isoformat() if pref.expires_at else None,
         'remaining_sec': remaining,
-        'toggle_count_24h': state.get('toggle_count_24h', 0),
-        'age_claim_18': state.get('age_claim_18', False),
-        'face_visible': state.get('face_visible', False),
-        'avatar_style': state.get('avatar_style', 'studio_ghibli'),
-        'vibe_tags': state.get('vibe_tags', []),
+        'toggle_count_24h': pref.toggle_count_24h or 0,
+        'age_claim_18': bool(pref.age_claim_18),
+        'face_visible': bool(pref.face_visible),
+        'avatar_style': pref.avatar_style or 'studio_ghibli',
+        'vibe_tags': pref.vibe_tags or [],
     })
 
 
@@ -242,46 +251,44 @@ def set_discoverable():
         return _err('vibe_tags must be a list of strings')
     vibe_tags = [str(t)[:40] for t in vibe_tags[:10]]
 
-    now = _now()
-    with ENCOUNTER_STORE._lock:
-        state = ENCOUNTER_STORE.discoverable.setdefault(uid, {
-            'enabled': False,
-            'enabled_at': None,
-            'expires_at': None,
-            'age_claim_18': False,
-            'face_visible': False,
-            'avatar_style': 'studio_ghibli',
-            'vibe_tags': [],
-            'toggle_count_24h': 0,
-            'last_toggle_at': 0.0,
-            'toggle_window_start': now,
-        })
-        # 24h sliding window
-        if now - state.get('toggle_window_start', now) > 24 * 3600:
-            state['toggle_window_start'] = now
-            state['toggle_count_24h'] = 0
-        if state['toggle_count_24h'] >= ENCOUNTER_DISCOVERABLE_MAX_TOGGLES_24H:
-            return _err(
-                f'toggle limit reached '
-                f'({ENCOUNTER_DISCOVERABLE_MAX_TOGGLES_24H} per 24h)',
-                429,
-            )
-        if enable and not age_claim:
-            return _err('age_claim_18 must be true to enable discoverable', 403)
+    now = _now_dt()
+    pref = g.db.query(DiscoverablePref).filter_by(user_id=uid).first()
+    if pref is None:
+        pref = DiscoverablePref(
+            user_id=uid,
+            toggle_window_start=now,
+            toggle_count_24h=0,
+        )
+        g.db.add(pref)
 
-        state['enabled'] = enable
-        state['enabled_at'] = now if enable else state.get('enabled_at')
-        state['expires_at'] = (now + ttl) if enable else None
-        state['age_claim_18'] = age_claim
-        state['face_visible'] = face_visible
-        state['avatar_style'] = avatar_style
-        state['vibe_tags'] = vibe_tags
-        state['toggle_count_24h'] += 1
-        state['last_toggle_at'] = now
+    # 24h sliding toggle-count window.
+    if pref.toggle_window_start and \
+            (now - pref.toggle_window_start).total_seconds() > 24 * 3600:
+        pref.toggle_window_start = now
+        pref.toggle_count_24h = 0
+    if (pref.toggle_count_24h or 0) >= ENCOUNTER_DISCOVERABLE_MAX_TOGGLES_24H:
+        return _err(
+            f'toggle limit reached '
+            f'({ENCOUNTER_DISCOVERABLE_MAX_TOGGLES_24H} per 24h)',
+            429,
+        )
+    if enable and not age_claim:
+        return _err('age_claim_18 must be true to enable discoverable', 403)
+
+    pref.enabled = enable
+    pref.enabled_at = now if enable else pref.enabled_at
+    pref.expires_at = (now + timedelta(seconds=ttl)) if enable else None
+    pref.age_claim_18 = age_claim
+    pref.face_visible = face_visible
+    pref.avatar_style = avatar_style
+    pref.vibe_tags = vibe_tags
+    pref.toggle_count_24h = (pref.toggle_count_24h or 0) + 1
+    pref.last_toggle_at = now
+    g.db.commit()
 
     return _ok({
         'enabled': enable,
-        'expires_at': state['expires_at'],
+        'expires_at': pref.expires_at.isoformat() if pref.expires_at else None,
         'remaining_sec': ttl if enable else 0,
     })
 
@@ -292,6 +299,7 @@ def set_discoverable():
 # (the likee's phone would simply never produce a card for a non-
 # discoverable peer — no leak surface).
 # ──────────────────────────────────────────────────────────────────────
+
 @encounter_bp.route('/encounter/sighting', methods=['POST'])
 @require_auth
 def report_sighting():
@@ -307,57 +315,61 @@ def report_sighting():
     if not peer_pubkey or len(peer_pubkey) < 16:
         return _err('peer_pubkey required (hex, >=16 chars)')
 
-    now = _now()
-    # Look up peer user_id from rotating-pubkey index.  If the peer
-    # never registered their current pubkey (not discoverable, or
-    # pubkey expired) → 404 with a neutral message.  No information
-    # is leaked about which case it is.
-    with ENCOUNTER_STORE._lock:
-        peer_entry = ENCOUNTER_STORE.pubkey_to_user.get(peer_pubkey)
-        if not peer_entry:
-            return _err('peer not discoverable', 404)
-        peer_uid, registered_at = peer_entry
-        if peer_uid == uid:
-            return _err('self-sighting rejected')
-        peer_state = ENCOUNTER_STORE.discoverable.get(peer_uid) or {}
-        peer_exp = peer_state.get('expires_at') or 0
-        if not peer_state.get('enabled') or peer_exp < now:
-            return _err('peer not discoverable', 404)
+    now = _now_dt()
+    # Resolve peer via the rotating-pubkey reverse index on
+    # discoverable_prefs.current_pubkey.  If the peer hasn't registered
+    # this pubkey OR isn't discoverable OR has expired → 404 with a
+    # neutral message.  No information is leaked about which case it is.
+    peer_pref = g.db.query(DiscoverablePref).filter_by(
+        current_pubkey=peer_pubkey,
+    ).first()
+    if not peer_pref:
+        return _err('peer not discoverable', 404)
+    peer_uid = peer_pref.user_id
+    if peer_uid == uid:
+        return _err('self-sighting rejected')
+    if (
+        not peer_pref.enabled
+        or not peer_pref.expires_at
+        or peer_pref.expires_at < now
+    ):
+        return _err('peer not discoverable', 404)
 
-        sighting_id = _new_id('sight')
-        sighting = {
-            'id': sighting_id,
-            'owner_user_id': uid,
-            'peer_user_id': peer_uid,        # resolved, for internal use
-            'peer_pubkey': peer_pubkey,
-            'rssi_peak': rssi_peak,
-            'dwell_sec': dwell_sec,
-            'lat': lat,
-            'lng': lng,
-            'sighted_at': now,
-            'swipe_decision': 'pending',
-            'expires_at': now + ENCOUNTER_SIGHTING_EXPIRES_SEC,
-        }
-        ENCOUNTER_STORE.sightings[sighting_id] = sighting
+    sighting = EncounterSighting(
+        id=_new_id('sight'),
+        owner_user_id=uid,
+        peer_user_id=peer_uid,
+        peer_pubkey=peer_pubkey,
+        rssi_peak=rssi_peak,
+        dwell_sec=dwell_sec,
+        lat=float(lat) if lat is not None else None,
+        lng=float(lng) if lng is not None else None,
+        sighted_at=now,
+        swipe_decision='pending',
+        expires_at=now + timedelta(seconds=ENCOUNTER_SIGHTING_EXPIRES_SEC),
+    )
+    g.db.add(sighting)
+    g.db.commit()
 
-    # Swipe-card payload: only what the liker needs to decide.
     return _ok({
-        'sighting_id': sighting_id,
-        'peer_anon_id': peer_pubkey[:12],   # shown as handle on card
-        'avatar_style': peer_state.get('avatar_style', 'studio_ghibli'),
-        'vibe_tags': peer_state.get('vibe_tags', []),
-        'face_visible': peer_state.get('face_visible', False),
-        'expires_at': sighting['expires_at'],
+        'sighting_id': sighting.id,
+        'peer_anon_id': peer_pubkey[:12],
+        'avatar_style': peer_pref.avatar_style or 'studio_ghibli',
+        'vibe_tags': peer_pref.vibe_tags or [],
+        'face_visible': bool(peer_pref.face_visible),
+        'expires_at': sighting.expires_at.isoformat(),
     })
 
 
 # ──────────────────────────────────────────────────────────────────────
 # /swipe — like/dislike decision.  Server checks for a mutual like
-# within ENCOUNTER_MATCH_WINDOW_SEC and, if found, creates an
-# encounter_match row.  ONE-SIDED LIKES NEVER LEAK — they live only on
-# the liker's sighting row as swipe_decision='like' with no peer-side
-# visibility.
+# within ENCOUNTER_MATCH_WINDOW_SEC and, if found, upserts an encounters
+# row with context_type='ble'.  ONE-SIDED LIKES NEVER LEAK — they live
+# only on the liker's sighting row as swipe_decision='like' with no
+# peer-side visibility.  The response shape is symmetric: even when no
+# match, the client gets the same fields aside from the match_id.
 # ──────────────────────────────────────────────────────────────────────
+
 @encounter_bp.route('/encounter/swipe', methods=['POST'])
 @require_auth
 def swipe():
@@ -372,64 +384,74 @@ def swipe():
     if not sighting_id:
         return _err('sighting_id required')
 
-    now = _now()
-    matched = None
-    with ENCOUNTER_STORE._lock:
-        sighting = ENCOUNTER_STORE.sightings.get(sighting_id)
-        if not sighting or sighting['owner_user_id'] != uid:
-            return _err('sighting not found', 404)
-        if sighting.get('expires_at', 0) < now:
-            return _err('sighting expired', 410)
-        if sighting['swipe_decision'] != 'pending':
-            return _err('already swiped', 409)
-        sighting['swipe_decision'] = decision
+    now = _now_dt()
+    sighting = g.db.query(EncounterSighting).filter_by(id=sighting_id).first()
+    if not sighting or sighting.owner_user_id != uid:
+        return _err('sighting not found', 404)
+    if sighting.expires_at and sighting.expires_at < now:
+        return _err('sighting expired', 410)
+    if sighting.swipe_decision != 'pending':
+        return _err('already swiped', 409)
 
-        if decision == 'like':
-            # Check for reciprocal like within match window.
-            peer_uid = sighting['peer_user_id']
-            for other_id, other in ENCOUNTER_STORE.sightings.items():
-                if other_id == sighting_id:
-                    continue
-                if other['owner_user_id'] != peer_uid:
-                    continue
-                if other['peer_user_id'] != uid:
-                    continue
-                if other.get('swipe_decision') != 'like':
-                    continue
-                if abs(other['sighted_at'] - sighting['sighted_at']) \
-                        > ENCOUNTER_MATCH_WINDOW_SEC:
-                    continue
-                # Mutual match found.  Pin at the midpoint of the two
-                # sighting locations (if both reported lat/lng).
-                lat = None
-                lng = None
-                la = sighting.get('lat')
-                lb = other.get('lat')
-                if la is not None and lb is not None:
-                    lat = (la + lb) / 2
-                lga = sighting.get('lng')
-                lgb = other.get('lng')
-                if lga is not None and lgb is not None:
-                    lng = (lga + lgb) / 2
-                # Canonical ordering of the pair (user_a < user_b) so
-                # we never double-create match rows for (A,B) and (B,A).
-                a_uid = min(uid, peer_uid)
-                b_uid = max(uid, peer_uid)
-                match_id = _new_id('match')
-                matched = {
-                    'id': match_id,
-                    'user_a': a_uid,
-                    'user_b': b_uid,
-                    'lat': lat,
-                    'lng': lng,
-                    'matched_at': now,
-                    'icebreaker_a_status': 'pending',
-                    'icebreaker_b_status': 'pending',
-                    'map_pin_visible': True,
-                }
-                ENCOUNTER_STORE.matches[match_id] = matched
-                break
+    sighting.swipe_decision = decision
+    matched_id: Optional[str] = None
 
+    if decision == 'like':
+        peer_uid = sighting.peer_user_id
+        # Reciprocal-like check within match window.
+        window_start = sighting.sighted_at - timedelta(
+            seconds=ENCOUNTER_MATCH_WINDOW_SEC,
+        )
+        window_end = sighting.sighted_at + timedelta(
+            seconds=ENCOUNTER_MATCH_WINDOW_SEC,
+        )
+        reciprocal = g.db.query(EncounterSighting).filter(
+            EncounterSighting.id != sighting_id,
+            EncounterSighting.owner_user_id == peer_uid,
+            EncounterSighting.peer_user_id == uid,
+            EncounterSighting.swipe_decision == 'like',
+            EncounterSighting.sighted_at >= window_start,
+            EncounterSighting.sighted_at <= window_end,
+        ).first()
+        if reciprocal is not None:
+            # Mutual match — write canonical encounters row.  Pin at
+            # the midpoint of the two sighting locations (if both
+            # reported lat/lng).  Canonical (user_a, user_b) ordering
+            # so we never double-create rows for (A,B) and (B,A).
+            a_uid, b_uid = sorted((uid, peer_uid))
+            la, lb = sighting.lat, reciprocal.lat
+            lat = ((la + lb) / 2) if (la is not None and lb is not None) else None
+            lga, lgb = sighting.lng, reciprocal.lng
+            lng = ((lga + lgb) / 2) if (lga is not None and lgb is not None) else None
+            ctx_id = _ble_pair_context_id(sighting.id, reciprocal.id)
+            existing = g.db.query(Encounter).filter_by(
+                user_a_id=a_uid,
+                user_b_id=b_uid,
+                context_type='ble',
+                context_id=ctx_id,
+            ).first()
+            if existing is not None:
+                matched_id = existing.id
+            else:
+                match = Encounter(
+                    id=_new_id('match'),
+                    user_a_id=a_uid,
+                    user_b_id=b_uid,
+                    context_type='ble',
+                    context_id=ctx_id,
+                    encounter_count=1,
+                    is_mutual_aware=True,
+                    bond_level=1,
+                    lat=lat,
+                    lng=lng,
+                    payload=_icebreaker_payload_init(),
+                    first_at=now,
+                    latest_at=now,
+                )
+                g.db.add(match)
+                matched_id = match.id
+
+    g.db.commit()
     return _ok({
         'sighting_id': sighting_id,
         'decision': decision,
@@ -439,26 +461,47 @@ def swipe():
         # We do NOT include any signal about whether the peer swiped
         # dislike — only the positive-match signal is surfaced, and
         # only to the two matched parties.
-        'match_id': matched['id'] if matched else None,
+        'match_id': matched_id,
     })
 
 
 # ──────────────────────────────────────────────────────────────────────
 # /matches — list mutual matches the user is part of.
+# Reads the canonical `encounters` table filtered to context_type='ble'.
 # ──────────────────────────────────────────────────────────────────────
+
+def _match_to_dict(match: Encounter) -> dict[str, Any]:
+    p = match.payload or {}
+    matched_at = match.first_at
+    return {
+        'id': match.id,
+        'user_a': match.user_a_id,
+        'user_b': match.user_b_id,
+        'lat': match.lat,
+        'lng': match.lng,
+        'matched_at': matched_at.timestamp() if matched_at else None,
+        'icebreaker_a_status': (p.get('icebreaker_a') or {}).get(
+            'status', 'pending',
+        ),
+        'icebreaker_b_status': (p.get('icebreaker_b') or {}).get(
+            'status', 'pending',
+        ),
+        'map_pin_visible': bool(p.get('map_pin_visible', True)),
+    }
+
+
 @encounter_bp.route('/encounter/matches', methods=['GET'])
 @require_auth
 def list_matches():
     uid = _user_id()
     if uid is None:
         return _err('unauthenticated', 401)
-    with ENCOUNTER_STORE._lock:
-        mine = [
-            m for m in ENCOUNTER_STORE.matches.values()
-            if m['user_a'] == uid or m['user_b'] == uid
-        ]
-    mine.sort(key=lambda m: m['matched_at'], reverse=True)
-    return _ok({'matches': mine, 'count': len(mine)})
+    rows = g.db.query(Encounter).filter(
+        Encounter.context_type == 'ble',
+        ((Encounter.user_a_id == uid) | (Encounter.user_b_id == uid)),
+    ).order_by(Encounter.latest_at.desc()).all()
+    matches = [_match_to_dict(r) for r in rows]
+    return _ok({'matches': matches, 'count': len(matches)})
 
 
 @encounter_bp.route('/encounter/map-pins', methods=['GET'])
@@ -467,20 +510,23 @@ def map_pins():
     uid = _user_id()
     if uid is None:
         return _err('unauthenticated', 401)
-    with ENCOUNTER_STORE._lock:
-        pins = [
-            {
-                'match_id': m['id'],
-                'lat': m['lat'],
-                'lng': m['lng'],
-                'matched_at': m['matched_at'],
-            }
-            for m in ENCOUNTER_STORE.matches.values()
-            if (m['user_a'] == uid or m['user_b'] == uid)
-            and m.get('map_pin_visible')
-            and m.get('lat') is not None
-            and m.get('lng') is not None
-        ]
+    rows = g.db.query(Encounter).filter(
+        Encounter.context_type == 'ble',
+        ((Encounter.user_a_id == uid) | (Encounter.user_b_id == uid)),
+        Encounter.lat.isnot(None),
+        Encounter.lng.isnot(None),
+    ).all()
+    pins = []
+    for r in rows:
+        p = r.payload or {}
+        if not bool(p.get('map_pin_visible', True)):
+            continue
+        pins.append({
+            'match_id': r.id,
+            'lat': r.lat,
+            'lng': r.lng,
+            'matched_at': r.first_at.timestamp() if r.first_at else None,
+        })
     return _ok({'pins': pins, 'count': len(pins)})
 
 
@@ -489,7 +535,9 @@ def map_pins():
 # PRODUCES the draft lives in integrations/agent_engine/ and lands in
 # PR-C; until then, these endpoints accept user-supplied draft text so
 # the RN/React UI can be integration-tested end-to-end.
+# Per-side state lives in the encounter row's `payload` JSON column.
 # ──────────────────────────────────────────────────────────────────────
+
 @encounter_bp.route('/encounter/icebreaker/approve', methods=['POST'])
 @require_auth
 def icebreaker_approve():
@@ -507,17 +555,31 @@ def icebreaker_approve():
         return _err(
             f'text exceeds {ENCOUNTER_DRAFT_MAX_CHARS} chars', 413,
         )
-    with ENCOUNTER_STORE._lock:
-        match = ENCOUNTER_STORE.matches.get(match_id)
-        if not match or uid not in (match['user_a'], match['user_b']):
-            return _err('match not found', 404)
-        side = 'a' if match['user_a'] == uid else 'b'
-        key = f'icebreaker_{side}_status'
-        if match[key] in {'sent', 'declined'}:
-            return _err(f'icebreaker already {match[key]}', 409)
-        match[key] = 'sent'
-        match[f'icebreaker_{side}_text'] = text_val
-        match[f'icebreaker_{side}_sent_at'] = _now()
+
+    match = g.db.query(Encounter).filter_by(
+        id=match_id, context_type='ble',
+    ).first()
+    side = _icebreaker_side_for(match, uid) if match else None
+    if match is None or side is None:
+        return _err('match not found', 404)
+
+    payload = dict(match.payload or _icebreaker_payload_init())
+    side_state = dict(payload.get(f'icebreaker_{side}') or {})
+    if side_state.get('status') in {'sent', 'declined'}:
+        return _err(
+            f"icebreaker already {side_state.get('status')}", 409,
+        )
+    side_state['status'] = 'sent'
+    side_state['text'] = text_val
+    side_state['sent_at'] = _now_dt().timestamp()
+    payload[f'icebreaker_{side}'] = side_state
+    match.payload = payload
+    match.latest_at = _now_dt()
+    # SQLAlchemy doesn't auto-detect mutation of mutable JSON dict
+    # values; flag the column dirty so the change persists.
+    flag_modified(match, 'payload')
+    g.db.commit()
+
     logger.info(
         'encounter.icebreaker sent side=%s match=%s len=%d',
         side, match_id, len(text_val),
@@ -536,23 +598,35 @@ def icebreaker_decline():
     reason = str(body.get('reason', ''))[:400]
     if not match_id:
         return _err('match_id required')
-    with ENCOUNTER_STORE._lock:
-        match = ENCOUNTER_STORE.matches.get(match_id)
-        if not match or uid not in (match['user_a'], match['user_b']):
-            return _err('match not found', 404)
-        side = 'a' if match['user_a'] == uid else 'b'
-        match[f'icebreaker_{side}_status'] = 'declined'
-        match[f'icebreaker_{side}_decline_reason'] = reason
+
+    match = g.db.query(Encounter).filter_by(
+        id=match_id, context_type='ble',
+    ).first()
+    side = _icebreaker_side_for(match, uid) if match else None
+    if match is None or side is None:
+        return _err('match not found', 404)
+
+    payload = dict(match.payload or _icebreaker_payload_init())
+    side_state = dict(payload.get(f'icebreaker_{side}') or {})
+    side_state['status'] = 'declined'
+    side_state['decline_reason'] = reason
+    payload[f'icebreaker_{side}'] = side_state
+    match.payload = payload
+    match.latest_at = _now_dt()
+    flag_modified(match, 'payload')
+    g.db.commit()
+
     return _ok({'match_id': match_id, 'status': 'declined'})
 
 
 # ──────────────────────────────────────────────────────────────────────
-# INTERNAL — phone registers its current rotating pubkey after it
-# rotates (every ENCOUNTER_PUBKEY_ROTATION_SEC).  This lets the server
-# resolve sightings.  Unauthenticated peers of the user can't look up
-# the user's pubkey via this endpoint — it's a POST and self-scoped
-# to the authenticated user.
+# /register-pubkey — phone registers its current rotating pubkey after
+# it rotates (every ENCOUNTER_PUBKEY_ROTATION_SEC).  This is the
+# reverse-index sightings query against.  Self-scoped to the
+# authenticated user — peers cannot look up the user's pubkey via this
+# endpoint.
 # ──────────────────────────────────────────────────────────────────────
+
 @encounter_bp.route('/encounter/register-pubkey', methods=['POST'])
 @require_auth
 def register_pubkey():
@@ -563,16 +637,28 @@ def register_pubkey():
     pk = str(body.get('pubkey', '')).strip().lower()
     if not pk or len(pk) < 16 or len(pk) > 128:
         return _err('pubkey hex 16..128 chars')
-    now = _now()
-    with ENCOUNTER_STORE._lock:
-        ENCOUNTER_STORE.pubkey_to_user[pk] = (uid, now)
-    return _ok({'registered_at': now})
+    now = _now_dt()
+    pref = g.db.query(DiscoverablePref).filter_by(user_id=uid).first()
+    if pref is None:
+        pref = DiscoverablePref(
+            user_id=uid,
+            current_pubkey=pk,
+            pubkey_registered_at=now,
+            toggle_window_start=now,
+        )
+        g.db.add(pref)
+    else:
+        pref.current_pubkey = pk
+        pref.pubkey_registered_at = now
+    g.db.commit()
+    return _ok({'registered_at': now.timestamp()})
 
 
 # ──────────────────────────────────────────────────────────────────────
 # Topic constants re-exported for clients that need them (Nunba's
 # crossbarWorker + RN subscription manager).  Single-source import.
 # ──────────────────────────────────────────────────────────────────────
+
 WAMP_TOPICS = {
     'sighting': ENCOUNTER_TOPIC_SIGHTING,
     'swipe': ENCOUNTER_TOPIC_SWIPE,
