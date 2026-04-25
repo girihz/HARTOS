@@ -121,46 +121,56 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged)
-    timeout-minutes: 10
+    timeout-minutes: 75
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
     steps:
-      - name: Deploy to cloud server
+      - name: Deploy to <deploy-host> (central instance)
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           password: ${{ secrets.DEPLOY_PASSWORD }}
           port: ${{ secrets.DEPLOY_PORT }}
+          # docker build --no-cache on the 8GB langchain_gpt image
+          # routinely runs 25-40 min; 60m gives headroom + the 30-step
+          # health-check loop afterward.
+          command_timeout: 60m
           script: |
-            cd /opt/hartos
+            set -e
+            # Canonical clone path on <deploy-host> — the repo dir
+            # carries untracked release_manifest.json + .env + config.json
+            # that the central image bake-in needs.  git pull --ff-only
+            # leaves untracked files alone; aborts on local divergence.
+            cd <deploy-repo-path>
 
-            # Pull latest image
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            git pull --ff-only origin main
 
-            # Stop old container gracefully
-            docker stop hartos-langchain 2>/dev/null || true
-            docker rm hartos-langchain 2>/dev/null || true
+            # Mirror the host's manual deploy pattern (sathish has
+            # NOPASSWD sudo for docker + the master-key file read).
+            docker build --no-cache -t langchain_gpt:main .
 
-            # Start new container
-            docker run -d \
-              --name hartos-langchain \
-              --restart unless-stopped \
+            sudo docker stop langchain 2>/dev/null || true
+            sudo docker rm   langchain 2>/dev/null || true
+            sudo docker run -d --name langchain --restart unless-stopped \
               -p 6777:6777 \
-              -v /opt/hartos/data:/app/data \
-              -v /opt/hartos/prompts:/app/prompts \
-              -v /opt/hartos/logs:/app/logs \
-              -e HEVOLVE_DB_URL="${HEVOLVE_DB_URL}" \
-              -e OPENAI_API_KEY="${OPENAI_API_KEY}" \
-              -e HEVOLVE_MASTER_KEY="${HEVOLVE_MASTER_KEY}" \
-              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+              --env-file .env \
+              -e HEVOLVE_MASTER_PRIVATE_KEY="$(sudo cat <master-key-path>)" \
+              -v "$(pwd)/config.json:/app/config.json:ro" \
+              -v "$(pwd)/release_manifest.json:/app/release_manifest.json:ro" \
+              -v <deploy-logs-path>:/app/logs \
+              -v <deploy-images-path>:/app/output_images \
+              langchain_gpt:main
 
-            # Wait for health check
+            # Health check — /status is the canonical liveness probe.
             for i in $(seq 1 30); do
-              if curl -s http://localhost:6777/api/social/feed?limit=1 | grep -q 'data'; then
-                echo "HARTOS healthy on :6777"
+              if curl -fsS http://localhost:6777/status >/dev/null 2>&1; then
+                echo "[OK] HARTOS healthy on :6777"
+                docker ps --filter name=langchain --format '  Status: {{.Status}}'
                 exit 0
               fi
-              sleep 2
+              sleep 3
             done
-            echo "WARNING: Health check timed out"
+            echo "[FAIL] Health check timed out — dumping recent container logs"
+            docker logs --tail 100 langchain || true
+            exit 1
