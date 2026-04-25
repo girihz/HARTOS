@@ -258,6 +258,17 @@ def init_social(app):
     except Exception as e:
         logger.debug(f"HevolveSocial encounter blueprint skipped: {e}")
 
+    # Register UserConsent UI blueprint (W0c F3 prereq).  JWT-authed,
+    # append-only consent surface for cloud_capability + future scopes.
+    # Distinct from consent_service.py's admin-style /api/consent/* —
+    # see consent_api.py module docstring for the relationship.
+    try:
+        from .consent_api import consent_bp
+        app.register_blueprint(consent_bp)
+        logger.info("HevolveSocial consent registered at /api/social/consent/")
+    except Exception as e:
+        logger.debug(f"HevolveSocial consent blueprint skipped: {e}")
+
     # NOTE: compute_pledge_bp (api_compute_pledge.py) was consolidated into tracker_bp
     # and the stale file deleted 2026-04-15. All pledge endpoints live at
     # /api/social/tracker/experiments/*/pledge* and /api/social/tracker/pledges/*
