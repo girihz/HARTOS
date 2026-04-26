@@ -120,7 +120,16 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged)
+    # Feature-flag gate: the deploy step pushes to the central instance,
+    # so it stays OFF by default.  Repo variable DEPLOY_ENABLED='true'
+    # turns it on (no code change needed).  Toggle via:
+    #   gh variable set DEPLOY_ENABLED --body 'true'  --repo hertz-ai/HARTOS
+    #   gh variable set DEPLOY_ENABLED --body 'false' --repo hertz-ai/HARTOS
+    # Unset / any other value = skipped.  When skipped the job shows
+    # "skipped" (not "failure"), so the workflow status stays green.
+    if: |
+      vars.DEPLOY_ENABLED == 'true' &&
+      (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged))
     timeout-minutes: 75
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
