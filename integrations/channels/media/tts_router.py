@@ -88,6 +88,55 @@ class TTSEngineSpec:
                                              # carry a parallel dict that
                                              # drifts.  Empty tuple = nothing
                                              # to install (bundled / CPU stub).
+    install_target: str = 'main'             # WHERE pip_install_plan should
+                                             # land on the desktop installer.
+                                             # Valid values:
+                                             #   'main'      — into the main
+                                             #                 python-embed
+                                             #                 site-packages
+                                             #                 (legacy default;
+                                             #                 risky, dep
+                                             #                 conflicts mask
+                                             #                 silent failures)
+                                             #   'venv'      — into a private
+                                             #                 venv at
+                                             #                 ~/Documents/
+                                             #                 Nunba/data/
+                                             #                 venvs/<engine>/.
+                                             #                 Requires a
+                                             #                 per-engine
+                                             #                 worker file
+                                             #                 (tts/<engine>_
+                                             #                 worker.py) that
+                                             #                 the parent
+                                             #                 dispatches into
+                                             #                 via backend_
+                                             #                 venv.invoke_in_
+                                             #                 venv().
+                                             #   'bundled'   — already on
+                                             #                 disk via the
+                                             #                 frozen build
+                                             #                 (piper voices,
+                                             #                 luxtts, espeak)
+                                             #   'cloud'     — HTTP-only,
+                                             #                 nothing to
+                                             #                 install
+                                             #                 (makeittalk)
+                                             #   'git_clone' — needs git clone
+                                             #                 of an upstream
+                                             #                 repo + pip
+                                             #                 install -e
+                                             #                 (cosyvoice3 →
+                                             #                 FunAudioLLM/
+                                             #                 CosyVoice)
+                                             # Default 'main' preserves
+                                             # current behavior; flipping a
+                                             # GPU engine to 'venv' requires
+                                             # the matching worker file in
+                                             # Nunba (or the dispatch falls
+                                             # back to in-process import,
+                                             # which only works if the engine
+                                             # is also installed in main).
     sample_rate: int = 24000
 
 
@@ -150,14 +199,14 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         required_package='cosyvoice',
         # cosyvoice is NOT pip-installable — needs a `git clone` of
         # FunAudioLLM/CosyVoice plus model weight download via
-        # huggingface_hub.  Empty plan signals the desktop installer
-        # should skip the pip path entirely; the verify-synth probe
-        # must therefore also skip cosyvoice when the package isn't
-        # importable, instead of running `import cosyvoice` and
-        # failing every time (current Nunba bug).  TODO: surface a
-        # repo-clone install_method on TTSEngineSpec so the desktop
-        # installer can execute it without engine-specific branches.
+        # huggingface_hub.  Empty plan + install_target='git_clone'
+        # signals Nunba to skip the pip path entirely and route
+        # through its git-clone install handler instead.  The
+        # verify-synth probe must also short-circuit on git_clone
+        # engines when the package isn't importable (current Nunba
+        # bug: probe runs `import cosyvoice` blindly + always fails).
         pip_install_plan=(),
+        install_target='git_clone',
     ),
     'f5_tts': TTSEngineSpec(
         engine_id='f5_tts',
@@ -192,14 +241,33 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_function='indic_parler_synthesize',
         tool_worker_attr='_tool',
         required_package='parler_tts',
-        # Indic Parler quarantines into its own venv on the desktop
-        # (parler-tts 0.2.2 needs transformers<4.47, conflicts with the
-        # main interpreter's transformers 5.1.0).  Empty plan here
-        # signals "do NOT install into the main interpreter"; the
-        # desktop installer routes it through its venv path instead.
-        # The HARTOS server side runs Indic Parler in its own subprocess
-        # worker so the main interpreter pin doesn't apply.
-        pip_install_plan=(),
+        # Indic Parler quarantines into its own venv on the desktop —
+        # parler-tts 0.2.2 hard-pins transformers<4.47 which conflicts
+        # with the main interpreter's transformers 5.1.0.  The full
+        # pip plan lives here so it travels with the engine spec; the
+        # desktop installer routes the install into the venv when
+        # install_target='venv'.  Worker file:
+        # tts/indic_parler_worker.py (Nunba).  HARTOS server side runs
+        # Indic Parler in its own subprocess worker so the main
+        # interpreter pin doesn't apply there either.
+        pip_install_plan=(
+            # tqdm + colorama pinned FIRST to stop pip's resolver from
+            # backtracking through colorama 0.1.x (no setup.py, breaks
+            # install).  Witnessed user-facing failure:
+            #   "Indic Parler TTS unavailable — using fallback voice engine"
+            # Root-caused from ~/Documents/Nunba/logs/venv_indic_parler.log.
+            'colorama>=0.4.6',
+            'tqdm>=4.65',
+            'transformers==4.46.1',  # parler-tts 0.2.2 requires <4.47
+            'torch',                  # CPU-ish fallback; replaced by CUDA if GPU
+            'torchaudio',
+            'sentencepiece',
+            'descript-audio-codec',
+            'parler-tts==0.2.2',      # 0.2.3 has DacModel.decode() API mismatch
+            'soundfile',
+            _HF_HUB_PIN,
+        ),
+        install_target='venv',
     ),
     'chatterbox_ml': TTSEngineSpec(
         engine_id='chatterbox_ml',
@@ -313,6 +381,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         latency_cloud_ms=0,
         tool_module='integrations.service_tools.pocket_tts_tool',
         tool_function='pocket_tts_synthesize',  # espeak is fallback inside pocket
+        install_target='bundled',
     ),
     'makeittalk': TTSEngineSpec(
         engine_id='makeittalk',
@@ -326,6 +395,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         latency_cloud_ms=5000,
         tool_module=None,  # Special cloud path in model_bus_service
         tool_function=None,
+        install_target='cloud',
     ),
     # Piper — bundled CPU engine, multilingual via downloadable voice
     # files. Uses ('*',) wildcard (same convention as espeak) so one
@@ -345,6 +415,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_module=None,  # In-process via Nunba tts/piper_tts.py —
                            # no subprocess worker, no required_package.
         tool_function=None,
+        install_target='bundled',
     ),
 }
 
