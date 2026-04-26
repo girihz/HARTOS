@@ -363,6 +363,17 @@ jobs:
             cp "$FILE" /tmp/release-artifacts/
           fi
 
+          # Stash the path to the unsplit ISO so the next step (large-
+          # asset SSH mirror) can find it after the loop variables fall
+          # out of scope.  Only emitted when the ISO actually got split
+          # (otherwise the GitHub Release upload covers it directly).
+          if [[ "$SIZE_BYTES" -gt "$SPLIT_THRESHOLD" ]]; then
+            {
+              echo "UNSPLIT_ISO=$FILE"
+              echo "UNSPLIT_BASENAME=$BASENAME"
+            } >> "$GITHUB_ENV"
+          fi
+
           # SHA-256 checksum (always computed against the uncut ISO)
           sha256sum "$FILE" | sed "s|.*/||" > "/tmp/release-artifacts/${BASENAME}.sha256"
 
@@ -401,6 +412,67 @@ jobs:
           name: ${{ matrix.target }}
           path: /tmp/release-artifacts/
           retention-days: 30
+
+      # ─── Large-asset bypass for split ISOs ──────────────────────────
+      # GitHub Release assets cap at 2 GB.  iso-desktop is ~6.5 GB so it
+      # ships to releases as four .part-* files + a reassemble.sh.  That
+      # forces every user to run a script before they can boot the ISO.
+      # Mirror the UNSPLIT ISO straight to docs.hevolve.ai so the docs
+      # page can link a single resolvable URL.
+      #
+      # Auth piggy-backs on the existing HEVOLVE_DOCS_SSH_* secrets that
+      # the docs deploy job already uses (release.yml SSH mirror block).
+      # Lands at <DOCS_SSH_PATH>/binaries/<basename>; the docs rsync
+      # excludes binaries/ so the next site deploy doesn't nuke it.
+      #
+      # Skipped silently when:
+      #   - ISO didn't get split (UNSPLIT_ISO env not set)
+      #   - SSH host/user not configured
+      #   - workflow_dispatch (use the release page; users can pin a vX
+      #     release without depending on docs server availability)
+      - name: Mirror unsplit large ISO to docs.hevolve.ai/binaries/
+        if: |
+          env.UNSPLIT_ISO != '' &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main'
+        env:
+          SSHPASS: ${{ secrets.HEVOLVE_DOCS_SSH_PASS }}
+        run: |
+          set -euo pipefail
+          host='${{ secrets.HEVOLVE_DOCS_SSH_HOST }}'
+          user='${{ secrets.HEVOLVE_DOCS_SSH_USER }}'
+          path='${{ secrets.HEVOLVE_DOCS_SSH_PATH }}'
+          key_set='${{ secrets.HEVOLVE_DOCS_SSH_KEY }}'
+          pass_set='${{ secrets.HEVOLVE_DOCS_SSH_PASS }}'
+          if [ -z "$host" ] || [ -z "$user" ] || [ -z "$path" ]; then
+            echo "::notice title=Large-ISO mirror::Skipped — HEVOLVE_DOCS_SSH_HOST/USER/PATH not configured"
+            exit 0
+          fi
+          if [ -z "$key_set" ] && [ -z "$pass_set" ]; then
+            echo "::notice title=Large-ISO mirror::Skipped — neither HEVOLVE_DOCS_SSH_KEY nor _PASS set"
+            exit 0
+          fi
+          PORT='${{ secrets.HEVOLVE_DOCS_SSH_PORT || '22' }}'
+          DEST="${path%/}/binaries"
+          if [ -n "$key_set" ]; then
+            mkdir -p ~/.ssh
+            echo "$key_set" > ~/.ssh/id_ed25519
+            chmod 600 ~/.ssh/id_ed25519
+            SSH_BASE="ssh -i ~/.ssh/id_ed25519 -p $PORT -o StrictHostKeyChecking=accept-new"
+            $SSH_BASE "$user@$host" "mkdir -p '$DEST'"
+            rsync -az --human-readable --stats \
+              -e "$SSH_BASE" \
+              "$UNSPLIT_ISO" "$user@$host:$DEST/"
+          else
+            sudo apt-get install -y -qq sshpass
+            SSH_BASE="ssh -p $PORT -o StrictHostKeyChecking=accept-new"
+            sshpass -e $SSH_BASE "$user@$host" "mkdir -p '$DEST'"
+            sshpass -e rsync -az --human-readable --stats \
+              -e "$SSH_BASE" \
+              "$UNSPLIT_ISO" "$user@$host:$DEST/"
+          fi
+          echo "::notice title=Large-ISO mirror::Pushed $UNSPLIT_BASENAME to $host:$DEST/"
+          echo "  URL: https://docs.hevolve.ai/binaries/$UNSPLIT_BASENAME"
 
       - name: Attach to GitHub Release (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
@@ -724,8 +796,11 @@ jobs:
         run: |
           set -euo pipefail
           # Trailing slash on _site/ -> rsync copies contents, not the
-          # _site directory itself.
-          rsync -az --delete --human-readable --stats \
+          # _site directory itself.  --exclude=binaries/ leaves the
+          # large-asset mirror dir alone (the build-iso step rsyncs the
+          # 6.5 GB unsplit desktop ISO there; without this exclude,
+          # --delete would nuke it on every docs push).
+          rsync -az --delete --exclude='binaries/' --human-readable --stats \
             _site/ \
             hevolve_docs_target:'${{ secrets.HEVOLVE_DOCS_SSH_PATH }}'
           echo "::notice title=SSH mirror::Pushed via key to ${{ secrets.HEVOLVE_DOCS_SSH_HOST }}:${{ secrets.HEVOLVE_DOCS_SSH_PATH }}"
@@ -737,11 +812,12 @@ jobs:
         run: |
           set -euo pipefail
           PORT='${{ secrets.HEVOLVE_DOCS_SSH_PORT || '22' }}'
+          # See the key-auth variant above for the --exclude rationale.
           # sshpass reads the password from the SSHPASS env var (-e),
           # so it never hits argv or the process listing.
           # -o StrictHostKeyChecking=accept-new trusts first-seen keys
           # (same posture as the key path's ssh-config above).
-          sshpass -e rsync -az --delete --human-readable --stats \
+          sshpass -e rsync -az --delete --exclude='binaries/' --human-readable --stats \
             -e "ssh -p $PORT -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
             _site/ \
             '${{ secrets.HEVOLVE_DOCS_SSH_USER }}@${{ secrets.HEVOLVE_DOCS_SSH_HOST }}:${{ secrets.HEVOLVE_DOCS_SSH_PATH }}'
