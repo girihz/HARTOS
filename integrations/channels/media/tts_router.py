@@ -67,7 +67,52 @@ class TTSEngineSpec:
                                              # for engines whose deps are
                                              # bundled (e.g. piper) or CPU-only
                                              # with no extra deps.
+    pip_install_plan: Tuple[str, ...] = ()   # canonical pip-spec list to make
+                                             # `required_package` actually
+                                             # importable + synth-functional —
+                                             # includes transitive deps the
+                                             # upstream package may forget to
+                                             # declare in its install_requires
+                                             # (e.g. chatterbox-tts ships
+                                             # `import librosa` in tts.py but
+                                             # doesn't list librosa as a hard
+                                             # dep, so a no-deps pip install
+                                             # leaves a broken package on disk
+                                             # that imports far enough for
+                                             # find_spec() but blows up on
+                                             # actual synthesize calls — see
+                                             # ~/Documents/Nunba/logs/probe_
+                                             # chatterbox_turbo.err).  Single
+                                             # source of truth for the desktop
+                                             # installer (Nunba) so it doesn't
+                                             # carry a parallel dict that
+                                             # drifts.  Empty tuple = nothing
+                                             # to install (bundled / CPU stub).
     sample_rate: int = 24000
+
+
+# Shared pip-spec constants — keep here so the install plans below stay
+# readable and so a single edit updates every engine that pins them.
+#
+# huggingface_hub 0.29+ removes is_offline_mode that transformers <5.x
+# still imports, so we cap below 0.29 for the chatterbox / kokoro chain.
+_HF_HUB_PIN = 'huggingface_hub>=0.27.0,<0.29.0'
+
+# Chatterbox plan — `chatterbox-tts` on PyPI does NOT declare `librosa`
+# in install_requires even though `chatterbox/tts.py:4` does
+# `import librosa` unconditionally.  Pip "succeeds" without it; the
+# package imports far enough for `find_spec('chatterbox')` to return
+# True; then the first synthesize call blows up at the librosa import
+# and the wrapper reports "synthesize returned no path".  Listing
+# librosa + soundfile here is the only thing that prevents a
+# user-visible "Chatterbox unavailable" surface on a fresh install.
+_CHATTERBOX_PIP_PLAN: Tuple[str, ...] = (
+    _HF_HUB_PIN,
+    'torchaudio',
+    'chatterbox-tts',
+    'librosa',     # missing transitive — see comment above
+    'soundfile',   # librosa needs it on Windows for non-WAV outputs
+)
 
 
 # All known TTS engines
@@ -86,6 +131,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_function='chatterbox_synthesize',
         tool_worker_attr='_turbo',
         required_package='chatterbox',
+        pip_install_plan=_CHATTERBOX_PIP_PLAN,
     ),
     # luxtts REMOVED — poor audio quality, not suitable for any use case.
     'cosyvoice3': TTSEngineSpec(
@@ -102,6 +148,16 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_function='cosyvoice_synthesize',
         tool_worker_attr='_tool',
         required_package='cosyvoice',
+        # cosyvoice is NOT pip-installable — needs a `git clone` of
+        # FunAudioLLM/CosyVoice plus model weight download via
+        # huggingface_hub.  Empty plan signals the desktop installer
+        # should skip the pip path entirely; the verify-synth probe
+        # must therefore also skip cosyvoice when the package isn't
+        # importable, instead of running `import cosyvoice` and
+        # failing every time (current Nunba bug).  TODO: surface a
+        # repo-clone install_method on TTSEngineSpec so the desktop
+        # installer can execute it without engine-specific branches.
+        pip_install_plan=(),
     ),
     'f5_tts': TTSEngineSpec(
         engine_id='f5_tts',
@@ -117,6 +173,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_function='f5_synthesize',
         tool_worker_attr='_tool',
         required_package='f5_tts',
+        pip_install_plan=('torchaudio', 'f5-tts'),
     ),
     'indic_parler': TTSEngineSpec(
         engine_id='indic_parler',
@@ -135,6 +192,14 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_function='indic_parler_synthesize',
         tool_worker_attr='_tool',
         required_package='parler_tts',
+        # Indic Parler quarantines into its own venv on the desktop
+        # (parler-tts 0.2.2 needs transformers<4.47, conflicts with the
+        # main interpreter's transformers 5.1.0).  Empty plan here
+        # signals "do NOT install into the main interpreter"; the
+        # desktop installer routes it through its venv path instead.
+        # The HARTOS server side runs Indic Parler in its own subprocess
+        # worker so the main interpreter pin doesn't apply.
+        pip_install_plan=(),
     ),
     'chatterbox_ml': TTSEngineSpec(
         engine_id='chatterbox_ml',
@@ -154,6 +219,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_function='chatterbox_ml_synthesize',
         tool_worker_attr='_ml',
         required_package='chatterbox',
+        pip_install_plan=_CHATTERBOX_PIP_PLAN,
     ),
     'pocket_tts': TTSEngineSpec(
         engine_id='pocket_tts',
@@ -167,6 +233,7 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         latency_cloud_ms=0,
         tool_module='integrations.service_tools.pocket_tts_tool',
         tool_function='pocket_tts_synthesize',
+        pip_install_plan=('pocket-tts',),
     ),
     # Kokoro 82M — tiny neural English TTS. Runs on CPU (≈1× real-time,
     # 200MB RAM) or GPU (≈0.1× real-time, 200MB VRAM). Quality sits
@@ -196,6 +263,11 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_function='kokoro_synthesize',
         tool_worker_attr='_tool',
         required_package='kokoro',
+        pip_install_plan=(
+            _HF_HUB_PIN,
+            'kokoro',     # pulls misaki phonemizer transitively
+            'espeakng',   # espeak-ng Python bindings (ships binary on Windows)
+        ),
     ),
     # OmniVoice — universal TTS.  Qwen3-0.6B backbone + diffusion head,
     # 646 languages (581k training hours spanning every Indic script,
@@ -225,6 +297,9 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_function='omnivoice_synthesize',
         tool_worker_attr='_tool',
         required_package='omnivoice',
+        # See omnivoice_tool.py docstring: "Requires: pip install
+        # omnivoice torch soundfile".  torch is bundled.
+        pip_install_plan=('omnivoice', 'soundfile'),
     ),
     'espeak': TTSEngineSpec(
         engine_id='espeak',
