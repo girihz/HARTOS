@@ -147,20 +147,32 @@ class TTSEngineSpec:
 # still imports, so we cap below 0.29 for the chatterbox / kokoro chain.
 _HF_HUB_PIN = 'huggingface_hub>=0.27.0,<0.29.0'
 
-# Chatterbox plan — `chatterbox-tts` on PyPI does NOT declare `librosa`
-# in install_requires even though `chatterbox/tts.py:4` does
-# `import librosa` unconditionally.  Pip "succeeds" without it; the
-# package imports far enough for `find_spec('chatterbox')` to return
-# True; then the first synthesize call blows up at the librosa import
-# and the wrapper reports "synthesize returned no path".  Listing
-# librosa + soundfile here is the only thing that prevents a
-# user-visible "Chatterbox unavailable" surface on a fresh install.
+# Chatterbox plan — `chatterbox-tts` on PyPI omits MULTIPLE runtime
+# imports from its install_requires.  Each one only surfaces when the
+# install proceeds far enough for the next one to be reached:
+#
+#   chatterbox/__init__.py:9 → from .tts import ChatterboxTTS
+#   chatterbox/tts.py:4       → import librosa     (missing #1)
+#   chatterbox/tts.py:6       → import perth       (missing #2)
+#
+# Each was discovered from a real failed install at
+# ~/Documents/Nunba/logs/probe_chatterbox_turbo.err on the user's
+# desktop — first librosa, then once that was added, perth.  Listing
+# them all here means a fresh chatterbox install completes in one
+# pip pass instead of needing 2-3 self-heal iterations (each of
+# which downloads ~10 MB of pip metadata).  The Nunba self-heal
+# loop catches future un-declared transitives on the install screen
+# without surfacing a synth failure to the user.
 _CHATTERBOX_PIP_PLAN: Tuple[str, ...] = (
     _HF_HUB_PIN,
     'torchaudio',
     'chatterbox-tts',
-    'librosa',     # missing transitive — see comment above
+    'librosa',     # missing transitive #1 — chatterbox/tts.py:4
     'soundfile',   # librosa needs it on Windows for non-WAV outputs
+    'resemble-perth',  # missing transitive #2 — chatterbox/tts.py:6
+                       # `import perth`; PyPI pkg name = resemble-perth
+                       # (the watermark library Resemble AI uses to
+                       # tag synthesized audio).
 )
 
 
