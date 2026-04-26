@@ -18,6 +18,39 @@ if sys.platform == 'win32' and 'pytest' not in sys.modules:
         except (ValueError, OSError):
             pass
 
+# ── Defang importlib.metadata.packages_distributions() before transformers ──
+# transformers/utils/import_utils.py:45 calls
+#     PACKAGE_DISTRIBUTION_MAPPING = importlib.metadata.packages_distributions()
+# at module-import time, with NO guard.  The function walks every
+# *.dist-info/METADATA in site-packages and accesses
+# `dist.metadata['Name']`.  ANY corrupt dist-info (METADATA missing,
+# Name: header malformed, or pip rewriting it concurrently) raises
+# KeyError('Name') → transformers crashes its import → langchain →
+# hart_intelligence_entry crashes → Tier-1 HARTOS init dies → agent
+# daemon never starts → admin Agent Dashboard stays empty for the rest
+# of the process lifetime (Tier-1 init is one-shot).
+#
+# Regression observed 2026-04-26 23:05:23 in dev .venv (transient
+# corrupt dist-info).  The fix monkey-patches the stdlib function with
+# a try/except wrapper so a single bad dist-info no longer cascades to
+# a full HARTOS Tier-1 outage.  Running BEFORE any langchain /
+# transformers import in this module guarantees transformers picks up
+# the wrapped version.
+import importlib.metadata as _md_safe
+_orig_pd = getattr(_md_safe, 'packages_distributions', None)
+if _orig_pd is not None and not getattr(_orig_pd, '_hartos_guarded', False):
+    def _safe_packages_distributions():
+        try:
+            return _orig_pd()
+        except Exception:
+            # Best-effort fallback: empty mapping.  Auto-docstring
+            # lookups against {} return generic guesses (worse but
+            # nonfatal).
+            return {}
+    _safe_packages_distributions._hartos_guarded = True
+    _md_safe.packages_distributions = _safe_packages_distributions
+del _md_safe
+
 from bs4 import BeautifulSoup
 from enum import Enum
 from cultural_wisdom import get_cultural_prompt_compact
@@ -167,10 +200,28 @@ try:
 except ImportError:
     from pydantic import BaseModel, Field, root_validator
 from threadlocal import thread_local_data
+# Crossbar HTTP publisher — canonical path is `crossbarhttp3.CrossbarHttpPublisher`
+# (the same publisher used by integrations/social/realtime.py:25).  We fall
+# back to the legacy `crossbarhttp.Client` API only if the canonical
+# publisher is not installed.  Either path is OPTIONAL — if neither is
+# importable the module-load must NOT crash; this layer is dead-code in
+# flat mode where MessageBus uses LOCAL EventBus + PeerLink without HTTP.
+#
+# Regression 2026-04-26: a `.venv` with broken `crossbarhttp` (no
+# __init__.py, Client at .crossbarhttp.Client) made the previous
+# `crossbarhttp.Client(...)` module-level call raise AttributeError,
+# crashing the whole HARTOS import (Tier-1 dead → agent daemon dead →
+# admin dashboard empty).  Wrapping in try/except + using the canonical
+# crossbarhttp3 first kills that failure mode.
+_crossbar_publisher = None
 try:
-    import crossbarhttp
+    from crossbarhttp3 import CrossbarHttpPublisher as _CrossbarPub
 except Exception:
-    crossbarhttp = None
+    _CrossbarPub = None
+try:
+    import crossbarhttp as _legacy_cb  # may be a broken stub
+except Exception:
+    _legacy_cb = None
 from PIL import Image
 import numpy as np
 # Cohere rerank - make optional to avoid pydantic v2 incompatibility with old langchain
@@ -1627,7 +1678,29 @@ except Exception:
 chain = None
 
 
-client = crossbarhttp.Client('http://aws_rasa.hertzai.com:8088/publish') if crossbarhttp else None
+# URL precedence: WAMP_URL env (set by Nunba desktop / regional / central) →
+# legacy cloud default.  Flat mode (no cloud) sets WAMP_URL to localhost so
+# DNS to aws_rasa.hertzai.com is never attempted (#323).
+_wamp_url = os.environ.get('WAMP_URL') or 'http://localhost:8088/publish'
+try:
+    if _CrossbarPub is not None:
+        client = _CrossbarPub(_wamp_url)
+    elif _legacy_cb is not None and hasattr(_legacy_cb, 'Client'):
+        client = _legacy_cb.Client(_wamp_url)
+    else:
+        # Legacy package may expose Client at .crossbarhttp.Client
+        # (broken namespace install).  Probe before giving up.
+        _nested = getattr(_legacy_cb, 'crossbarhttp', None) if _legacy_cb else None
+        client = _nested.Client(_wamp_url) if (_nested and hasattr(_nested, 'Client')) else None
+except Exception as _cb_err:
+    client = None
+    try:
+        import logging as _logging_cb_warn
+        _logging_cb_warn.getLogger(__name__).warning(
+            f"Crossbar HTTP publisher init skipped: {type(_cb_err).__name__}: {_cb_err} — "
+            f"MessageBus LOCAL+PEERLINK transports remain active.")
+    except Exception:
+        pass
 
 # Create thread pool executor for async Crossbar publishing
 crossbar_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='crossbar_publish')
