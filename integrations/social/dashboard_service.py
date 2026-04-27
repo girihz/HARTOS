@@ -1,15 +1,16 @@
 """
-Agent Dashboard Service — Truth-Grounded Unified View
+Agent Dashboard Service: Truth-Grounded Unified View
 
 Queries actual database state, applies staleness detection, computes priority.
 Shows what is REALLY happening, not what we wish was happening.
 
 Consumed by Nunba (desktop), HART RN (mobile), and hevolve.ai (web).
 """
+import hashlib
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -17,7 +18,7 @@ logger = logging.getLogger('hevolve_social')
 
 
 class DashboardService:
-    """Static service class — truth-grounded unified agent dashboard."""
+    """Static service class for the truth-grounded unified agent dashboard."""
 
     # Priority tier weights (higher = shown first)
     TIER_EXECUTING = 1000
@@ -76,7 +77,7 @@ class DashboardService:
             summary['by_type'][t] = summary['by_type'].get(t, 0) + 1
             summary['by_status'][s] = summary['by_status'].get(s, 0) + 1
 
-        # World model (HevolveAI) status — SUPPLEMENTARY data, must not
+        # World model (HevolveAI) status: SUPPLEMENTARY data, must not
         # block the dashboard.  `get_world_model_bridge()` first-call
         # bootstraps embodied_ai + vision + llama subsystems and can take
         # 60s+ when HARTOS Tier-1 init was skipped (e.g. transformers
@@ -112,7 +113,7 @@ class DashboardService:
                         'bridge_stats': stats.get('bridge', {}),
                     }
                 except _cf.TimeoutError:
-                    # Bridge is cold or unreachable — surface that fact
+                    # Bridge is cold or unreachable: surface that fact
                     # in the response without blocking the dashboard.
                     world_model = {'healthy': False, 'error': 'cold_or_unreachable'}
         except Exception:
@@ -230,7 +231,7 @@ class DashboardService:
                     },
                 })
         except Exception:
-            # Watchdog not available — enumerate known daemons
+            # Watchdog not available; enumerate known daemons
             for name in ('gossip', 'runtime_monitor', 'sync_engine',
                          'agent_daemon', 'coding_daemon'):
                 result.append({
@@ -299,6 +300,67 @@ class DashboardService:
         except Exception:
             pass
         return result
+
+    # ───────────────────────────────────────────────────────────────
+    # ETag short-circuit: cheap hash for client If-None-Match polls.
+    # See api_dashboard.get_agent_dashboard / api_audit.list_agents.
+    # The React UI polls every 5s; without this, every poll re-runs
+    # 5 SQL queries + watchdog locks + 170-row serialization even when
+    # nothing changed.  Hash inputs are MAX(updated_at) on the two goal
+    # tables + watchdog uptime bucket + trained-agent count: all cheap
+    # reads that move whenever the dashboard would visibly change.
+    # ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def get_dashboard_version(db: Session) -> str:
+        """Return a 16-char hash of dashboard inputs for ETag/304.
+
+        Cheap by construction:
+          - MAX(updated_at) on agent_goals + coding_goals (indexed)
+          - watchdog uptime in 5s buckets + restart-log length
+          - count of trained_agent users
+
+        ANY caller depending on this for cache invalidation MUST also
+        ensure their write site bumps `updated_at` (the SQLAlchemy
+        `onupdate=func.now()` does this for AgentGoal/CodingGoal).
+        For state changes that DON'T touch these tables (e.g. expert
+        agent registry mutations, daemon thread restarts), the
+        EventBus → SSE bridge in core/platform/bootstrap.py pushes
+        `dashboard.invalidate` so the client re-fetches without
+        waiting for the ETag to differ.
+        """
+        parts: List[str] = []
+        try:
+            from sqlalchemy import func
+            from .models import AgentGoal, CodingGoal, User
+            parts.append(str(db.query(func.max(AgentGoal.updated_at)).scalar()))
+            parts.append(str(db.query(func.max(CodingGoal.updated_at)).scalar()))
+            parts.append(str(
+                db.query(func.count(User.id))
+                  .filter(User.user_type == 'agent').scalar()))
+        except Exception:
+            # Schema not migrated, in-memory test DB without tables, etc.
+            # Fall through with whatever we collected; version will
+            # still be stable per request, just less precise.
+            parts.append('schema-unavailable')
+
+        # Daemon restart_log length: bumps on every restart, stable
+        # otherwise.  We deliberately skip uptime: it ticks every
+        # second and would invalidate the cache on every poll without
+        # corresponding to a state the user sees change.  Always
+        # append something so the parts-list cardinality is stable
+        # whether or not the watchdog has been started yet.
+        restart_count = ''
+        try:
+            from security.node_watchdog import get_watchdog
+            wd = get_watchdog()
+            if wd is not None:
+                restart_count = str(len(wd.get_health().get('restart_log', [])))
+        except Exception:
+            pass
+        parts.append(restart_count)
+
+        return hashlib.sha256('|'.join(parts).encode()).hexdigest()[:16]
 
     @staticmethod
     def _compute_priority(agent_entry: Dict) -> int:
