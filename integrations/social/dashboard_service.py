@@ -76,20 +76,45 @@ class DashboardService:
             summary['by_type'][t] = summary['by_type'].get(t, 0) + 1
             summary['by_status'][s] = summary['by_status'].get(s, 0) + 1
 
-        # World model (HevolveAI) status
+        # World model (HevolveAI) status — SUPPLEMENTARY data, must not
+        # block the dashboard.  `get_world_model_bridge()` first-call
+        # bootstraps embodied_ai + vision + llama subsystems and can take
+        # 60s+ when HARTOS Tier-1 init was skipped (e.g. transformers
+        # crashed at boot).  Without this timeout the entire dashboard
+        # endpoint hangs every poll → 5-second React UI poll piles up →
+        # frontend silently times out → "No agents running" appears even
+        # though 351 goals are in the AgentGoal table.
+        #
+        # Regression observed 2026-04-26: Tier-1 KeyError at boot left
+        # world_model_bridge un-warmed; every dashboard poll then took
+        # 57s, queueing the waitress task list and emptying the admin UI.
         world_model = {'healthy': False, 'error': 'unavailable'}
         try:
-            from integrations.agent_engine.world_model_bridge import (
-                get_world_model_bridge)
-            bridge = get_world_model_bridge()
-            health = bridge.check_health()
-            stats = bridge.get_learning_stats()
-            world_model = {
-                'healthy': health.get('healthy', False),
-                'learning_stats': stats.get('learning', {}),
-                'hivemind_stats': stats.get('hivemind', {}),
-                'bridge_stats': stats.get('bridge', {}),
-            }
+            import concurrent.futures as _cf
+            def _collect_world_model():
+                from integrations.agent_engine.world_model_bridge import (
+                    get_world_model_bridge)
+                bridge = get_world_model_bridge()
+                return {
+                    'health': bridge.check_health(),
+                    'stats': bridge.get_learning_stats(),
+                }
+            with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                _fut = _ex.submit(_collect_world_model)
+                try:
+                    _wm = _fut.result(timeout=2.0)
+                    health = _wm['health']
+                    stats = _wm['stats']
+                    world_model = {
+                        'healthy': health.get('healthy', False),
+                        'learning_stats': stats.get('learning', {}),
+                        'hivemind_stats': stats.get('hivemind', {}),
+                        'bridge_stats': stats.get('bridge', {}),
+                    }
+                except _cf.TimeoutError:
+                    # Bridge is cold or unreachable — surface that fact
+                    # in the response without blocking the dashboard.
+                    world_model = {'healthy': False, 'error': 'cold_or_unreachable'}
         except Exception:
             pass
 
