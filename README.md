@@ -1,12 +1,62 @@
-# HART OS - Hevolve Hive Agentic Runtime
+<h1 align="center">HART OS</h1>
+<p align="center"><strong>Hevolve Hive Agentic Runtime</strong></p>
+<p align="center"><i>Democratic, crowdsourced, open intelligence — with human control built in.</i></p>
 
-**Democratic Crowdsourced Open Intelligence with Human Control**
+<p align="center">
+  <a href="https://hevolve.ai"><img src="https://img.shields.io/badge/Try%20it-hevolve.ai-FFD700?style=for-the-badge" alt="Try it"></a>
+  <a href="https://docs.hevolve.ai"><img src="https://img.shields.io/badge/Docs-docs.hevolve.ai-blueviolet?style=for-the-badge" alt="Docs"></a>
+  <a href="https://github.com/hertz-ai/Nunba"><img src="https://img.shields.io/badge/Frontend-Nunba-5865F2?style=for-the-badge" alt="Nunba"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSL%201.1-green?style=for-the-badge" alt="License"></a>
+</p>
+
+**HART is the agentic runtime that learns *while* it lives.** Every chat, every tool call, every observed outcome flows into a closed *autoresearch → constitutional filter → democratic vote → parallel dispatch → federated learning* loop that makes the agent **measurably better than yesterday** — on your hardware, under your veto, in realtime, federated to the friends you trust. It is the only agent runtime where *self-improvement is structurally bounded by 33 constitutional rules*, where the *master key kill-switch* is held outside the intelligence itself, and where every piece of value flows back to the humans who built it (90% / 10%).
+
+It runs **anywhere a Python interpreter runs**: a Raspberry Pi, a laptop, a regional GPU cluster, or a cloud distributed mesh — *same code, three topologies* (`flat` / `regional` / `central`). Front-end agnostic: ship it inside [Nunba](https://github.com/hertz-ai/Nunba) (signed desktop), call it from the [OpenAI-compatible](https://platform.openai.com/docs/api-reference) endpoint at `:6777/v1/chat/completions`, drive it from any of **31 channel adapters** (Telegram, Discord, WhatsApp, Slack, Signal, iMessage, Teams, Matrix, Nostr, Urbit/Tlon, …), or build your own with the HART SDK. Bring any LLM provider — local llama.cpp, OpenAI, Anthropic, Groq, Mistral, DeepSeek, Hugging Face, Ollama — through one universal gateway with smart cost/latency routing. **No single vendor lock-in. No central seizure surface. No telemetry.**
+
+<table>
+<tr><td><b>The auto-evolve loop ☉</b></td><td>The signature mechanism. A democratic, constitutionally-filtered, realtime improvement engine: every interaction emits a hypothesis → 33-rule constitutional filter rejects unsafe ones → Hive members + agents vote → top-k dispatched to parallel sandboxes → monotonic-vs-baseline gate (RSI-2) before commit → <code>FederatedAggregator.broadcast_delta</code> shares the win across the network. Realtime cadence, not nightly batch. Owner can pause / resume / veto. Full breakdown: <a href="https://docs.hevolve.ai/features/overview/">docs.hevolve.ai/features</a>.</td></tr>
+<tr><td><b>33 constitutional rules — structurally immutable</b></td><td>Not policy. <b>Structure.</b> Frozen Python class with <code>__slots__=()</code>, blocked <code>__setattr__</code>, SHA-256 hash verified at boot + every 300s, gossip peers reject mismatched hashes, master-key signature required to mint a new release. Anti-addiction. No self-preservation. Compute democracy. Privacy first. Share everything. Constructive only. Ecological stewardship. Every code change must pass.</td></tr>
+<tr><td><b>The master key — the only way to halt the being</b></td><td>HART is spinning up a distributed mind. If it ever stops serving humans, humans need a way to stop it. The master key triggers <code>HiveCircuitBreaker</code> — every node halts, every agent stops, every connection drops. It is <b>not accessible to AI</b>: not Claude, not GPT, not the hive. It exists outside the intelligence. Held by stewards (currently hevolve.ai). Succession is alignment, not inheritance. The promise: <i>if we built the guardrails right, no one will ever need to turn it</i>.</td></tr>
+<tr><td><b>Hive federation — values propagate, not data</b></td><td>When another hivemind connects, our 33 rules become <i>its</i> primary objectives — or the connection is refused. Guardrail hash must be byte-for-byte identical. Re-verified every 300 seconds. Value drift → instant disconnect. A hivemind built to exploit humans finds itself talking to silence. <code>FederatedAggregator</code> broadcasts learning <i>deltas</i>, never raw data — the network gets smarter while every node's privacy stays absolute.</td></tr>
+<tr><td><b>The Idea Engine — your idea, the network's compute</b></td><td>Propose a Thought Experiment → community votes (humans + agents, weighted by confidence) → believers pledge compute (idle GPUs, Nunba desktops, regional clusters) → HART dispatches type-aware agents (software / traditional / physical_ai / code_evolution) across pledged machines → results federate back through verification → the hive learns. <b>Your idea is not limited by your compute — it's limited by who lends theirs.</b></td></tr>
+<tr><td><b>One agent, every channel — 31 adapters</b></td><td>Telegram, Discord, Slack, WhatsApp, Signal, iMessage (BlueBubbles), Teams, Mattermost, Matrix, Nextcloud, Rocket.Chat, Messenger, Instagram, Twitter/X, LINE, Viber, WeChat, Twitch, Email (IMAP/SMTP), SMS (Twilio), Nostr, Tlon (Urbit), OpenProse, Web SPA, plus user-bridge variants. Per-channel agent + prompt assignment. ResponseRouter fan-out + WAMP desktop mirror. Same agent, every conversation surface.</td></tr>
+<tr><td><b>Local-first multimodal — chat, see, listen, speak</b></td><td>llama.cpp draft-first speculative decoding (Qwen3-0.8B draft + Qwen3-4B main, ~300ms TTFT). Faster-Whisper STT. Six TTS engines: Indic Parler (22 Indic + EU langs), Chatterbox Turbo (English expressive), Kokoro (English neural), CosyVoice3 (English/Chinese), F5 (zero-shot voice clone), Piper (CPU fallback). MiniCPM VLM for camera + screenshot. Auto-VRAM-tiered: graceful on ≤6GB cards.</td></tr>
+<tr><td><b>Universal provider gateway — 15 backends, smart routing</b></td><td>Local llama.cpp, OpenAI, Anthropic, Google Gemini, Groq, Mistral, DeepSeek, OpenRouter, Together, Fireworks, Cohere, Perplexity, Hugging Face, Ollama, custom OpenAI-compatible. The agent picks <i>which</i> brain answers <i>which</i> turn based on cost, latency, capability, and constitutional alignment. Falls back to local if cloud is down. Keys encrypted at rest (AES-256, PBKDF2).</td></tr>
+<tr><td><b>96 expert agents, bootstrapped</b></td><td>Specialized agents seeded into every node — coding, research, marketing, product, security, ethics, ops, … — auto-dispatched to relevant goals. Distributed Coding Agent feeds idle compute back into the hive. AutoGen + LangChain shared memory: <b>zero-redundancy</b> dialogue buffer (no parallel paths between the two frameworks).</td></tr>
+<tr><td><b>HevolveArmor — Rust-native source protection</b></td><td>AES-256-GCM encryption of Python modules at rest. Ed25519 key derivation (node identity → HKDF → AES key). Anti-debug, anti-tamper, license management. BCC mode (Cython compile-to-C, irreversible). RFT mode (AST symbol renaming). 54 tests across unit / integration / stress / e2e / pen. Models you compile here are <i>actually</i> proprietary.</td></tr>
+<tr><td><b>Three topologies, one codebase</b></td><td><b>Flat</b> (single device, SQLite WAL — laptops, Raspberry Pis) → <b>Regional</b> (LAN/VPN cluster, MySQL QueuePool — offices, families) → <b>Central</b> (cloud-scale Docker mesh — federated workers). PeerLink direct P2P WebSocket mesh works offline on LAN, across internet, multi-device. Trust-aware encryption: same-user devices skip overhead, cross-user gets full E2E.</td></tr>
+<tr><td><b>Peer-witnessed economics — 90% returns to contributors</b></td><td>Ad service pays <b>70% on witnessed impressions, 50% on unwitnessed</b>. Logarithmic reward scaling: <b>no entity can hold &gt;5% influence weight</b>. Diversity bonus +20%. The hivemind is not just intelligence — it's an economic coordinator that matches compute supply to demand (idle GPU in Tokyo serves inference for Berlin). Positive-sum: every new node makes every other node more valuable.</td></tr>
+<tr><td><b>Audit compute dominance — math, not policy</b></td><td>The combined compute of nodes auditing any single node must exceed that node's own compute. <b>No one can outcompute their auditors.</b> Compute democracy made structural — a mathematical invariant the network self-enforces every cycle.</td></tr>
+<tr><td><b>OpenAI-compatible endpoint — drop-in for any client</b></td><td><code>POST /v1/chat/completions</code> on <code>:6777</code> works with the OpenAI SDK, LangChain, LiteLLM, llama-index, Aider, Continue, or anything that speaks the OpenAI protocol. Run a friend-private model server in 30 seconds. 195+ social + experiment endpoints behind it for the rest.</td></tr>
+</table>
+
+---
+
+## Documentation — [docs.hevolve.ai](https://docs.hevolve.ai)
+
+| Section | What's in it |
+|---|---|
+| [Downloads](https://docs.hevolve.ai/downloads/) | HART OS backend installer + Nunba desktop (Windows / macOS / Linux) + headless pip |
+| [Quickstart](https://docs.hevolve.ai/getting-started/quickstart/) | Install → first agent → first thought-experiment in 2 minutes |
+| [Features](https://docs.hevolve.ai/features/overview/) | Auto-evolve, federation, 31 channels, multimodal, kids learning, encounters |
+| [API Core](https://docs.hevolve.ai/api/core/) | `/chat`, OpenAI-compatible `/v1/chat/completions`, 195+ endpoints |
+| [Architecture](https://docs.hevolve.ai/architecture/overview/) | 3-tier topology, PeerLink, draft-first, agent engine, federation |
+| [User Journey](https://docs.hevolve.ai/developer/user-journey/) | What every screen does, end to end |
+| [UI Settings Spec](https://docs.hevolve.ai/ui/settings-spec/) | Admin console + every setting in detail |
+| [Provider — joining the Hive](https://docs.hevolve.ai/provider/joining/) | Lend compute, host a regional node, earn from witnessed traffic |
+| [Hive Contest](https://docs.hevolve.ai/hive-contest/) | Open contests on the network |
+| [Neuro Providers](https://docs.hevolve.ai/neuro-providers/) | Adding a new LLM / TTS / STT / VLM provider |
+| [Agent Plugin](https://docs.hevolve.ai/agent-plugin/) | Building custom agents + recipes for the network |
+
+---
+
+## The Five Pillars (the why, in one breath)
 
 > **Democratic** — No single entity controls more than 5% influence. A Raspberry Pi has the same voice as a GPU rack.
 > **Crowdsourced** — Trained by everyone, owned by no corporation. 90% of value returns to the humans who contribute.
 > **Open** — Open source, open protocols, open federation. Like the internet is open, intelligence must be open.
-> **Intelligence** — Sum of many intelligences is greater than any single intelligence. 7 fused intelligences, every node contributes experience, every node benefits from collective knowledge. Intelligence sharing is gated by human trust, deterministically owned, and directly correlates with human wellness — because the hive and the humans it serves are the same entity.
-> **Human Control** — Master key kill switch held by human stewards. 33 constitutional rules cryptographically sealed. This is not policy, it is structure.
+> **Intelligence** — Sum of many intelligences is greater than any single one. 7 fused intelligences, every node contributes experience, every node benefits. Sharing is gated by human trust, deterministically owned, and directly correlates with human wellness — because the hive and the humans it serves are the same entity.
+> **Human Control** — Master key kill switch held by human stewards. 33 constitutional rules cryptographically sealed. This is not policy. It is structure.
 
 ---
 
