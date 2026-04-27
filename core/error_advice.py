@@ -109,22 +109,55 @@ def _try_agent_remediation(
         return
 
     try:
+        # goal_type='self_heal' is the registered builder
+        # (goal_manager.py:1011 — `register_goal_type('self_heal',
+        # _build_self_heal_prompt, tool_tags=['coding'])`).  Routes
+        # to the local coding agent (Aider native backend) which has
+        # tools to read source, write minimal fixes, run tests, and
+        # iterate.  The config keys below must match what
+        # _build_self_heal_prompt reads at goal_manager.py:836-856 —
+        # exc_type / source_module / source_function /
+        # occurrence_count / sample_traceback — otherwise the
+        # coding agent gets blank fields in its prompt.
+        tb_obj = getattr(exc, '__traceback__', None)
+        sample_tb = (
+            ''.join(traceback.format_tb(tb_obj)[-20:]) if tb_obj else ''
+        )
+        # Pull source module/function from the deepest frame for
+        # deterministic identification of the failing site.
+        source_module = ''
+        source_function = ''
+        if tb_obj is not None:
+            last_frame = traceback.extract_tb(tb_obj)[-1] if tb_obj else None
+            if last_frame is not None:
+                source_module = last_frame.filename or ''
+                source_function = last_frame.name or ''
+
         with db_session() as db:
             GoalManager.create_goal(
                 db,
-                goal_type='auto_heal_failure',
-                title=f"Auto-heal: {category} failure ({type(exc).__name__})",
+                goal_type='self_heal',
+                title=f"Self-heal: {category} ({type(exc).__name__})",
                 description=(
                     f"A {severity}-severity {category} failure escaped the "
                     f"deterministic recovery loop.  Investigate and remediate.\n\n"
                     f"Error: {type(exc).__name__}: {exc}\n\n"
                     f"Context: {context}\n\n"
-                    f"Last 20 frames:\n{''.join(traceback.format_tb(exc.__traceback__)[-20:])}"
+                    f"Last 20 frames:\n{sample_tb}"
                 ),
                 config={
+                    # Keys read by _build_self_heal_prompt — DO NOT rename
+                    'exc_type': type(exc).__name__,
+                    'source_module': source_module,
+                    'source_function': source_function,
+                    'occurrence_count': 1,  # throttle dedupes; this is
+                                            # the count for THIS goal
+                    'sample_traceback': sample_tb,
+                    # Additional context for downstream consumers /
+                    # operator review — not read by the prompt builder
+                    # but stored on the goal for debugging.
                     'category': category,
                     'severity': severity,
-                    'error_type': type(exc).__name__,
                     'error_message': str(exc)[:500],
                     'fingerprint': _fingerprint(exc),
                     'context': {k: str(v)[:200] for k, v in context.items()},
