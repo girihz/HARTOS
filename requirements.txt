@@ -151,6 +151,12 @@ urllib3==1.26.16
 uvicorn==0.22.0
 uvloop==0.17.0 ; sys_platform != "win32"
 waitress==2.1.2
+# Hypercorn = primary ASGI server.  Single binary on desktop + central
+# (Nunba bundle and central Docker run the same hart_intelligence_entry).
+# Scales from 1 worker (today) to N (HEVOLVE_WORKERS) once in-process
+# singletons (EventBus, ResourceGovernor, agent_daemon, watchdog) are
+# sharded for fork-safety.  Waitress kept above as a fallback path.
+hypercorn==0.17.3
 watchfiles==0.19.0
 websockets==14.2
 Werkzeug==2.3.6

@@ -283,8 +283,33 @@ def _wire_event_subscribers(bus) -> None:
 
     bus.on('notification.unconfirmed', _on_unconfirmed)
 
+    # 6. dashboard invalidation → push SSE event so the React Admin UI
+    #    re-fetches immediately instead of waiting for its next 5s poll.
+    #    The SSE event also lets clients SKIP polling entirely between
+    #    invalidations (the new AgentDashboardPage subscribes to
+    #    `dashboard.invalidate` and only re-fetches on event + 30s
+    #    heartbeat fallback). All of these source events already exist;
+    #    this subscriber is the canonical fan-in point — adding more
+    #    sources later means subscribing them to ONE of these topics,
+    #    not duplicating the SSE bridge.
+    def _on_dashboard_invalidate(topic, data):
+        try:
+            from core.platform.events import broadcast_sse_safe
+            broadcast_sse_safe('dashboard.invalidate', {
+                'reason': topic,
+                'detail': data if isinstance(data, dict) else {},
+            }, user_id=None)  # broadcast — admin UI is a single-user surface
+        except Exception:
+            pass
+
+    for _topic in ('agent_goal.changed', 'coding_goal.changed',
+                   'action_state.changed', 'daemon.status.changed',
+                   'inference.completed'):
+        bus.on(_topic, _on_dashboard_invalidate)
+
     logger.debug("EventBus subscribers wired: tts.speak, action.retry_exhausted, "
-                 "memory.item_deleted, security.extension_blocked, notification.unconfirmed")
+                 "memory.item_deleted, security.extension_blocked, notification.unconfirmed, "
+                 "dashboard.invalidate")
 
 
 def _migrate_shell_manifest(apps: AppRegistry) -> None:

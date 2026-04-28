@@ -100,7 +100,21 @@ class DashboardService:
                     'health': bridge.check_health(),
                     'stats': bridge.get_learning_stats(),
                 }
-            with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+            # CRITICAL: do NOT use `with ThreadPoolExecutor as ex:` here.
+            # The context-manager ``__exit__`` calls ``shutdown(wait=True)``,
+            # which join()s the pool's worker thread.  When ``_fut.result``
+            # times out, the worker is still inside the heavy
+            # ``get_world_model_bridge()`` import and CAN'T finish, so the
+            # ``with`` exit blocks forever — turning the 2s timeout into
+            # an infinite hang and stacking every dashboard poll into a
+            # permanently-stuck Hypercorn worker.  Live thread dump
+            # 2026-04-28 22:08 showed 15 nunba_X workers ALL frozen at
+            # ``ThreadPoolExecutor.__exit__ → shutdown → join``.  Fix:
+            # manual try/finally + ``shutdown(wait=False,
+            # cancel_futures=True)`` so the request returns even when
+            # the worker is permanently wedged on the import lock.
+            _ex = _cf.ThreadPoolExecutor(max_workers=1)
+            try:
                 _fut = _ex.submit(_collect_world_model)
                 try:
                     _wm = _fut.result(timeout=2.0)
@@ -116,6 +130,12 @@ class DashboardService:
                     # Bridge is cold or unreachable: surface that fact
                     # in the response without blocking the dashboard.
                     world_model = {'healthy': False, 'error': 'cold_or_unreachable'}
+            finally:
+                # Don't wait for the (potentially permanently-stuck)
+                # worker thread.  It's a daemon — interpreter shutdown
+                # will reap it.  Cancel any not-yet-started futures so
+                # the pool doesn't pick up new work after we leave.
+                _ex.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
 

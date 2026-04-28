@@ -173,6 +173,29 @@ _CHATTERBOX_PIP_PLAN: Tuple[str, ...] = (
                        # `import perth`; PyPI pkg name = resemble-perth
                        # (the watermark library Resemble AI uses to
                        # tag synthesized audio).
+    # NOTE on the rest of chatterbox-tts==0.1.7's requires_dist
+    # (omegaconf, conformer, pyloudnorm, pykakasi, spacy-pkuseg,
+    # diffusers, einops, s3tokenizer, etc.):
+    # We deliberately do NOT pre-install them in one pip pass.
+    # When pip is asked to install many at once with
+    # `--no-build-isolation` (frozen build constraint, see
+    # package_installer._run_pip), and one of the transitives needs
+    # a source build (omegaconf → antlr4-python3-runtime==4.9.* is
+    # sdist-only on PyPI), pip's parallel-builds path races against
+    # the bundle's setuptools and surfaces as
+    #   BackendUnavailable: Cannot import 'setuptools.build_meta'
+    # (observed 2026-04-28 on the user's bundle f2d4567 — full pip
+    # invocation aborts rc=2, no transitive gets installed).
+    # _self_heal_missing_transitives in package_installer.py handles
+    # them one-at-a-time AFTER the chatterbox-tts top-level install
+    # — single-package mode never triggers the parallel-build race.
+    # Combined with the PYTHONNOUSERSITE=1 fix in tts/_torch_probe.py
+    # (probe no longer leaks system Python's site-packages), each
+    # heal cycle finds a REAL missing transitive, not a phantom one.
+    # The original 5-cycle trail (librosa → perth → einops →
+    # s3tokenizer → omegaconf) is fine because each cycle resolves
+    # in ~10-30s of single-package pip work, not 5 minutes of
+    # parallel-build resolver thrash.
 )
 
 
@@ -429,6 +452,96 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_function=None,
         install_target='bundled',
     ),
+    # ── Mid-VRAM coverage tier (1–3 GB) ───────────────────────────
+    # These three engines fill the gap so every SUPPORTED_LANG_DICT
+    # code has at least one engine with vram_gb≤3.0 in its preference
+    # ladder.  Indic Parler (2.0) + F5 (2.5) cover en/zh + 22 Indic;
+    # the trio below adds the rest of the major language families
+    # without forcing users onto the 12-14 GB Chatterbox-ML or the
+    # uninstallable git-clone CosyVoice path.
+    'melotts': TTSEngineSpec(
+        engine_id='melotts',
+        device=TTSDevice.GPU_PREFERRED,   # works on CPU at real-time too
+        vram_key='tts_melotts',
+        languages=('en', 'es', 'fr', 'zh', 'ja', 'ko'),
+        quality=0.86,
+        voice_clone=False,
+        latency_gpu_ms=180,
+        latency_cpu_ms=600,
+        latency_cloud_ms=0,
+        tool_module='integrations.service_tools.melotts_tool',
+        tool_function='melotts_synthesize',
+        tool_worker_attr='_tool',
+        required_package='melo',          # `from melo.api import TTS`
+        pip_install_plan=(
+            _HF_HUB_PIN,
+            'melotts',                    # PyPI package; ships `melo` import root
+            'soundfile',                  # used for duration probe
+        ),
+    ),
+    'xtts_v2': TTSEngineSpec(
+        engine_id='xtts_v2',
+        device=TTSDevice.GPU_ONLY,
+        vram_key='tts_xtts_v2',
+        languages=(
+            'en', 'es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl',
+            'cs', 'ar', 'zh', 'hu', 'ko', 'ja', 'hi',
+        ),
+        quality=0.92,
+        voice_clone=True,
+        latency_gpu_ms=350,
+        latency_cpu_ms=0,
+        latency_cloud_ms=0,
+        tool_module='integrations.service_tools.xtts_tool',
+        tool_function='xtts_synthesize',
+        tool_worker_attr='_tool',
+        required_package='TTS',           # `from TTS.api import TTS`
+        pip_install_plan=(
+            _HF_HUB_PIN,
+            'coqui-tts',                  # idiap-maintained 2026 fork on PyPI;
+                                          # ships `from TTS.api import TTS` so
+                                          # the import path is stable.
+            'soundfile',
+        ),
+    ),
+    'mms_tts': TTSEngineSpec(
+        engine_id='mms_tts',
+        device=TTSDevice.GPU_PREFERRED,   # CPU works, GPU faster
+        vram_key='tts_mms_tts',
+        languages=(
+            # Roman-script languages where mms_tts_tool routes without
+            # uroman.  Non-Roman scripts (ar/hi/zh/ko/ja/...) ALSO have
+            # mms-tts checkpoints but require uroman pre-processing —
+            # the tool gracefully fails when uroman isn't installed and
+            # the router falls through to the next preference.  We list
+            # the broader set here because the tool decides per-call
+            # whether it can serve; the router's job is to attempt.
+            'en', 'es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl',
+            'cs', 'hu', 'sv', 'fi', 'el', 'ro', 'bg', 'uk', 'cy', 'is',
+            'zh', 'ja', 'ko', 'vi', 'th', 'id', 'ms', 'km', 'lo', 'my',
+            'hi', 'bn', 'ta', 'te', 'mr', 'gu', 'kn', 'ml', 'pa', 'or',
+            'ne', 'as', 'sd', 'sa', 'ur', 'si',
+            'ar', 'fa', 'he', 'sw',
+        ),
+        quality=0.78,
+        voice_clone=False,
+        latency_gpu_ms=200,
+        latency_cpu_ms=500,
+        latency_cloud_ms=0,
+        tool_module='integrations.service_tools.mms_tts_tool',
+        tool_function='mms_tts_synthesize',
+        tool_worker_attr='_tool',
+        required_package='transformers',  # already bundled — no install plan
+        pip_install_plan=(
+            _HF_HUB_PIN,
+            'soundfile',                  # for WAV write
+            # uroman is OPTIONAL — only needed for non-Roman scripts.
+            # The tool falls through cleanly when missing, so we don't
+            # bundle the perl repo + extra pip dep into every install.
+            # Users who want broad Indic/Arabic/CJK coverage from MMS
+            # specifically can `pip install uroman` separately.
+        ),
+    ),
 }
 
 
@@ -451,51 +564,91 @@ LANG_ENGINE_PREFERENCE: Dict[str, List[str]] = {
     # kokoro/pocket/cosyvoice for cross-engine consistency when the
     # user also runs non-English traffic and we want to avoid swapping
     # engines on every language switch.
-    'en': ['chatterbox_turbo', 'omnivoice', 'kokoro', 'pocket_tts', 'cosyvoice3', 'piper', 'espeak'],
+    'en': ['chatterbox_turbo', 'omnivoice', 'melotts', 'xtts_v2', 'kokoro', 'pocket_tts', 'cosyvoice3', 'mms_tts', 'piper', 'espeak'],
     # Indic languages — omnivoice replaces indic_parler as the primary
     # (parler kept as fallback for one release cycle).  OmniVoice has
     # 100-400 training hours per major Indic language vs parler's ~10,
-    # and adds voice cloning which parler lacks entirely.
-    'hi': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'cosyvoice3', 'espeak'],
-    'ta': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'te': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'bn': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'gu': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'kn': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'ml': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'mr': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'or': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'pa': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'ur': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'as': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'ne': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'sa': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'espeak'],
-    'si': ['omnivoice', 'chatterbox_ml', 'espeak'],  # Sinhala — NEW via omnivoice
+    # and adds voice cloning which parler lacks entirely.  XTTS-v2
+    # adds Hindi (only); MMS-TTS adds the rest as 1 GB-tier coverage.
+    'hi': ['omnivoice', 'indic_parler', 'xtts_v2', 'chatterbox_ml', 'cosyvoice3', 'mms_tts', 'espeak'],
+    'ta': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'te': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'bn': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'gu': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'kn': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'ml': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'mr': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'or': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'pa': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'ur': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'as': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'ne': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'sa': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'si': ['omnivoice', 'chatterbox_ml', 'mms_tts', 'espeak'],  # Sinhala — mms-tts adds 1 GB-tier
+    'sd': ['omnivoice', 'indic_parler', 'chatterbox_ml', 'mms_tts', 'espeak'],  # Sindhi — Indic Parler + mms
     # CJK — omnivoice has 500k+ hours of CJK in training; promote over cosyvoice.
-    'zh': ['omnivoice', 'cosyvoice3', 'f5_tts', 'chatterbox_ml', 'espeak'],
-    'ja': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'ko': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
-    # European
-    'de': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'es': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'fr': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'it': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'ru': ['omnivoice', 'cosyvoice3', 'chatterbox_ml', 'espeak'],
-    'pt': ['omnivoice', 'chatterbox_ml', 'espeak'],
-    'ar': ['omnivoice', 'chatterbox_ml', 'espeak'],
-    'nl': ['omnivoice', 'chatterbox_ml', 'espeak'],
-    'pl': ['omnivoice', 'chatterbox_ml', 'espeak'],
-    'sv': ['omnivoice', 'chatterbox_ml', 'espeak'],
-    'tr': ['omnivoice', 'chatterbox_ml', 'espeak'],
-    'id': ['omnivoice', 'chatterbox_ml', 'espeak'],
-    'th': ['omnivoice', 'chatterbox_ml', 'espeak'],
-    'vi': ['omnivoice', 'chatterbox_ml', 'espeak'],
-    'cs': ['omnivoice', 'chatterbox_ml', 'espeak'],
+    # MeloTTS slots above the heavy Chatterbox-ML for the 1.5 GB tier.
+    'zh': ['omnivoice', 'melotts', 'cosyvoice3', 'f5_tts', 'xtts_v2', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'ja': ['omnivoice', 'melotts', 'cosyvoice3', 'xtts_v2', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'ko': ['omnivoice', 'melotts', 'cosyvoice3', 'xtts_v2', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    # European — XTTS-v2 (2.5 GB, voice clone) and MeloTTS (1.5 GB)
+    # slot above the 12 GB Chatterbox-ML so users on 4-8 GB GPUs get
+    # quality TTS without the 14 GB allocation that pushes other
+    # workers off the GPU.
+    'de': ['omnivoice', 'xtts_v2', 'cosyvoice3', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'es': ['omnivoice', 'melotts', 'xtts_v2', 'cosyvoice3', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'fr': ['omnivoice', 'melotts', 'xtts_v2', 'cosyvoice3', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'it': ['omnivoice', 'xtts_v2', 'cosyvoice3', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'ru': ['omnivoice', 'xtts_v2', 'cosyvoice3', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'pt': ['omnivoice', 'xtts_v2', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'ar': ['omnivoice', 'xtts_v2', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'nl': ['omnivoice', 'xtts_v2', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'pl': ['omnivoice', 'xtts_v2', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'sv': ['omnivoice', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'tr': ['omnivoice', 'xtts_v2', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'id': ['omnivoice', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'th': ['omnivoice', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'vi': ['omnivoice', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'cs': ['omnivoice', 'xtts_v2', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    # Newly-covered SUPPORTED_LANG_DICT entries — these had no
+    # explicit ladder before and would have hit _DEFAULT_PREFERENCE
+    # (omnivoice → chatterbox_ml → espeak), where chatterbox_ml needs
+    # 14 GB.  MMS-TTS at 1 GB now provides the always-runnable fallback.
+    'hu': ['omnivoice', 'xtts_v2', 'chatterbox_ml', 'mms_tts', 'espeak'],
+    'el': ['omnivoice', 'mms_tts', 'chatterbox_ml', 'espeak'],
+    'fi': ['omnivoice', 'mms_tts', 'espeak'],
+    'ro': ['omnivoice', 'mms_tts', 'espeak'],
+    'bg': ['omnivoice', 'mms_tts', 'espeak'],
+    'uk': ['omnivoice', 'mms_tts', 'espeak'],
+    'cy': ['omnivoice', 'mms_tts', 'espeak'],          # Welsh
+    'is': ['omnivoice', 'mms_tts', 'espeak'],          # Icelandic
+    'ms': ['omnivoice', 'mms_tts', 'espeak'],          # Malay
+    'fa': ['omnivoice', 'mms_tts', 'espeak'],          # Persian (uroman)
+    'he': ['omnivoice', 'mms_tts', 'espeak'],          # Hebrew (uroman)
+    'sw': ['omnivoice', 'mms_tts', 'espeak'],          # Swahili
+    'km': ['omnivoice', 'mms_tts', 'espeak'],          # Khmer (uroman)
+    'lo': ['omnivoice', 'mms_tts', 'espeak'],          # Lao (uroman)
+    'my': ['omnivoice', 'mms_tts', 'espeak'],          # Burmese (uroman)
+    # Additional Indic codes that exist in SUPPORTED_LANG_DICT but
+    # weren't in the language preference table previously — these
+    # ride Indic Parler's 22-language coverage, then mms_tts.
+    'brx': ['omnivoice', 'indic_parler', 'mms_tts', 'espeak'],   # Bodo
+    'doi': ['omnivoice', 'indic_parler', 'mms_tts', 'espeak'],   # Dogri
+    'kok': ['omnivoice', 'indic_parler', 'mms_tts', 'espeak'],   # Konkani
+    'mai': ['omnivoice', 'indic_parler', 'mms_tts', 'espeak'],   # Maithili
+    'mni': ['omnivoice', 'indic_parler', 'mms_tts', 'espeak'],   # Manipuri
+    'sat': ['omnivoice', 'indic_parler', 'mms_tts', 'espeak'],   # Santali
+    'ks':  ['omnivoice', 'mms_tts', 'espeak'],                    # Kashmiri
+    # Misc that were previously routed via _DEFAULT_PREFERENCE only.
+    'lv': ['omnivoice', 'mms_tts', 'espeak'],          # Latvian
+    'sr': ['omnivoice', 'mms_tts', 'chatterbox_ml', 'espeak'],   # Serbian
+    'zh-cn': ['omnivoice', 'melotts', 'cosyvoice3', 'f5_tts', 'xtts_v2', 'chatterbox_ml', 'mms_tts', 'espeak'],
 }
 
-# Fallback for unlisted languages — omnivoice covers 646 so this is
-# reached only when omnivoice is uninstalled or can't fit on the GPU.
-_DEFAULT_PREFERENCE = ['omnivoice', 'chatterbox_ml', 'espeak']
+# Fallback for unlisted languages — omnivoice covers 646 + mms_tts covers
+# 1100+, so this is reached only when both are uninstalled / can't fit.
+# chatterbox_ml is the heaviest local clone, espeak is the absolute floor.
+_DEFAULT_PREFERENCE = ['omnivoice', 'mms_tts', 'chatterbox_ml', 'espeak']
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -668,6 +821,19 @@ def _is_engine_installed(engine_id: str) -> bool:
             available = True
         elif engine_id == 'kokoro':
             from integrations.service_tools.kokoro_tool import kokoro_synthesize  # noqa: F401
+            available = True
+        elif engine_id == 'melotts':
+            # `melotts` PyPI package ships the `melo` import root.
+            import importlib.util as _ils
+            available = _ils.find_spec('melo') is not None
+        elif engine_id == 'xtts_v2':
+            # `coqui-tts` PyPI package ships `from TTS.api import TTS`.
+            import importlib.util as _ils
+            available = _ils.find_spec('TTS') is not None
+        elif engine_id == 'mms_tts':
+            # transformers is bundled; check the VitsModel symbol so we
+            # detect outright-broken transformers installs early.
+            from transformers import VitsModel  # noqa: F401
             available = True
         elif engine_id == 'makeittalk':
             import os
@@ -1108,6 +1274,24 @@ class TTSRouter:
                 'kokoro_synthesize',
                 text, language, voice, output_path,
             )
+        elif engine_id == 'melotts':
+            return self._call_gpu_engine(
+                'integrations.service_tools.melotts_tool',
+                'melotts_synthesize',
+                text, language, voice, output_path,
+            )
+        elif engine_id == 'xtts_v2':
+            return self._call_gpu_engine(
+                'integrations.service_tools.xtts_tool',
+                'xtts_synthesize',
+                text, language, voice, output_path,
+            )
+        elif engine_id == 'mms_tts':
+            return self._call_gpu_engine(
+                'integrations.service_tools.mms_tts_tool',
+                'mms_tts_synthesize',
+                text, language, voice, output_path,
+            )
         return {'error': f'Unknown engine: {engine_id}'}
 
     def _call_luxtts(self, text, voice, output_path, device):
@@ -1283,6 +1467,9 @@ _ENGINE_DISPLAY_NAMES: Dict[str, str] = {
     'kokoro':           'Kokoro 82M (CPU/GPU, English, neural)',
     'espeak':           'eSpeak-NG (CPU, 100+ languages, instant fallback)',
     'makeittalk':       'MakeItTalk (Cloud, English)',
+    'melotts':          'MeloTTS (CPU/GPU, 6 langs, neural)',
+    'xtts_v2':          'XTTS-v2 (GPU, 17 langs, voice-clone)',
+    'mms_tts':          'MMS-TTS (CPU/GPU, 50+ langs via VITS)',
 }
 
 # Extra capabilities per engine that don't map 1-to-1 onto TTSEngineSpec fields
@@ -1334,6 +1521,21 @@ _ENGINE_EXTRA_CAPS: Dict[str, Dict[str, Any]] = {
         'emotion_tags': False,
     },
     'makeittalk': {
+        'streaming': False,
+        'paralinguistic': [],
+        'emotion_tags': False,
+    },
+    'melotts': {
+        'streaming': False,
+        'paralinguistic': [],
+        'emotion_tags': False,
+    },
+    'xtts_v2': {
+        'streaming': False,
+        'paralinguistic': [],
+        'emotion_tags': False,
+    },
+    'mms_tts': {
         'streaming': False,
         'paralinguistic': [],
         'emotion_tags': False,
@@ -1403,6 +1605,9 @@ _ENGINE_DISK_GB: Dict[str, float] = {
     'pocket_tts':       0.1,
     'espeak':           0.05,
     'makeittalk':       0.0,
+    'melotts':          1.5,    # 6 per-lang checkpoints, ~250 MB each
+    'xtts_v2':          2.0,    # weights + speakers + config
+    'mms_tts':          0.2,    # ~150 MB per lang lazy-downloaded
 }
 
 # Approximate RAM needed for CPU-capable engines (GB)
@@ -1416,6 +1621,9 @@ _ENGINE_RAM_GB: Dict[str, float] = {
     'pocket_tts':       0.5,
     'espeak':           0.1,
     'makeittalk':       0.1,
+    'melotts':          2.0,
+    'xtts_v2':          3.0,
+    'mms_tts':          1.5,
 }
 
 

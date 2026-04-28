@@ -38,6 +38,12 @@ VRAM_BUDGETS: Dict[str, Tuple[float, float]] = {
                                              # — stub budget, auto-tightens
                                              # via record_actual_usage on
                                              # first successful load.
+    # Mid-VRAM coverage tier (1–3 GB) — bridges the gap between F5/Indic
+    # Parler/Kokoro (≤2.5 GB) and the heavy clone engines so EVERY
+    # SUPPORTED_LANG_DICT code has at least one engine with vram_gb≤3.
+    "tts_melotts":          (1.5,  1.0),    # en/es/fr/zh/ja/ko, neural CPU/GPU
+    "tts_xtts_v2":          (2.5,  1.8),    # 17 langs, voice cloning (Coqui)
+    "tts_mms_tts":          (1.0,  0.7),    # ~50+ langs (per-lang VITS, Meta)
 }
 
 

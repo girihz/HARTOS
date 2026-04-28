@@ -402,27 +402,21 @@ def init_social(app):
         except Exception as e:
             logger.debug(f"HevolveSocial coding agent init skipped: {e}")
 
-    # Start unified agent engine (marketing, coding goals via unified daemon).
-    # Gated behind HEVOLVE_AGENT_ENGINE_ENABLED=true (default: false).
-    #
-    # Why gated (2026-04-19): init_agent_engine imports agent_baseline_service
-    # which imports helper which imports autogen which imports openai/langchain/
-    # transformers.  On a cold frozen-bundle boot this chain + import-lock
-    # contention with the Nunba hartos-init thread stalled `_bg_import` for
-    # 240s+.  The agent engine is only meaningful on hive/central nodes —
-    # flat desktop users get no value from it, so defaulting it OFF restores
-    # fast boot for 95%+ of installs.  Cloud/regional/central deployments
-    # should set HEVOLVE_AGENT_ENGINE_ENABLED=true in their env.
-    import os as _os_ae
-    if _os_ae.environ.get('HEVOLVE_AGENT_ENGINE_ENABLED', 'false').lower() == 'true':
-        try:
-            from integrations.agent_engine import init_agent_engine
-            init_agent_engine(app)
-            logger.info("HevolveSocial agent engine initialized")
-        except Exception as e:
-            logger.warning(f"HevolveSocial agent engine init skipped: {e}")
-    else:
-        logger.debug("HevolveSocial agent engine: gated OFF (set HEVOLVE_AGENT_ENGINE_ENABLED=true to enable)")
+    # Agent engine init is the SINGLE responsibility of Nunba's
+    # `main.py:_deferred_social_init` (or any standalone HARTOS launcher
+    # that calls `init_agent_engine` directly).  Calling it from inside
+    # `init_social` produced a double-invocation in Nunba (main.py calls
+    # init_social → init_social calls init_agent_engine → main.py calls
+    # init_agent_engine again right after), and the deadlock smoking
+    # gun on 2026-04-28 was exactly this path: the second invocation
+    # fired while hartos-init's `from hart_intelligence import app` was
+    # still mid-import, deadlocking on the per-module import lock.
+    # Idempotency in init_agent_engine itself (added 2026-04-28) makes
+    # the second call a no-op, but the cleaner contract is: ONE caller,
+    # ONE call site.  init_social no longer initialises the agent engine
+    # — its caller does.
+    logger.debug("HevolveSocial: agent engine init delegated to caller "
+                 "(see Nunba main.py:_deferred_social_init or HARTOS launcher)")
 
     # Register with central registry if configured
     import os

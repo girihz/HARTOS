@@ -51,6 +51,47 @@ if _orig_pd is not None and not getattr(_orig_pd, '_hartos_guarded', False):
     _md_safe.packages_distributions = _safe_packages_distributions
 del _md_safe
 
+# ── Defang transformers `_LazyModule.__getattr__` recursion ──
+# transformers ships a `_LazyModule` class whose `__getattr__` does
+# ``hasattr(self, candidate_name)`` which itself triggers
+# ``__getattr__`` again on the not-yet-bound attribute → ~1500-frame
+# recursion that holds the `transformers` per-package import lock for
+# minutes on cold disk.  Triggered by ANY downstream
+# ``from transformers import GPT2TokenizerFast`` (langchain_core does
+# this transitively).  Live thread dump 2026-04-28 22:18 captured the
+# hartos-init thread in 28+ frames of this recursion, blocking every
+# concurrent caller of ``get_world_model_bridge`` (15 dashboard
+# requests + peer_discovery + telemetry) for the rest of the process
+# lifetime.
+#
+# Fix: import `GPT2TokenizerFast` from its underlying submodule and
+# write it to ``transformers.__dict__`` BEFORE any lazy lookup fires.
+# Once the attribute is bound, `hasattr()` short-circuits at the dict
+# and never calls `__getattr__`.  Every downstream caller gets the
+# bound class via plain dict lookup, no recursion.
+#
+# This used to live in Nunba's `app.py::_prewarm_hartos_chain` (commit
+# c0894a2a, 2026-04-28).  That prewarm was deleted in favour of the
+# `hartos_bootstrap` facade — but the direct-bind got deleted with it,
+# letting the recursion regress.  The right home for this is HARTOS,
+# not Nunba: it must run before HARTOS's own
+# `from langchain_classic.llms import OpenAI` (next stmt below) AND
+# before any consumer's deferred bootstrap touches transformers.
+try:
+    import transformers as _tf_safe
+    from transformers.models.gpt2.tokenization_gpt2_fast import (
+        GPT2TokenizerFast as _GPT2TokenizerFast_direct,
+    )
+    if not hasattr(_tf_safe, '__dict__') or \
+            'GPT2TokenizerFast' not in _tf_safe.__dict__:
+        _tf_safe.__dict__['GPT2TokenizerFast'] = _GPT2TokenizerFast_direct
+    del _tf_safe, _GPT2TokenizerFast_direct
+except Exception:
+    # If transformers isn't installed or moved the symbol, fall through.
+    # Worker threads will hit the lazy path and pay the recursion once;
+    # bad but not fatal (and surfaced via the hartos_init_error.log).
+    pass
+
 from bs4 import BeautifulSoup
 from enum import Enum
 from cultural_wisdom import get_cultural_prompt_compact
@@ -9084,7 +9125,74 @@ def main():
     skills_thread.start()
 
     from core.port_registry import get_port
-    serve(app, host='0.0.0.0', port=get_port('backend'), threads=50)
+    _serve_app(app, host='0.0.0.0', port=get_port('backend'))
+
+
+def _serve_app(app, host: str, port: int) -> None:
+    """Boot the WSGI app on Hypercorn (preferred) or Waitress (fallback).
+
+    Hypercorn = ASGI: asyncio event loop multiplexes connection IO so
+    idle keep-alive / SSE clients don't burn worker threads (waitress
+    holds one thread per connection regardless of activity).  Sync
+    Flask handlers run in `loop.run_in_executor()` against a pool of
+    HEVOLVE_WORKER_THREADS (default 256) — slow paths (LLM inference,
+    pip install in /tts/setup-engine) occupy executor threads but
+    never block the IO layer, so /dashboard/agents and /health stay
+    responsive while a TTS install grinds.
+
+    Single-process today.  Multi-process (HEVOLVE_WORKERS=N) requires
+    sharding the in-process singletons first (EventBus, ResourceGovernor,
+    agent_daemon, watchdog, goal_seeding) — each fork would otherwise
+    spawn N parallel agent fleets fighting over the same goals + the
+    same Windows Job Object handle.  Until then `workers=1` is the
+    correct value; same code path will lift to N workers for free
+    once the sharding work lands.
+
+    Falls back to Waitress on ImportError so older deployments / partial
+    installs / cx_Freeze bundles missing the hypercorn h2/wsproto chain
+    still boot — this preserves the prior behavior bit-for-bit.
+    """
+    log = logging.getLogger('hevolve_social')
+    try:
+        worker_threads = int(os.environ.get('HEVOLVE_WORKER_THREADS', '256'))
+    except (TypeError, ValueError):
+        worker_threads = 256
+
+    try:
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        from hypercorn.asyncio import serve as _hcserve
+        from hypercorn.config import Config
+        from hypercorn.middleware import AsyncioWSGIMiddleware
+
+        config = Config()
+        config.bind = [f'{host}:{port}']
+        config.keep_alive_timeout = 120     # SSE-friendly long polls
+        config.h11_max_incomplete_size = 16 * 1024 * 1024  # 16MB request bodies
+        config.accesslog = None             # HARTOS emits its own access log
+        config.errorlog = '-'
+
+        asgi_app = AsyncioWSGIMiddleware(app)
+
+        async def _runner():
+            loop = asyncio.get_running_loop()
+            loop.set_default_executor(
+                ThreadPoolExecutor(max_workers=worker_threads,
+                                   thread_name_prefix='hartos'))
+            await _hcserve(asgi_app, config)
+
+        log.info(
+            f"Starting Hypercorn (ASGI) on {host}:{port} "
+            f"(executor_threads={worker_threads}, single-process)"
+        )
+        asyncio.run(_runner())
+        return
+    except ImportError as exc:
+        log.warning(
+            f"Hypercorn unavailable ({exc}) — falling back to Waitress")
+
+    log.info(f"Starting Waitress (WSGI) on {host}:{port} (threads=50)")
+    serve(app, host=host, port=port, threads=50)
 
 
 if __name__ == '__main__':

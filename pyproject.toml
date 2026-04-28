@@ -203,6 +203,7 @@ py-modules = [
     "agent_identity",
     "hart_onboarding",
     "hart_cli",
+    "hartos_bootstrap",
 ]
 
 [tool.setuptools.packages.find]
