@@ -818,3 +818,103 @@ def test_ft21_pythonpath_preserves_caller_value():
     parent_dirs = [p for p in sys.path if p and os.path.isdir(p)]
     assert any(p in final for p in parent_dirs), \
         'parent sys.path not appended alongside caller override'
+
+
+# ═══════════════════════════════════════════════════════════════════
+# FT 22: ToolWorker forwards python_exe to GPUWorker
+# ═══════════════════════════════════════════════════════════════════
+#
+# Regression guard for #53 (venv-aware spawn).  Before this change,
+# ToolWorker had no way to tell the spawned subprocess to use a
+# specific Python interpreter — every tool ran under the parent's
+# default (python-embed in frozen builds, sys.executable in dev).
+# That blocked engines whose deps clash with the parent (parler-tts
+# pins transformers==4.46.x while main has 5.x; chatterbox-tts wants
+# transformers==5.2.0; etc.) from running cleanly.
+#
+# The fix is one optional kwarg on ToolWorker.__init__ that flows
+# straight through to the GPUWorker the central dispatcher spawns.
+# This test pins the contract so a future refactor can't drop the
+# pass-through silently.
+
+def test_ft22_toolworker_python_exe_forwarded_to_gpu_worker():
+    """ToolWorker(python_exe=...) sets the field; _get_or_start passes
+    that field through to GPUWorker so the dispatch subprocess runs
+    under the chosen interpreter (e.g. a per-engine venv python)."""
+    from unittest.mock import patch, MagicMock
+    from integrations.service_tools import gpu_worker as gw
+
+    custom_python = r'C:\fake\venvs\indic_parler\Scripts\python.exe'
+
+    t = ToolWorker(
+        tool_name='py_exe_pin',
+        tool_module=ECHO_MODULE,
+        vram_budget='tts_f5',
+        output_subdir='py_exe_pin',
+        engine='test',
+        python_exe=custom_python,
+        startup_timeout=2.0,
+        request_timeout=2.0,
+        idle_timeout=0.0,
+    )
+
+    # Confirm the field landed on the instance.
+    assert t.python_exe == custom_python, (
+        f"python_exe not stored on ToolWorker: {t.python_exe!r}"
+    )
+
+    captured = {}
+
+    class _FakeWorker:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def start(self):
+            self._ready = True
+
+        def is_alive(self):
+            return True
+
+        def stop(self, timeout=None):
+            pass
+
+    # Skip VRAM bookkeeping so the test stays hermetic; it's verified
+    # elsewhere and isn't what this regression guards.
+    with patch.object(gw, 'GPUWorker', _FakeWorker), \
+         patch.object(t, '_allocate_vram', return_value=True), \
+         patch.object(t, '_ensure_vram_headroom'):
+        t._get_or_start()
+
+    assert captured.get('python_exe') == custom_python, (
+        f"GPUWorker was spawned without the ToolWorker's python_exe "
+        f"override; got {captured.get('python_exe')!r}, expected "
+        f"{custom_python!r}.  Without this pass-through, engines that "
+        f"need a per-engine venv (parler-tts transformers==4.46, "
+        f"chatterbox-tts transformers==5.2.0, etc.) cannot be "
+        f"isolated from the parent interpreter's pins."
+    )
+
+    # Default behavior (no python_exe) must still work — passing None
+    # through is what makes the change backward compatible.
+    captured.clear()
+    t2 = ToolWorker(
+        tool_name='py_exe_default',
+        tool_module=ECHO_MODULE,
+        vram_budget='tts_f5',
+        output_subdir='py_exe_default',
+        engine='test',
+        startup_timeout=2.0,
+        request_timeout=2.0,
+        idle_timeout=0.0,
+    )
+    assert t2.python_exe is None
+    with patch.object(gw, 'GPUWorker', _FakeWorker), \
+         patch.object(t2, '_allocate_vram', return_value=True), \
+         patch.object(t2, '_ensure_vram_headroom'):
+        t2._get_or_start()
+    assert captured.get('python_exe') is None, (
+        f"unexpected python_exe={captured.get('python_exe')!r} when "
+        f"caller did not set the override; default must remain None "
+        f"so GPUWorker._resolve_python_exe() picks python-embed/"
+        f"sys.executable as before."
+    )

@@ -1704,8 +1704,17 @@ LOOPHOLE_REMEDIATION_MAP = {
 def seed_bootstrap_goals(db, platform_product_id: Optional[str] = None) -> int:
     """Seed initial bootstrap goals if not already present. Returns count created.
 
-    Idempotent: checks for existing active goals with matching bootstrap_slug
-    in config_json. Same pattern as GamificationService.seed_achievements().
+    Idempotent across status: checks for existing goals (any status) with a
+    matching bootstrap_slug.  Previously the check only considered
+    ['active', 'paused'] — so when a bootstrap goal was marked `completed`
+    by the daemon (the false-positive completion bug, #2026-04-29) the
+    next reseed would create a fresh duplicate.  After many reboots the
+    dashboard showed the same goal 8-10× under "Completed".
+
+    Reactivation policy: if a `completed` row exists for a slug, flip it
+    back to `active` (cheaper than insert + cleaner audit trail) instead
+    of creating a duplicate.  Bootstrap goals are conceptually persistent —
+    they should be re-armed, not re-instanced.
 
     Args:
         db: SQLAlchemy session (caller owns transaction)
@@ -1714,21 +1723,33 @@ def seed_bootstrap_goals(db, platform_product_id: Optional[str] = None) -> int:
     from .goal_manager import GoalManager
     from integrations.social.models import AgentGoal
 
-    # Load existing active bootstrap slugs
-    active_goals = db.query(AgentGoal).filter(
-        AgentGoal.status.in_(['active', 'paused'])
-    ).all()
-    existing_slugs = set()
-    for g in active_goals:
+    # Load EVERY existing bootstrap-slugged goal regardless of status, so
+    # `completed` rows count as "already seeded" instead of being treated
+    # as missing → duplicate-spammed on reseed.
+    existing_goals = db.query(AgentGoal).all()
+    existing_by_slug: dict = {}
+    for g in existing_goals:
         cfg = g.config_json or {}
         slug = cfg.get('bootstrap_slug')
         if slug:
-            existing_slugs.add(slug)
+            existing_by_slug[slug] = g
 
     count = 0
+    reactivated = 0
     for goal_data in SEED_BOOTSTRAP_GOALS:
         slug = goal_data['slug']
-        if slug in existing_slugs:
+        existing = existing_by_slug.get(slug)
+        if existing is not None:
+            # Re-arm a previously-completed bootstrap so the daemon picks
+            # it up again, rather than creating a duplicate row.
+            if existing.status == 'completed':
+                existing.status = 'active'
+                cfg = existing.config_json or {}
+                cfg.pop('completed_at', None)
+                cfg.pop('noop_dispatch_count', None)
+                existing.config_json = cfg
+                reactivated += 1
+            # Already-active / paused / archived rows: leave as-is.
             continue
 
         config = dict(goal_data['config'])
@@ -1751,16 +1772,30 @@ def seed_bootstrap_goals(db, platform_product_id: Optional[str] = None) -> int:
         else:
             logger.debug(f"Bootstrap goal '{slug}' skipped: {result.get('error')}")
 
-    if count:
+    if count or reactivated:
         db.flush()
+    if reactivated:
+        logger.info(f"seed_bootstrap_goals: reactivated {reactivated} completed bootstrap goal(s)")
     return count
+
+
+# Cooldown window for re-creating remediation goals after one has fired
+# (regardless of completion status).  The dashboard incident on 2026-04-29
+# showed `Remediate Cold Start` + `Remediate Single Node` firing every
+# 2-5 minutes for hours because the prior pair was instantly marked
+# `completed` and the active-only check missed them.  1 hour matches the
+# rate at which an underlying loophole could realistically be re-resolved
+# by an agent run; tighter intervals just spam the dashboard.
+REMEDIATION_COOLDOWN_MINUTES = 60
 
 
 def auto_remediate_loopholes(db) -> int:
     """Check flywheel loopholes and create remediation goals for severe ones.
 
     Only creates goals for loopholes with severity >= 'high' AND no existing
-    active remediation goal for that loophole type (throttle).
+    remediation goal for that loophole type within the cooldown window —
+    counting completed/archived goals too, not just active/paused (the
+    flap bug prior to 2026-04-29).
 
     Args:
         db: SQLAlchemy session (caller owns transaction)
@@ -1768,6 +1803,7 @@ def auto_remediate_loopholes(db) -> int:
     Returns:
         Number of remediation goals created
     """
+    from datetime import datetime, timedelta
     from .goal_manager import GoalManager
     from .ip_service import IPService
     from integrations.social.models import AgentGoal
@@ -1782,26 +1818,36 @@ def auto_remediate_loopholes(db) -> int:
     if not loopholes:
         return 0
 
-    # Find existing active remediation goals
-    active_goals = db.query(AgentGoal).filter(
-        AgentGoal.status.in_(['active', 'paused'])
+    cutoff = datetime.utcnow() - timedelta(minutes=REMEDIATION_COOLDOWN_MINUTES)
+
+    # Two complementary lookups:
+    #   1) Anything currently active or paused — long-running remediation
+    #      that hasn't completed yet.
+    #   2) Anything CREATED within the cooldown window regardless of status —
+    #      catches the flap pattern where a completed remediation would
+    #      otherwise be re-instanced every tick.
+    blocking_goals = db.query(AgentGoal).filter(
+        (AgentGoal.status.in_(['active', 'paused']))
+        | (AgentGoal.created_at >= cutoff)
     ).all()
-    active_remediations = set()
-    for g in active_goals:
+    recent_remediations = set()
+    for g in blocking_goals:
         cfg = g.config_json or {}
         rem = cfg.get('remediation')
         if rem:
-            active_remediations.add(rem)
+            recent_remediations.add(rem)
 
     count = 0
+    skipped_by_cooldown = []
     for loophole in loopholes:
         severity = loophole.get('severity', 'low')
         if severity not in ('critical', 'high'):
             continue
 
         loophole_type = loophole.get('type', '')
-        if loophole_type in active_remediations:
-            continue  # Already has active remediation goal
+        if loophole_type in recent_remediations:
+            skipped_by_cooldown.append(loophole_type)
+            continue  # Cooldown — already has goal in flight or in last hour
 
         template = LOOPHOLE_REMEDIATION_MAP.get(loophole_type)
         if not template:
@@ -1818,9 +1864,14 @@ def auto_remediate_loopholes(db) -> int:
         )
         if result.get('success'):
             count += 1
-            active_remediations.add(loophole_type)
+            recent_remediations.add(loophole_type)
             logger.info(f"Auto-remediation: created goal for '{loophole_type}' loophole")
 
+    if skipped_by_cooldown:
+        logger.debug(
+            f"Auto-remediation: cooldown-suppressed "
+            f"{len(skipped_by_cooldown)} loophole(s): "
+            f"{sorted(set(skipped_by_cooldown))}")
     if count:
         db.flush()
     return count

@@ -912,6 +912,7 @@ class ToolWorker:
         startup_timeout: float = 90.0,
         request_timeout: float = 120.0,
         idle_timeout: float = 300.0,
+        python_exe: Optional[str] = None,
         # Back-compat aliases — callers on the old API still work
         worker_module: Optional[str] = None,
         worker_args: Optional[list] = None,
@@ -936,6 +937,17 @@ class ToolWorker:
             idle_timeout: Seconds of inactivity after which the worker is
                           auto-stopped to free VRAM. Default 5 min.
                           Set to 0 to disable auto-stop.
+            python_exe: Python interpreter to spawn the worker subprocess
+                        under. None (default) = `_resolve_python_exe()`,
+                        which picks python-embed when present else
+                        sys.executable. Use this to run the worker inside
+                        a per-engine venv (e.g. parler-tts needs
+                        transformers==4.46.x while main has 5.x; pass
+                        the venv's python.exe path here so the dispatch
+                        subprocess sees the pinned deps). Read at
+                        `_get_or_start` time, so callers may set
+                        `tool.python_exe = '...'` after construction
+                        before first synth.
 
             worker_module / worker_args: DEPRECATED — legacy aliases. If
                 `tool_module` is not given, we fall back to `worker_module`.
@@ -962,6 +974,7 @@ class ToolWorker:
         self.startup_timeout = startup_timeout
         self.request_timeout = request_timeout
         self.idle_timeout = idle_timeout
+        self.python_exe = python_exe
 
         self._worker: Optional[GPUWorker] = None
         self._lock = threading.Lock()
@@ -1234,6 +1247,7 @@ class ToolWorker:
                     module=self._DISPATCHER,
                     startup_timeout=self.startup_timeout,
                     request_timeout=self.request_timeout,
+                    python_exe=self.python_exe,
                     args=cli_args,
                 )
                 self._worker.start()

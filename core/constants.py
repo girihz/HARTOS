@@ -65,6 +65,13 @@ SUPPORTED_LANG_DICT = {
     "cy": "Welsh", "hi": "Hindi", "bn": "Bengali", "ta": "Tamil",
     "pa": "Punjabi", "gu": "Gujarati", "kn": "Kannada", "te": "Telugu",
     "mr": "Marathi", "ml": "Malayalam", "en": "English",
+    # Indian English — Indic-accented variant.  Code preserved (NOT
+    # collapsed by `_normalize_lang` the way en-US is) because Nunba's
+    # TTS preference for en-IN routes to Indic Parler (ai4bharat,
+    # trained on All India Radio + Indic corpora) at position 1, while
+    # plain `en` keeps the chatterbox-first American/expressive ladder.
+    # See `Nunba/tts/tts_engine.py:_FALLBACK_LANG_ENGINE_PREFERENCE`.
+    "en-IN": "English (Indian)",
     "ja": "Japanese", "it": "Italian", "ne": "Nepali", "si": "Sinhala",
     "or": "Odia", "as": "Assamese", "sd": "Sindhi", "ks": "Kashmiri",
     "doi": "Dogri", "mni": "Manipuri", "sa": "Sanskrit", "kok": "Konkani",

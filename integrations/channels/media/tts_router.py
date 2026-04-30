@@ -216,6 +216,21 @@ ENGINE_REGISTRY: Dict[str, TTSEngineSpec] = {
         tool_worker_attr='_turbo',
         required_package='chatterbox',
         pip_install_plan=_CHATTERBOX_PIP_PLAN,
+        # chatterbox-tts 0.1.7 hard-pins torch==2.6.0, transformers==5.2.0,
+        # numpy<2.0.0, diffusers==0.29.0, safetensors==0.5.3 — all in
+        # direct conflict with HARTOS's main interpreter (torch 2.11,
+        # transformers 5.1, numpy 2.4, diffusers 0.37, safetensors 0.7).
+        # Auto-heal can never satisfy these because main-interpreter
+        # downgrades would break llama-server, indic_parler, faster-whisper,
+        # and every other ML stack.  Quarantine into its own venv —
+        # same pattern indic_parler uses (parler-tts pinned
+        # transformers<4.47).  Nunba's tts/package_installer.py routes
+        # the install into ~/.nunba/venvs/chatterbox_turbo/, and the
+        # HARTOS ToolWorker's python_exe is set to the venv's python
+        # at runtime via desktop/_wire_venv_engines.py at boot, so the
+        # synth subprocess sees the pinned chatterbox-compatible deps
+        # instead of the main interpreter's incompatible newer ones.
+        install_target='venv',
     ),
     # luxtts REMOVED — poor audio quality, not suitable for any use case.
     'cosyvoice3': TTSEngineSpec(
@@ -1455,6 +1470,97 @@ def get_tts_router() -> TTSRouter:
 # ModelCatalog integration — populate_tts_catalog()
 # ═══════════════════════════════════════════════════════════════
 
+# Reflection-dispatch contract for catalog entries that have NO
+# `tool_module` (pure-JSON model registration via admin UI / hive
+# federation / model_catalog.json edit).  An entry without `tool_module`
+# MUST declare every field below in its `capabilities` dict — otherwise
+# the dispatcher has no way to know how to instantiate the class, marshal
+# the request, or normalize the return.  See task #58 for the full
+# rationale; the schema is finalized at 5 fields, no more.
+_REFLECTION_FIELDS: Tuple[str, ...] = (
+    'import_path',     # 'pkg.module:ClassName'
+    'init_args',       # dict — kwargs for ClassName(**init_args); {} OK
+    'synth_method',    # str — instance method name
+    'params_map',      # dict — {payload_key → method_kwarg}
+    'output_format',   # canonical id (see _OUTPUT_FORMATS below)
+)
+
+# Canonical return-shape identifiers the reflection dispatcher knows
+# how to normalize into a wire-format wav (or path).  Engines that
+# return shapes outside this set MUST use the `tool_module` escape
+# hatch instead — the dispatcher won't guess.
+_OUTPUT_FORMATS: Tuple[str, ...] = (
+    'wav_bytes',       # bytes object holding a WAV-formatted byte stream
+    'numpy_24k',       # 1-D float32 numpy array @ 24 kHz mono
+    'file_path',       # str path to a wav file the engine wrote
+    'bytesio',         # io.BytesIO containing wav bytes
+)
+
+
+def _validate_engine_caps(caps: Dict[str, Any]) -> Optional[str]:
+    """Validate a TTS catalog entry's capabilities dict.
+
+    Returns None when the entry is dispatchable, OR a human-readable
+    error string when it is not.  Two valid shapes:
+
+      1. Python-tool path (escape hatch):
+            caps['tool_module'] = 'pkg.module'  # required
+         The entry will be dispatched via the existing
+         `gpu_worker._dispatch_and_run` path: import the module, pick
+         up `_load[_<variant>]` / `_synthesize[_<variant>]` callbacks
+         by convention.  This is what every code-shipped engine in
+         ENGINE_REGISTRY uses today.
+
+      2. Pure-config / reflection path:
+            caps lacks tool_module BUT declares ALL of _REFLECTION_FIELDS.
+         The dispatcher will use reflection to instantiate the class
+         and call the synth method — no .py file needed for adding
+         new models that fit a homogeneous load+method API (Kokoro,
+         Pocket-TTS, etc., evaluated empirically per engine).
+
+    Validation fires at INGEST time (populate_tts_catalog upsert path
+    AND _catalog_entry_to_spec read path) so a malformed entry cannot
+    reach the dispatcher.  This guards against the "user discovers the
+    error only when they request the voice" failure mode.
+    """
+    if not isinstance(caps, dict):
+        return f'capabilities must be a dict, got {type(caps).__name__}'
+
+    if caps.get('tool_module'):
+        # Python-tool entry — tool_module on its own is sufficient.  The
+        # dispatcher will pick up _load / _synthesize via convention.
+        return None
+
+    # Reflection entry — every field is required.  No partial schemas.
+    missing = [f for f in _REFLECTION_FIELDS if f not in caps]
+    if missing:
+        return (
+            f'entry has no tool_module and is missing reflection fields '
+            f'{missing}; reflection dispatch needs the full 5-field '
+            f'contract: {list(_REFLECTION_FIELDS)}'
+        )
+
+    # Cheap shape sanity — early-fail with a precise message rather than
+    # let the dispatcher trip on a bad type at synth time.
+    if not isinstance(caps.get('init_args'), dict):
+        return f'init_args must be a dict, got {type(caps.get("init_args")).__name__}'
+    if not isinstance(caps.get('params_map'), dict):
+        return f'params_map must be a dict, got {type(caps.get("params_map")).__name__}'
+    if not isinstance(caps.get('synth_method'), str) or not caps['synth_method']:
+        return 'synth_method must be a non-empty str'
+    if not isinstance(caps.get('import_path'), str) or ':' not in caps['import_path']:
+        return (
+            f'import_path must be "pkg.module:ClassName", got '
+            f'{caps.get("import_path")!r}'
+        )
+    if caps.get('output_format') not in _OUTPUT_FORMATS:
+        return (
+            f'output_format must be one of {list(_OUTPUT_FORMATS)}, got '
+            f'{caps.get("output_format")!r}'
+        )
+    return None
+
+
 # Human-readable display names for each engine (used in admin UI)
 _ENGINE_DISPLAY_NAMES: Dict[str, str] = {
     'chatterbox_turbo': 'Chatterbox Turbo (GPU, English, voice-clone)',
@@ -1634,6 +1740,14 @@ def populate_tts_catalog(catalog) -> int:
     plugin mechanism — keeps tts_router as the single source of truth for
     TTS engine capabilities.
 
+    Validation contract (#58): admin- or hive-supplied catalog entries
+    that exist BEFORE this populator runs are validated against
+    `_validate_engine_caps`.  Invalid entries are removed from the
+    catalog with a logged WARNING — they cannot reach the dispatcher.
+    This is the "fail-fast at catalog ingest, not synth time" half of
+    the contract; the other half (validation on every read) lives in
+    `_catalog_entry_to_spec`.
+
     Args:
         catalog: ModelCatalog instance (accepts Any to avoid a hard import
                  at module level — the catalog is passed in by the caller).
@@ -1643,6 +1757,40 @@ def populate_tts_catalog(catalog) -> int:
     """
     # Lazy import inside function body — avoids circular import at module load
     from integrations.service_tools.model_catalog import ModelEntry, ModelType
+
+    # Pre-pass: validate any existing TTS entries (admin/hive seeded the
+    # catalog before us).  Invalid entries are removed + logged so they
+    # don't poison `_refresh_engine_registry_from_catalog` below.  Code-
+    # shipped engines (ENGINE_REGISTRY) ALWAYS have tool_module so they
+    # never trip this; the gate exists for foreign manifests.
+    _drop_ids: List[str] = []
+    for entry in list(catalog.list_by_type('tts')):
+        err = _validate_engine_caps(entry.capabilities or {})
+        if err:
+            logger.warning(
+                'TTS catalog entry %r rejected at ingest: %s', entry.id, err,
+            )
+            _drop_ids.append(entry.id)
+        elif not (entry.capabilities or {}).get('tool_module'):
+            # Reflection-only entries are valid per the schema but not
+            # dispatchable until #58 Scope-2 ships the --catalog-id
+            # path in gpu_worker._dispatch_and_run.  Reject up front
+            # so the admin sees the error at boot, not silence at
+            # synth time.  Once Scope-2 lands, remove this branch and
+            # let reflection-only entries through.
+            logger.warning(
+                'TTS catalog entry %r is reflection-only (no tool_module); '
+                '#58 Scope-2 reflection dispatcher has not landed yet — '
+                'rejecting at ingest so the admin sees the error '
+                'immediately rather than at first synth call.', entry.id,
+            )
+            _drop_ids.append(entry.id)
+    for _eid in _drop_ids:
+        try:
+            catalog.unregister(_eid, persist=False)
+        except Exception as _re:
+            logger.debug('failed to unregister invalid TTS entry %r: %s',
+                         _eid, _re)
 
     added = 0
     for engine_id, spec in ENGINE_REGISTRY.items():
@@ -1721,7 +1869,39 @@ def populate_tts_catalog(catalog) -> int:
         catalog.register(entry, persist=False)
         added += 1
 
+    # Post-upsert: rebuild ENGINE_REGISTRY in place so it reflects the
+    # current catalog state (admin/hive-edited entries become visible
+    # to existing call sites).  Snapshot semantics — runtime catalog
+    # mutations after this point do NOT auto-propagate; a re-bootstrap
+    # is required.  Matches the dict-iter assumption every existing
+    # ENGINE_REGISTRY caller relies on.  See task #58 acceptance #5.
+    _refresh_engine_registry_from_catalog(catalog)
+
     return added
+
+
+def _refresh_engine_registry_from_catalog(catalog) -> int:
+    """Rebuild ENGINE_REGISTRY in place from the post-upsert catalog.
+
+    Reflection-only entries (no tool_module) are excluded — they live
+    only in the catalog and are dispatched via the `--catalog-id`
+    path.  TTSEngineSpec callers continue to see only spec-shaped
+    entries, exactly as before this refactor.
+
+    Returns the number of entries in the rebuilt registry.
+
+    Idempotent: calling twice with the same catalog state produces the
+    same registry contents.
+    """
+    new_entries: Dict[str, TTSEngineSpec] = {}
+    for entry in catalog.list_by_type('tts'):
+        spec = _catalog_entry_to_spec(entry)
+        if spec is None:
+            continue  # validation failed, or reflection-only entry
+        new_entries[spec.engine_id] = spec
+    ENGINE_REGISTRY.clear()
+    ENGINE_REGISTRY.update(new_entries)
+    return len(new_entries)
 
 
 def _catalog_entry_to_spec(entry) -> Optional[TTSEngineSpec]:
@@ -1731,10 +1911,29 @@ def _catalog_entry_to_spec(entry) -> Optional[TTSEngineSpec]:
     (e.g. when the router consults the catalog for dynamically registered
     engines that were not present in ENGINE_REGISTRY at startup).
 
-    Returns None if the entry is not a valid TTS engine spec.
+    Returns None if:
+      * the entry's capabilities fail validation (#58 contract — see
+        `_validate_engine_caps`); the caller should NOT see that entry
+        because the dispatcher cannot route to it.
+      * the entry uses the reflection-only dispatch path (no tool_module).
+        TTSEngineSpec carries `tool_module` as a non-optional dispatch
+        handle for the existing call sites; reflection-only entries are
+        dispatched directly from the catalog and are intentionally
+        excluded from the ENGINE_REGISTRY snapshot.
     """
     caps = entry.capabilities or {}
+    err = _validate_engine_caps(caps)
+    if err:
+        # Loud at ingest, silent on subsequent re-reads — the catalog
+        # populator/loader already logged this; don't spam every read.
+        return None
     tool_module = caps.get('tool_module')
+    if not tool_module:
+        # Valid reflection-only entry, but TTSEngineSpec needs a
+        # tool_module.  Caller (`_refresh_engine_registry_from_catalog`)
+        # will skip None entries and dispatch reflection-only IDs via
+        # the catalog path instead.
+        return None
     tool_function = caps.get('tool_function')
 
     # Determine TTSDevice from backend + supports_* flags
