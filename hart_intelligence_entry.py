@@ -7590,20 +7590,28 @@ def get_prompts():
                 except Exception:
                     continue
 
-    # 2. Fallback: try cloud DB if no local results
-    if not prompts:
-        try:
-            res = pooled_get(
-                f'{DB_URL}/getprompt_onlyuserid/?user_id={req_user_id}',
-                timeout=5)
-            if res.status_code == 200:
-                cloud_data = res.json()
-                for item in cloud_data:
-                    item['source'] = 'cloud'
-                    item['has_recipe'] = False
-                prompts = cloud_data
-        except Exception:
-            pass
+    # 2. Always merge in cloud-only agents the user owns on hevolve.ai —
+    # the local store doesn't know about agents the user created from
+    # another device.  Mirrors the merge pattern used by
+    # /prompts/public (lines below) so "hybrid" mode in Nunba's
+    # intelligence-preference toggle sees the union of local + hive.
+    # Dedup by prompt_id; local copy wins when both exist (it has the
+    # newer recipe payload).
+    try:
+        res = pooled_get(
+            f'{DB_URL}/getprompt_onlyuserid/?user_id={req_user_id}',
+            timeout=5)
+        if res.status_code == 200:
+            cloud_data = res.json() or []
+            local_ids = {str(p['prompt_id']) for p in prompts}
+            for item in cloud_data:
+                if str(item.get('prompt_id', '')) in local_ids:
+                    continue
+                item['source'] = 'cloud'
+                item.setdefault('has_recipe', False)
+                prompts.append(item)
+    except Exception:
+        pass
 
     return jsonify(prompts)
 
