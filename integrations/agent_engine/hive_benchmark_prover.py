@@ -2487,36 +2487,19 @@ class HiveBenchmarkProver:
     def _continuous_loop(self) -> None:
         """Background loop: rotate benchmarks, run, publish."""
         logger.info("Benchmark continuous loop started")
+        from integrations.agent_engine.dispatch import should_yield_to_user
         while self._loop_running:
-            # Yield to user activity + system pressure — same gates the
-            # agent_daemon already consults.  Benchmarks fully saturate
-            # the local LLM (ensemble_mmlu = 100 questions × N models)
-            # so running one while the user is mid-chat is the textbook
-            # CPU-stall shape.  We re-check on every iteration, not just
-            # at start, so a long-running benchmark cycle yields as soon
-            # as the user types.
-            try:
-                from .dispatch import is_user_recently_active
-                if is_user_recently_active():
-                    for _ in range(_LOOP_INTERVAL_SECONDS):
-                        if not self._loop_running:
-                            break
-                        time.sleep(1)
-                    continue
-            except Exception:
-                pass
-            try:
-                from integrations.service_tools.model_lifecycle import (
-                    get_model_lifecycle_manager)
-                _pressure = get_model_lifecycle_manager().get_system_pressure()
-                if _pressure.get('throttle_factor', 1.0) < 0.1:
-                    for _ in range(_LOOP_INTERVAL_SECONDS):
-                        if not self._loop_running:
-                            break
-                        time.sleep(1)
-                    continue
-            except Exception:
-                pass
+            # Single canonical daemon yield gate — re-checked every
+            # iteration so a long-running cycle yields as soon as the
+            # user starts typing.  ensemble_mmlu fully saturates the
+            # local LLM (100 questions × N models); running it during
+            # chat is the textbook CPU-stall shape.
+            if should_yield_to_user():
+                for _ in range(_LOOP_INTERVAL_SECONDS):
+                    if not self._loop_running:
+                        break
+                    time.sleep(1)
+                continue
 
             try:
                 # Pick next benchmark
