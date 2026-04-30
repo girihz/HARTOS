@@ -99,23 +99,14 @@ def publish_agent_thought(last_speaker, messages, user_id):
         if ('Message already sent successfully to user with request_id' in content
                 or 'Message sent successfully to user with request_id' in content):
             return
-        crossbar_message = {
-            "text": [f'{content}'], "priority": 49,
-            "action": 'Thinking', "historical_request_id": [],
-            "preffered_language": 'en-US',
-            "options": [], "newoptions": [], "bot_type": 'Agent',
-            "page_image_url": "", "analogy_image_url": '',
-            "request_id": "123456",
-            "zoom_bounding_box": {
-                'top_left': {'x': 0, 'y': 0},
-                'top_right': {'x': 0, 'y': 0},
-                'bottom_right': {'x': 0, 'y': 0},
-                'bottom_left': {'x': 0, 'y': 0},
-            },
-        }
-        publish_async(
-            f"com.hertzai.hevolve.chat.{user_id}",
-            json.dumps(crossbar_message),
+        # request_id="123456" placeholder preserved on the wire — see
+        # crossbar_publish docstring; fixing propagation is tracked
+        # separately so this commit stays a pure refactor.
+        from core.peer_link.crossbar_publish import publish_thinking_trace
+        publish_thinking_trace(
+            text=content, user_id=user_id,
+            request_id="123456", bot_type='Agent',
+            full_schema=True,
         )
     except Exception as e:
         try:
@@ -4255,15 +4246,17 @@ def set_fallback_flags_and_request_recipe(chat_instructor, current_action_id, ma
 
 
 def publish_to_crossbar_new_action_start(message, user_id):
-    crossbar_message = {"text": [
-        "Working on " + message + ".\n please evaluate the response i am giving to check if it meets the current action"],
-                        "priority": 49, "action": 'Thinking', "historical_request_id": [],
-                        "preffered_language": 'en-US', "options": [], "newoptions": [], "bot_type": 'Agent',
-                        "page_image_url": "", "analogy_image_url": '', "request_id": "123456", "zoom_bounding_box": {
-            'top_left': {'x': 0, 'y': 0}, 'top_right': {'x': 0, 'y': 0}, 'bottom_right': {'x': 0, 'y': 0},
-            'bottom_left': {'x': 0, 'y': 0}}}
-    publish_async(
-        f"com.hertzai.hevolve.chat.{user_id}", json.dumps(crossbar_message))
+    text = (
+        "Working on " + message
+        + ".\n please evaluate the response i am giving to check if it meets the current action")
+    # request_id="123456" placeholder preserved on the wire — see
+    # crossbar_publish docstring.
+    from core.peer_link.crossbar_publish import publish_thinking_trace
+    publish_thinking_trace(
+        text=text, user_id=user_id,
+        request_id="123456", bot_type='Agent',
+        full_schema=True,
+    )
 
 
 # Use lifecycle-aware increment:

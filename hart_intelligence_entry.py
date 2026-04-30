@@ -4436,16 +4436,11 @@ def parse_link_for_crwalab(inp):
 
     def _publish_thinking(msg):
         """Push progress to UI via Crossbar thinking bubble."""
-        try:
-            crossbar_msg = json.dumps({
-                "text": [msg], "priority": 49,
-                "action": "Thinking", "bot_type": "Agent",
-                "historical_request_id": [], "options": [], "newoptions": [],
-                "request_id": request_id,
-            })
-            publish_async(f'com.hertzai.hevolve.chat.{user_id}', crossbar_msg)
-        except Exception:
-            pass
+        from core.peer_link.crossbar_publish import publish_thinking_trace
+        publish_thinking_trace(
+            text=msg, user_id=user_id, request_id=request_id,
+            bot_type='Agent',
+        )
 
     try:
         if link_type == 'pdf':
