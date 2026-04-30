@@ -92,6 +92,127 @@ except Exception:
     # bad but not fatal (and surfaced via the hartos_init_error.log).
     pass
 
+# ── Defang transformers `_LazyModule.__getattr__` re-entry recursion ──
+#
+# Symptom: Tier-1 init thread spends minutes (and burns the GIL the
+# whole time, starving Hypercorn workers) inside
+# ``transformers.utils.import_utils.py:2215`` —
+#
+#     transformers_module = sys.modules.get("transformers")
+#     if transformers_module and hasattr(transformers_module, candidate_name):
+#                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#
+# That ``hasattr(transformers_module, candidate_name)`` triggers
+# ``transformers.__getattr__(candidate_name)`` (because transformers'
+# top-level module object IS a ``_LazyModule`` with a custom
+# ``__getattr__``), which hits the SAME ``hasattr`` line on a different
+# candidate, which recurses again.  130+ frames deep, all
+# ``active+gil``, no other thread can run.  The recursion is
+# bounded (SLOW_TO_FAST_CONVERTERS is finite) so ``RecursionError``
+# never fires — it just burns CPU forever on a graph walk that should
+# be a single dict lookup.
+#
+# Why the GPT2TokenizerFast bind above isn't enough: that fix only
+# covers ONE leaf of the lazy graph.  Whichever ``*TokenizerFast``
+# is requested first triggers the same recursion via different
+# candidate paths.
+#
+# Architectural note (impact-assessed): we considered three other
+# approaches and rejected each — see
+# ``memory/feedback_langchain_uplift_path.md``:
+#   1. ``sys.setrecursionlimit(N)`` — recursion is bounded, never
+#      raises; forcing N too low breaks legitimate deep stacks.
+#   2. Lazy-import langchain in HARTOS — multi-week refactor; AND
+#      HevolveAI (encrypted .so.enc, NOT refactor-able) is a second
+#      transformers consumer that would still trigger this recursion
+#      at runtime, so the layer-A fix doesn't cover all consumers.
+#   3. Uplift langchain-classic → langchain-core + LangGraph — same
+#      multi-week scope as (2), still doesn't cover HevolveAI.
+#
+# (1)–(3) are all consumer-side fixes.  This patch is at the
+# ``transformers._LazyModule`` layer, which means BOTH consumers
+# (open langchain + closed-source HevolveAI) benefit without changes
+# to either.  That's why a third-party monkey-patch is the
+# architecturally correct answer here, not a band-aid.
+#
+# Mechanism: install a re-entry guard on ``_LazyModule.__getattr__``.
+# When a thread is already mid-``__getattr__`` for a (module, name)
+# pair and the same pair is requested again (which is what
+# ``hasattr`` does inside the same method), raise ``AttributeError``
+# immediately.  ``hasattr`` swallows ``AttributeError`` and returns
+# ``False`` — semantically identical to "the attribute hasn't been
+# bound yet" which is exactly what the calling code is asking.
+#
+# Cross-name recursion (``__getattr__('A')`` triggering
+# ``__getattr__('B')``) is preserved — only same-name re-entry on
+# the same thread is short-circuited.  That's the precise shape of
+# the bug.
+#
+# TODO(upstream): file an issue with HuggingFace transformers
+# proposing the fix at the source — replace the offending
+# ``hasattr(transformers_module, candidate_name)`` with
+# ``candidate_name in transformers_module.__dict__``.  Once a
+# released transformers carries the upstream fix, this monkey-patch
+# becomes vestigial and can be removed.  Track via
+# ``memory/feedback_transformers_lazy_module_patch.md``.
+try:
+    import threading as _tf_threading
+    from transformers.utils import import_utils as _tf_import_utils
+
+    _tf_lazy_module_class = getattr(_tf_import_utils, '_LazyModule', None)
+    if _tf_lazy_module_class is not None and not getattr(
+            _tf_lazy_module_class, '_hartos_reentry_guarded', False):
+        _orig_getattr = _tf_lazy_module_class.__getattr__
+        _resolving = _tf_threading.local()
+
+        # Bind both the original method AND the threading.local() store
+        # via default arguments so the closure carries its own
+        # references.  Module-body cleanup (`del _orig_getattr` etc.)
+        # below is then safe — without this, Python's closure-by-name
+        # lookup would NameError when the lazy module later actually
+        # invokes __getattr__ at runtime (symptom:
+        # ``Tier-1 FAILED — name '_orig_getattr' is not defined``).
+        def _hartos_reentry_guarded_getattr(
+                self, name, _orig=_orig_getattr, _local=_resolving):
+            in_progress = getattr(_local, 'set', None)
+            if in_progress is None:
+                in_progress = set()
+                _local.set = in_progress
+            key = (id(self), name)
+            if key in in_progress:
+                # Same (module, name) re-entry on this thread —
+                # ``hasattr`` probe inside ``__getattr__``.  The
+                # caller is asking "is this already bound?"; we are
+                # mid-resolution so the answer is "not yet".  Raising
+                # AttributeError tells hasattr→False, which is the
+                # semantic the caller wanted.
+                raise AttributeError(
+                    f"module {self.__name__!r} has no attribute {name!r} "
+                    f"(HARTOS re-entry guard: same-name __getattr__ "
+                    f"recursion broken)"
+                )
+            in_progress.add(key)
+            try:
+                return _orig(self, name)
+            finally:
+                in_progress.discard(key)
+
+        _tf_lazy_module_class.__getattr__ = _hartos_reentry_guarded_getattr
+        _tf_lazy_module_class._hartos_reentry_guarded = True
+    # NOTE: not deleting _orig_getattr / _resolving — the patched
+    # method's default args already hold references; deleting the
+    # module-scope names would leave them dangling at module-body cleanup
+    # but otherwise harmless.  Leave them visible (underscore-prefixed,
+    # excluded from `from … import *` semantics) to keep the call site
+    # debuggable via dir().
+    del _tf_threading, _tf_import_utils, _tf_lazy_module_class
+except Exception:
+    # transformers not installed, version moved _LazyModule, or some
+    # other surprise — fall through.  We've still got the
+    # GPT2TokenizerFast direct-bind above; recursion may resurface
+    # but won't crash boot.
+    pass
+
 from bs4 import BeautifulSoup
 from enum import Enum
 from cultural_wisdom import get_cultural_prompt_compact

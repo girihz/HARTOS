@@ -329,15 +329,25 @@ def _execute_inprocess(action: dict) -> dict:
             shell_cmd = (
                 f'open {path}' if sys.platform == 'darwin' else f'xdg-open {path}'
             )
-            try:
-                from hart_intelligence_entry import _handle_shell_command_tool
-            except ImportError as e:
+            from core.safe_hartos_attr import safe_hartos_attr
+            _handle_shell_command_tool = safe_hartos_attr(
+                '_handle_shell_command_tool')
+            if _handle_shell_command_tool is None:
+                logger.info(
+                    "open_file_gui blocked: HARTOS _handle_shell_command_tool "
+                    "not yet resolvable (loader still init). Failing closed "
+                    "to preserve denylist guarantees.",
+                )
                 return {
                     'output': '',
-                    'error': f'open_file_gui unavailable: {e}',
+                    'error': 'open_file_gui unavailable: HARTOS still loading',
                     'status': 'error',
                 }
             result_text = _handle_shell_command_tool(shell_cmd)
+            logger.info(
+                "open_file_gui dispatched: cmd=%r exit_signature=%r",
+                shell_cmd, (result_text or '')[:40],
+            )
             ok = isinstance(result_text, str) and result_text.startswith('Exit code: 0')
             return {
                 'output': result_text,
@@ -356,17 +366,28 @@ def _execute_inprocess(action: dict) -> dict:
             cmd = action.get('command', text)
             if not cmd:
                 return {'output': '', 'error': 'shell action needs command string'}
-            try:
-                from hart_intelligence_entry import _handle_shell_command_tool
-            except ImportError as e:
+            from core.safe_hartos_attr import safe_hartos_attr
+            _handle_shell_command_tool = safe_hartos_attr(
+                '_handle_shell_command_tool')
+            if _handle_shell_command_tool is None:
+                logger.info(
+                    "VLM shell action blocked: HARTOS "
+                    "_handle_shell_command_tool not yet resolvable. "
+                    "Failing closed (denylist unavailable) — cmd=%r",
+                    (cmd or '')[:80],
+                )
                 return {
                     'output': '',
                     'error': (
-                        f"shell action unavailable: {e}. Refusing to run "
-                        "without the shared denylist."
+                        "shell action unavailable: HARTOS still loading. "
+                        "Refusing to run without the shared denylist."
                     ),
                     'status': 'error',
                 }
+            logger.info(
+                "VLM shell action dispatching: cmd=%r",
+                (cmd or '')[:80],
+            )
             result_text = _handle_shell_command_tool(cmd)
             # _handle_shell_command_tool returns 'Exit code: N\n<body>' on
             # success and 'Shell_Command refused: ...' / 'Shell_Command error: ...'

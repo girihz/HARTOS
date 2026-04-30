@@ -48,9 +48,17 @@ from autogen.agentchat.contrib.capabilities import transform_messages, transform
 from autogen.cache.in_memory_cache import InMemoryCache
 from json_repair import repair_json
 def publish_async(topic, message, timeout=2.0):
-    """Delegate to the canonical publish_async in hart_intelligence."""
-    from hart_intelligence import publish_async as _publish
-    _publish(topic, message, timeout)
+    """Delegate to the canonical publish_async in hart_intelligence.
+
+    Workers must not eager-import hart_intelligence (deadlocks against
+    the canonical loader's import lock); resolve via the singleton
+    accessor instead.  No-op if HARTOS hasn't finished loading yet —
+    same fall-through the original ImportError branch had.
+    """
+    from core.safe_hartos_attr import safe_hartos_attr
+    _publish = safe_hartos_attr('publish_async')
+    if _publish is not None:
+        _publish(topic, message, timeout)
 
 
 def _push_thinking(user_id, text):

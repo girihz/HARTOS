@@ -46,8 +46,17 @@ def _publish_routing_status(user_id: str, message: str, request_id: str = ''):
         return
     try:
         import json as _json
-        # Lazy import — only needed when actually publishing
-        from hart_intelligence import publish_async
+        # Singleton accessor — see core.safe_hartos_attr for why we
+        # don't ``from hart_intelligence import publish_async`` here.
+        from core.safe_hartos_attr import safe_hartos_attr
+        publish_async = safe_hartos_attr('publish_async')
+        if publish_async is None:
+            logger.debug(
+                "ComputeRouter status drop: user=%s msg=%r — "
+                "HARTOS publish_async unresolvable (loader still init).",
+                user_id, message[:60] if message else '',
+            )
+            return
         payload = _json.dumps({
             'text': [message],
             'priority': 49,
@@ -58,8 +67,15 @@ def _publish_routing_status(user_id: str, message: str, request_id: str = ''):
             'options': [], 'newoptions': [],
         })
         publish_async(f'com.hertzai.hevolve.chat.{user_id}', payload)
-    except Exception:
-        pass  # Never block inference on status publishing
+        logger.debug(
+            "ComputeRouter status published: user=%s msg=%r",
+            user_id, message[:60] if message else '',
+        )
+    except Exception as e:
+        logger.debug(
+            "ComputeRouter status publish failed: user=%s err=%s",
+            user_id, e,
+        )
 
 # ═══════════════════════════════════════════════════════════════
 # Model Bus Service
