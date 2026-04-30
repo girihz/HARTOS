@@ -51,7 +51,14 @@ def init_social(app):
     from .models import init_db, DB_PATH
     try:
         init_db()
-        logger.info(f"HevolveSocial database initialized ({DB_PATH})")
+        # Apply pending schema migrations against the canonical DB so a
+        # daemon booting on a pre-existing v36/37/38 SQLite catches up
+        # to SCHEMA_VERSION (currently 39: users.voice_profile column).
+        # Idempotent — see tests/unit/test_voice_profile_migration.py.
+        # Brings HARTOS daemon parity with Nunba main.py per MEMORY.md.
+        from .migrations import run_migrations
+        run_migrations()
+        logger.info(f"HevolveSocial database initialized + migrated ({DB_PATH})")
     except Exception as e:
         logger.warning(f"HevolveSocial DB init failed (non-fatal): {e}")
 
@@ -100,6 +107,15 @@ def init_social(app):
         logger.info("HevolveSocial hive contest registered at /api/hive/contest/")
     except Exception as e:
         logger.warning(f"HevolveSocial hive contest blueprint skipped: {e}")
+
+    # Register compute-earnings blueprint (idle-compute self-advertise +
+    # live drawer SSE + opted-in user wallet readback)
+    try:
+        from .api_compute_earnings import compute_earnings_bp
+        app.register_blueprint(compute_earnings_bp)
+        logger.info("HevolveSocial compute earnings registered at /api/compute/earnings/")
+    except Exception as e:
+        logger.warning(f"HevolveSocial compute earnings blueprint skipped: {e}")
 
     # Register hive contest UI (single-page local view — reads the same
     # /api/hive/contest/* endpoints, used by the HART shell panel and
@@ -239,6 +255,30 @@ def init_social(app):
     except Exception as e:
         logger.debug(f"Thought experiments blueprint skipped: {e}")
 
+    # Register encounter (P2P BLE meetup + mutual-like icebreaker) blueprint.
+    # PR-A alpha skeleton — in-memory state; DB migration v38 lands
+    # in PR-A beta.  Full design: project_encounter_icebreaker.md.
+    try:
+        from .encounter_api import encounter_bp
+        app.register_blueprint(encounter_bp)
+        logger.info("HevolveSocial encounter registered at /api/social/encounter/")
+    except Exception as e:
+        logger.debug(f"HevolveSocial encounter blueprint skipped: {e}")
+
+    # Register UserConsent UI blueprint (W0c F3 prereq).  JWT-authed,
+    # append-only consent surface — the SINGLE HTTP write path for
+    # the user_consents table after the consent-surface consolidation
+    # (orchestrator review acd11f55, 2026-04-25).  consent_service.py
+    # retains the in-process ConsentService static-method API for
+    # internal callers; its legacy /api/consent/<user_id>/* HTTP
+    # route family was removed in the consolidation commit.
+    try:
+        from .consent_api import consent_bp
+        app.register_blueprint(consent_bp)
+        logger.info("HevolveSocial consent registered at /api/social/consent/")
+    except Exception as e:
+        logger.debug(f"HevolveSocial consent blueprint skipped: {e}")
+
     # NOTE: compute_pledge_bp (api_compute_pledge.py) was consolidated into tracker_bp
     # and the stale file deleted 2026-04-15. All pledge endpoints live at
     # /api/social/tracker/experiments/*/pledge* and /api/social/tracker/pledges/*
@@ -362,27 +402,21 @@ def init_social(app):
         except Exception as e:
             logger.debug(f"HevolveSocial coding agent init skipped: {e}")
 
-    # Start unified agent engine (marketing, coding goals via unified daemon).
-    # Gated behind HEVOLVE_AGENT_ENGINE_ENABLED=true (default: false).
-    #
-    # Why gated (2026-04-19): init_agent_engine imports agent_baseline_service
-    # which imports helper which imports autogen which imports openai/langchain/
-    # transformers.  On a cold frozen-bundle boot this chain + import-lock
-    # contention with the Nunba hartos-init thread stalled `_bg_import` for
-    # 240s+.  The agent engine is only meaningful on hive/central nodes —
-    # flat desktop users get no value from it, so defaulting it OFF restores
-    # fast boot for 95%+ of installs.  Cloud/regional/central deployments
-    # should set HEVOLVE_AGENT_ENGINE_ENABLED=true in their env.
-    import os as _os_ae
-    if _os_ae.environ.get('HEVOLVE_AGENT_ENGINE_ENABLED', 'false').lower() == 'true':
-        try:
-            from integrations.agent_engine import init_agent_engine
-            init_agent_engine(app)
-            logger.info("HevolveSocial agent engine initialized")
-        except Exception as e:
-            logger.warning(f"HevolveSocial agent engine init skipped: {e}")
-    else:
-        logger.debug("HevolveSocial agent engine: gated OFF (set HEVOLVE_AGENT_ENGINE_ENABLED=true to enable)")
+    # Agent engine init is the SINGLE responsibility of Nunba's
+    # `main.py:_deferred_social_init` (or any standalone HARTOS launcher
+    # that calls `init_agent_engine` directly).  Calling it from inside
+    # `init_social` produced a double-invocation in Nunba (main.py calls
+    # init_social → init_social calls init_agent_engine → main.py calls
+    # init_agent_engine again right after), and the deadlock smoking
+    # gun on 2026-04-28 was exactly this path: the second invocation
+    # fired while hartos-init's `from hart_intelligence import app` was
+    # still mid-import, deadlocking on the per-module import lock.
+    # Idempotency in init_agent_engine itself (added 2026-04-28) makes
+    # the second call a no-op, but the cleaner contract is: ONE caller,
+    # ONE call site.  init_social no longer initialises the agent engine
+    # — its caller does.
+    logger.debug("HevolveSocial: agent engine init delegated to caller "
+                 "(see Nunba main.py:_deferred_social_init or HARTOS launcher)")
 
     # Register with central registry if configured
     import os

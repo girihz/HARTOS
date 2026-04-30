@@ -361,6 +361,20 @@ How does the hive make it possible?"></textarea>
       <p>Physical-world and real-wellness submissions are celebrated
       over pure-digital.  A bright future requires leaving the screen.</p>
     </div>
+    <div class="prize-card" style="grid-column: 1 / -1;
+      background: rgba(255,171,64,0.08); border-color: rgba(255,171,64,0.35)">
+      <h4 style="color: var(--hart-caution)">Help us co-create — hardware SDKs welcome</h4>
+      <p>We're a startup constrained by resources to validate every
+      feature alone, so we co-create with the community.  Specifically
+      looking for help bridging <strong>BLE devices, EEG headsets, robot
+      platforms (LeRobot, ROS, Unitree, Spot), accessibility hardware,
+      smart-home sensors</strong> — anything with an SDK that lets the
+      hive perceive or act in the real world.  Trust the open code,
+      the public Spark ledger, the crowdsourced compute economy, and
+      the constitutional guardrails — even if you don't know the
+      strangers shipping work alongside you; the system is the trust.
+      Share with one friend or family member who has a relevant skill.</p>
+    </div>
   </div>
 </section>
 

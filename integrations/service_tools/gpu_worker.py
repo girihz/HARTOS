@@ -430,16 +430,160 @@ class GPUWorker:
         self._ready = False
 
     def _drain_stderr(self) -> None:
-        """Background thread: read worker stderr and log it."""
+        """Background thread: read worker stderr, log it, and surface
+        structured failure signals to the central error_advice system.
+
+        Specifically: when a worker subprocess dies because of a missing
+        Python package (``ModuleNotFoundError: No module named 'X'``),
+        we forward the event to:
+
+          1. ``core.error_advice.handle_exception(agent_remediation=True)``
+             — creates a ``goal_type='self_heal'`` AgentGoal so the
+             local coding agent can investigate WHY the package wasn't
+             pre-installed (improves the freeze pip plan over time).
+          2. Nunba's deterministic self-heal (``tts.package_installer
+             ._self_heal_missing_transitives`` if importable) — pip-
+             installs the missing package immediately, so the next
+             worker spawn succeeds without waiting for the agent loop.
+
+        Why here and not in the worker subprocess: the worker is a
+        sandboxed child with no DB session, no GoalManager, no agent
+        engine.  The parent has all of those, plus the ability to
+        kick off a deterministic pip install.  Single chokepoint per
+        worker instance, idempotent via ``_self_heal_seen_modules``.
+
+        See ``core/error_advice.py`` for the full advice fan-out
+        contract.  See ``tts/package_installer.py`` for the
+        deterministic-install sibling.
+        """
         if not self._proc or not self._proc.stderr:
             return
+        if not hasattr(self, '_self_heal_seen_modules'):
+            self._self_heal_seen_modules = set()
         try:
             for line in self._proc.stderr:
                 line = line.rstrip()
                 if line:
                     logger.info(f"[{self.name}] {line}")
+                    self._maybe_self_heal_from_line(line)
         except Exception:
             pass  # pipe closed, process dead
+
+    def _maybe_self_heal_from_line(self, line: str) -> None:
+        """Pattern-match worker stderr for ``ModuleNotFoundError`` and
+        kick off agentic + deterministic remediation.  Idempotent per
+        ``(worker, package)`` so a flood of identical traceback frames
+        produces exactly one heal attempt."""
+        import re
+        match = re.search(
+            r"ModuleNotFoundError: No module named ['\"]([\w.\-]+)['\"]",
+            line,
+        )
+        if not match:
+            return
+        pkg = match.group(1)
+        if pkg in self._self_heal_seen_modules:
+            return
+        self._self_heal_seen_modules.add(pkg)
+
+        logger.warning(
+            f"{self.name}: subprocess missing Python package '{pkg}' — "
+            f"dispatching to error_advice + deterministic self-heal"
+        )
+
+        # 1) Agentic side: create a self_heal goal for the coding agent.
+        #    Throttled per-fingerprint inside error_advice; safe to call
+        #    on every detected event.
+        try:
+            from core.error_advice import handle_exception
+            synthetic = ModuleNotFoundError(f"No module named '{pkg}'")
+            synthetic.name = pkg  # type: ignore[attr-defined]
+            handle_exception(
+                synthetic,
+                category='subprocess.tool_load',
+                severity='high',
+                agent_remediation=True,
+                context={
+                    'worker_name': self.name,
+                    'worker_module': self.module,
+                    'missing_package': pkg,
+                    'remediation_hint': (
+                        f"Add '{pkg}' to the freeze pip plan (Nunba "
+                        f"scripts/setup_freeze_nunba.py _tts_deps or "
+                        f"the appropriate _<X>_deps tuple) so it's "
+                        f"bundled into python-embed/Lib/site-packages "
+                        f"on the next build, AND add it to "
+                        f"tts/package_installer.py legacy fallback "
+                        f"plan for runtime self-heal coverage."
+                    ),
+                },
+            )
+        except Exception as e:
+            logger.debug(f"{self.name}: error_advice dispatch skipped: {e}")
+
+        # 2) Deterministic fast-path: pip-install the missing package
+        #    directly so the next worker spawn picks it up without
+        #    waiting for the agentic loop.  Uses the same
+        #    ``self.python_exe`` the worker subprocess used (so the
+        #    package lands in the SAME interpreter's site-packages,
+        #    e.g. python-embed/Lib/site-packages on a frozen install,
+        #    or the dev .venv on a source run).  Spawned in a daemon
+        #    thread so we don't block the stderr drain loop.
+        def _install_async():
+            try:
+                # `--target` to user-site keeps it consistent with
+                # tts.package_installer's existing pattern: bundled
+                # python-embed is read-only on Program Files installs,
+                # so user-writable site-packages is required.  We rely
+                # on the user-site already being on sys.path (set by
+                # platform_paths.ensure_user_site_on_path at boot).
+                target = self._user_site_packages_dir()
+                pip_args = [
+                    self.python_exe, '-m', 'pip', 'install',
+                    '--no-build-isolation', '--progress-bar', 'off',
+                    '--disable-pip-version-check',
+                ]
+                if target:
+                    pip_args.extend(['--target', target])
+                pip_args.append(pkg)
+                logger.info(
+                    f"{self.name}: deterministic pip install: {pkg} → "
+                    f"{target or '<default site>'}"
+                )
+                rc = subprocess.run(
+                    pip_args, capture_output=True, text=True, timeout=180,
+                ).returncode
+                if rc == 0:
+                    logger.info(
+                        f"{self.name}: '{pkg}' installed; respawn worker to "
+                        f"retry tool load."
+                    )
+                else:
+                    logger.warning(
+                        f"{self.name}: pip install '{pkg}' rc={rc} — "
+                        f"agent self-heal goal will pick up from here."
+                    )
+            except Exception as e:
+                logger.debug(
+                    f"{self.name}: deterministic pip install for '{pkg}' "
+                    f"skipped: {e}"
+                )
+
+        threading.Thread(
+            target=_install_async, daemon=True,
+            name=f"self-heal-{self.name}-{pkg}",
+        ).start()
+
+    def _user_site_packages_dir(self) -> Optional[str]:
+        """Return the user-writable site-packages dir for runtime
+        installs, or None if Nunba's platform_paths helper isn't
+        importable (HARTOS-only deploys).
+        """
+        try:
+            from tts.package_installer import get_user_site_packages  # type: ignore
+            return get_user_site_packages()
+        except Exception:
+            return None
 
     def _drain_stdout(self) -> None:
         """Background thread: read worker stdout into the line queue.
@@ -768,6 +912,7 @@ class ToolWorker:
         startup_timeout: float = 90.0,
         request_timeout: float = 120.0,
         idle_timeout: float = 300.0,
+        python_exe: Optional[str] = None,
         # Back-compat aliases — callers on the old API still work
         worker_module: Optional[str] = None,
         worker_args: Optional[list] = None,
@@ -792,6 +937,17 @@ class ToolWorker:
             idle_timeout: Seconds of inactivity after which the worker is
                           auto-stopped to free VRAM. Default 5 min.
                           Set to 0 to disable auto-stop.
+            python_exe: Python interpreter to spawn the worker subprocess
+                        under. None (default) = `_resolve_python_exe()`,
+                        which picks python-embed when present else
+                        sys.executable. Use this to run the worker inside
+                        a per-engine venv (e.g. parler-tts needs
+                        transformers==4.46.x while main has 5.x; pass
+                        the venv's python.exe path here so the dispatch
+                        subprocess sees the pinned deps). Read at
+                        `_get_or_start` time, so callers may set
+                        `tool.python_exe = '...'` after construction
+                        before first synth.
 
             worker_module / worker_args: DEPRECATED — legacy aliases. If
                 `tool_module` is not given, we fall back to `worker_module`.
@@ -818,6 +974,7 @@ class ToolWorker:
         self.startup_timeout = startup_timeout
         self.request_timeout = request_timeout
         self.idle_timeout = idle_timeout
+        self.python_exe = python_exe
 
         self._worker: Optional[GPUWorker] = None
         self._lock = threading.Lock()
@@ -1090,6 +1247,7 @@ class ToolWorker:
                     module=self._DISPATCHER,
                     startup_timeout=self.startup_timeout,
                     request_timeout=self.request_timeout,
+                    python_exe=self.python_exe,
                     args=cli_args,
                 )
                 self._worker.start()

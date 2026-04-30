@@ -28,6 +28,27 @@ _prompt_builders: Dict[str, Callable] = {}
 _tool_tags: Dict[str, List[str]] = {}
 
 
+def _emit_goal_changed(goal_id: str, change: str, goal_type: str = '') -> None:
+    """Best-effort EventBus emission for dashboard SSE invalidation.
+
+    Subscribed in core/platform/bootstrap.py → broadcast_sse_safe(
+    'dashboard.invalidate', ...).  Never raises (event emission is
+    non-essential to the goal write itself).  Single canonical helper
+    so add/update/status_change all use the same topic shape; resist
+    the temptation to inline emit_event() at the call sites — that's
+    how parallel dashboards diverge.
+    """
+    try:
+        from core.platform.events import emit_event
+        emit_event('agent_goal.changed', {
+            'goal_id': goal_id,
+            'change': change,
+            'goal_type': goal_type,
+        })
+    except Exception:
+        pass
+
+
 def register_goal_type(goal_type: str, build_prompt: Callable,
                        tool_tags: Optional[List[str]] = None):
     """Register a new goal type with its prompt builder and tool tags.
@@ -159,6 +180,7 @@ class GoalManager:
         )
         db.add(goal)
         db.flush()
+        _emit_goal_changed(goal.id, 'created', goal_type)
         return {'success': True, 'goal': goal.to_dict()}
 
     @staticmethod
@@ -185,6 +207,7 @@ class GoalManager:
 
         goal.status = status
         db.flush()
+        _emit_goal_changed(goal_id, f'status:{status}', goal.goal_type)
 
         # GUARDRAIL: ephemeral agent cleanup on terminal states
         try:
@@ -247,7 +270,15 @@ class GoalManager:
                 # bootstrap_slug (config) when present, else the goal.id.
                 # That's what the brief's correlation-id contract names
                 # `prompt_id` — the stable identifier across sessions.
-                cfg = goal.config or {}
+                # AgentGoal column is `config_json` (see Hevolve_Database
+                # sql/models.py:3199); `goal.config` does NOT exist.
+                # Fallback chain handles the test-stub case where the
+                # mock may set either name.
+                cfg = (
+                    getattr(goal, 'config_json', None)
+                    or getattr(goal, 'config', None)
+                    or {}
+                )
                 prompt_id = cfg.get('bootstrap_slug') or str(goal.id)
                 # Build the proposed-content preview from the persona
                 # fields actually changing — so a title-only tweak only
@@ -294,6 +325,7 @@ class GoalManager:
             if hasattr(goal, key):
                 setattr(goal, key, value)
         db.flush()
+        _emit_goal_changed(goal_id, 'updated', goal.goal_type)
         return {'success': True, 'goal': goal.to_dict()}
 
     @staticmethod

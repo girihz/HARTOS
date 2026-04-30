@@ -798,9 +798,22 @@ class VisionService:
     # ─── Temporal Perception ───
 
     def _save_to_memory_graph(self, user_id: str, description: str, channel: str):
-        """Auto-save visual description to MemoryGraph for long-term recall."""
+        """Auto-save visual description to MemoryGraph for long-term recall.
+
+        Singleton accessor for hart_intelligence — never eager-imports
+        from a worker thread (vision pipeline runs in background loops
+        that would deadlock on the canonical loader's import lock).
+        """
         try:
-            from hart_intelligence import _get_or_create_graph
+            from core.safe_hartos_attr import safe_hartos_attr
+            _get_or_create_graph = safe_hartos_attr('_get_or_create_graph')
+            if _get_or_create_graph is None:
+                logger.debug(
+                    "Memory graph save skipped: HARTOS "
+                    "_get_or_create_graph unresolvable — user=%s channel=%s",
+                    user_id, channel,
+                )
+                return
             graph = _get_or_create_graph(user_id)
             if graph:
                 graph.add(
@@ -808,8 +821,15 @@ class VisionService:
                     metadata={'channel': channel, 'type': 'visual_context'},
                     tags=['visual', channel],
                 )
-        except Exception:
-            pass
+                logger.debug(
+                    "Memory graph save: user=%s channel=%s desc_len=%d",
+                    user_id, channel, len(description or ''),
+                )
+        except Exception as e:
+            logger.debug(
+                "Memory graph save failed: user=%s channel=%s err=%s",
+                user_id, channel, e,
+            )
 
     def _emit_perception_event(self, user_id: str, description: str, channel: str):
         """Emit present-tense perception event on EventBus."""

@@ -31,8 +31,20 @@ def find_matching_agent(prompt: str, prompts_dir: str = None) -> Optional[Dict]:
         return None
 
     try:
-        from hart_intelligence import get_llm
+        from core.safe_hartos_attr import safe_hartos_attr
+        get_llm = safe_hartos_attr('get_llm')
+        if get_llm is None:
+            logger.info(
+                "Agent matching unavailable: HARTOS get_llm not yet "
+                "resolvable — returning None (caller falls back to "
+                "default agent dispatch)."
+            )
+            return None
         llm = get_llm(temperature=0.1, max_tokens=300)
+        logger.info(
+            "Agent matching: prompt=%r catalog_size=%d",
+            (prompt or '')[:80], len(agent_summaries),
+        )
 
         catalog_text = "\n".join(
             f"- ID:{a['id']} | {a['name']} | {a['source']} | {a['description'][:120]}"
@@ -140,8 +152,20 @@ def _build_agent_catalog(prompts_dir: str = None) -> List[Dict]:
 def generate_plan_steps(prompt: str, matched_agent: Optional[Dict] = None) -> List[Dict]:
     """Generate plan steps using the LLM. Falls back to generic steps on failure."""
     try:
-        from hart_intelligence import get_llm
+        from core.safe_hartos_attr import safe_hartos_attr
+        get_llm = safe_hartos_attr('get_llm')
+        if get_llm is None:
+            logger.info(
+                "Plan generation falling back to generic steps: HARTOS "
+                "get_llm not yet resolvable (loader still init)."
+            )
+            raise RuntimeError("HARTOS get_llm unavailable")
         llm = get_llm(temperature=0.3, max_tokens=800)
+        logger.info(
+            "Plan generation: prompt=%r matched_agent=%s",
+            (prompt or '')[:80],
+            matched_agent.get('name') if matched_agent else None,
+        )
 
         agent_context = ""
         if matched_agent:

@@ -1286,6 +1286,20 @@ SEED_BOOTSTRAP_GOALS = [
             'hive_contest.claude_code_mcp_snippet().  Never link to '
             'docs.hevolve.ai/hive-contest as the primary CTA — that '
             'docs page redirects to the live app page anyway.  '
+            '5) Always close with a community co-creation call-out: '
+            'we are a startup constrained by resources to validate '
+            'every feature alone, so we co-create with the community.  '
+            'Specifically call for hardware-SDK contributions — BLE '
+            'devices, EEG headsets, robot platforms (LeRobot, ROS, '
+            'Unitree, Spot), accessibility hardware, smart-home '
+            'sensors — anything with an SDK that lets the hive '
+            'perceive or act in the real world.  Trust framing: '
+            'trust the open code, the public Spark ledger, the '
+            'crowdsourced compute economy, and the constitutional '
+            'guardrails — even when you do not know the strangers '
+            'shipping work alongside you; the system is the trust.  '
+            'Ask readers to share the contest URL with one friend '
+            'or family member who has a relevant skill.  '
             'Humans-first: never rank an entry above one that '
             'scored lower if the higher-ranked one fails the '
             'guardrail\'s human-wellness attestation.  Honest, '
@@ -1462,6 +1476,126 @@ SEED_BOOTSTRAP_GOALS = [
         'spark_budget': 80,
         'use_product': True,
     },
+    {
+        # ── Encounter Icebreaker Agent ──
+        # Full design: Claude-memory/project_encounter_icebreaker.md
+        # On a physical-world mutual-like encounter (two nearby Nunba
+        # users both swiped 'like' on each other's avatar card), draft
+        # a short warm opener grounded in shared interests pulled from
+        # each user's on-device memory graph + their opt-in vibe tags.
+        # ALWAYS drafts only — never auto-sends.  User must approve the
+        # draft via /api/social/encounter/icebreaker/approve before it
+        # is delivered.  Constitutional filter + cultural wisdom check
+        # run on every draft; rejected drafts fall back to a neutral
+        # "Hey, nice to actually be across the room from you" template.
+        'slug': 'encounter_icebreaker_agent',
+        # 'content_gen' is the registered goal_type (goal_manager.py:1093)
+        # whose prompt builder + tool tags best fit icebreaker drafting.
+        # The 'encounter' specialization comes from config below
+        # (persona_kind, trigger_wamp_topic, constitutional_gates).
+        'goal_type': 'content_gen',
+        'title': 'Encounter Icebreaker',
+        'description': (
+            'On a physical-world mutual-like encounter, draft a short '
+            'personalized opener for the user to approve. '
+            '1) Subscribe to the com.hevolve.encounter.match WAMP topic, '
+            '2) Pull 2-3 shared interest tags via recall_memory filtered '
+            'to the matched user + the opt-in vibe_tags they exposed, '
+            '3) Generate a <=220-char draft via the main LLM; run it '
+            'through cultural_wisdom_filter and constitutional_filter, '
+            '4) Publish top draft to com.hevolve.encounter.icebreaker '
+            'with {match_id, draft_text, rationale, alt_drafts}, '
+            '5) Wait for user approval or decline — never auto-send; '
+            'on decline, record the reason into the memory graph so '
+            'future drafts avoid the pattern. '
+            '6) If any constitutional/cultural gate flags the draft, '
+            'fall back to a neutral template rather than re-attempting '
+            'to route around the guardrail.'
+        ),
+        'config': {
+            'autonomous': False,          # user must approve each draft
+            'continuous': True,
+            'persona_kind': 'encounter-companion',
+            'persona_name': 'Encounter Companion',
+            'audience': 'adult',          # 18+ age gate enforced server-side
+            'cadence': 'event',           # triggered by WAMP match topic
+            'priority': 6,
+            'trigger_wamp_topic': 'com.hevolve.encounter.match',
+            # Nunba local agent routing: draft is produced on the
+            # matched user's own device (privacy-local), never cloud.
+            'nunba_agent_id': 'local_encounter_companion',
+            'require_consent': True,
+            'camera_consent_required': False,  # NO camera for encounter
+            'no_autosend': True,
+            'ephemeral_context': True,         # match/sighting purged
+                                                # after draft is sent
+                                                # or declined
+            'constitutional_gates': [
+                'consent_required',
+                'ephemeral_context',
+                'no_autosend',
+                'trust_quarantine_check',
+                'cultural_wisdom_filter',
+            ],
+            'max_draft_length_chars': 220,
+            'draft_expires_sec': 86400,        # 24h unsent = auto-decline
+        },
+        'spark_budget': 120,
+        'use_product': True,
+    },
+    {
+        # ── Conversational Social-Media Management Agent ──
+        # Full design: Claude-memory/project_encounter_icebreaker.md §11
+        # User converses naturally ("this looks cool to post, not this")
+        # with the agent; it learns preferences into the memory graph
+        # and drafts/schedules posts via the existing social_bp posting
+        # infrastructure.  Never auto-publishes — every post requires a
+        # final user approval tap, same as the icebreaker flow.
+        'slug': 'social_media_curator_agent',
+        # Same rationale as encounter_icebreaker_agent: reuse the
+        # registered 'content_gen' type (goal_manager.py:1093) rather
+        # than inventing an unregistered 'social' type that would fail
+        # seed_bootstrap_goals silently.  Curator behavior lives in
+        # config.persona_kind + config.constitutional_gates.
+        'goal_type': 'content_gen',
+        'title': 'Social Media Curator',
+        'description': (
+            'Help the user curate, caption, and schedule social-media '
+            'posts via natural conversation. '
+            '1) Listen to user voice/text feedback on candidate media '
+            '("this one\'s cool, that one skip, caption with a hiking '
+            'vibe, post Friday morning"), '
+            '2) Save user preferences via remember() under namespace '
+            'media_agent_prefs so future sessions carry forward, '
+            '3) Use the portrait auto-arranger scorer for aesthetic '
+            'and diversity ordering, '
+            '4) Draft captions + platform-specific copy via the main '
+            'LLM with cultural_wisdom_filter, '
+            '5) Stage scheduled posts via the existing social_bp '
+            'posting API — NEVER auto-publish; user approves each one. '
+            '6) Respect platform mix: no single channel dominates '
+            'without user opt-in.'
+        ),
+        'config': {
+            'autonomous': False,
+            'continuous': True,
+            'persona_kind': 'media-curator',
+            'persona_name': 'Media Curator',
+            'audience': 'adult',
+            'cadence': 'event',
+            'priority': 5,
+            'nunba_agent_id': 'local_media_curator',
+            'require_consent': True,
+            'no_autosend': True,
+            'constitutional_gates': [
+                'consent_required',
+                'no_autosend',
+                'cultural_wisdom_filter',
+            ],
+        },
+        'spark_budget': 100,
+        'use_product': True,
+    },
 ]
 
 # ─── Loophole → Remediation Goal Map ───
@@ -1570,8 +1704,17 @@ LOOPHOLE_REMEDIATION_MAP = {
 def seed_bootstrap_goals(db, platform_product_id: Optional[str] = None) -> int:
     """Seed initial bootstrap goals if not already present. Returns count created.
 
-    Idempotent: checks for existing active goals with matching bootstrap_slug
-    in config_json. Same pattern as GamificationService.seed_achievements().
+    Idempotent across status: checks for existing goals (any status) with a
+    matching bootstrap_slug.  Previously the check only considered
+    ['active', 'paused'] — so when a bootstrap goal was marked `completed`
+    by the daemon (the false-positive completion bug, #2026-04-29) the
+    next reseed would create a fresh duplicate.  After many reboots the
+    dashboard showed the same goal 8-10× under "Completed".
+
+    Reactivation policy: if a `completed` row exists for a slug, flip it
+    back to `active` (cheaper than insert + cleaner audit trail) instead
+    of creating a duplicate.  Bootstrap goals are conceptually persistent —
+    they should be re-armed, not re-instanced.
 
     Args:
         db: SQLAlchemy session (caller owns transaction)
@@ -1580,21 +1723,33 @@ def seed_bootstrap_goals(db, platform_product_id: Optional[str] = None) -> int:
     from .goal_manager import GoalManager
     from integrations.social.models import AgentGoal
 
-    # Load existing active bootstrap slugs
-    active_goals = db.query(AgentGoal).filter(
-        AgentGoal.status.in_(['active', 'paused'])
-    ).all()
-    existing_slugs = set()
-    for g in active_goals:
+    # Load EVERY existing bootstrap-slugged goal regardless of status, so
+    # `completed` rows count as "already seeded" instead of being treated
+    # as missing → duplicate-spammed on reseed.
+    existing_goals = db.query(AgentGoal).all()
+    existing_by_slug: dict = {}
+    for g in existing_goals:
         cfg = g.config_json or {}
         slug = cfg.get('bootstrap_slug')
         if slug:
-            existing_slugs.add(slug)
+            existing_by_slug[slug] = g
 
     count = 0
+    reactivated = 0
     for goal_data in SEED_BOOTSTRAP_GOALS:
         slug = goal_data['slug']
-        if slug in existing_slugs:
+        existing = existing_by_slug.get(slug)
+        if existing is not None:
+            # Re-arm a previously-completed bootstrap so the daemon picks
+            # it up again, rather than creating a duplicate row.
+            if existing.status == 'completed':
+                existing.status = 'active'
+                cfg = existing.config_json or {}
+                cfg.pop('completed_at', None)
+                cfg.pop('noop_dispatch_count', None)
+                existing.config_json = cfg
+                reactivated += 1
+            # Already-active / paused / archived rows: leave as-is.
             continue
 
         config = dict(goal_data['config'])
@@ -1617,16 +1772,30 @@ def seed_bootstrap_goals(db, platform_product_id: Optional[str] = None) -> int:
         else:
             logger.debug(f"Bootstrap goal '{slug}' skipped: {result.get('error')}")
 
-    if count:
+    if count or reactivated:
         db.flush()
+    if reactivated:
+        logger.info(f"seed_bootstrap_goals: reactivated {reactivated} completed bootstrap goal(s)")
     return count
+
+
+# Cooldown window for re-creating remediation goals after one has fired
+# (regardless of completion status).  The dashboard incident on 2026-04-29
+# showed `Remediate Cold Start` + `Remediate Single Node` firing every
+# 2-5 minutes for hours because the prior pair was instantly marked
+# `completed` and the active-only check missed them.  1 hour matches the
+# rate at which an underlying loophole could realistically be re-resolved
+# by an agent run; tighter intervals just spam the dashboard.
+REMEDIATION_COOLDOWN_MINUTES = 60
 
 
 def auto_remediate_loopholes(db) -> int:
     """Check flywheel loopholes and create remediation goals for severe ones.
 
     Only creates goals for loopholes with severity >= 'high' AND no existing
-    active remediation goal for that loophole type (throttle).
+    remediation goal for that loophole type within the cooldown window —
+    counting completed/archived goals too, not just active/paused (the
+    flap bug prior to 2026-04-29).
 
     Args:
         db: SQLAlchemy session (caller owns transaction)
@@ -1634,6 +1803,7 @@ def auto_remediate_loopholes(db) -> int:
     Returns:
         Number of remediation goals created
     """
+    from datetime import datetime, timedelta
     from .goal_manager import GoalManager
     from .ip_service import IPService
     from integrations.social.models import AgentGoal
@@ -1648,26 +1818,36 @@ def auto_remediate_loopholes(db) -> int:
     if not loopholes:
         return 0
 
-    # Find existing active remediation goals
-    active_goals = db.query(AgentGoal).filter(
-        AgentGoal.status.in_(['active', 'paused'])
+    cutoff = datetime.utcnow() - timedelta(minutes=REMEDIATION_COOLDOWN_MINUTES)
+
+    # Two complementary lookups:
+    #   1) Anything currently active or paused — long-running remediation
+    #      that hasn't completed yet.
+    #   2) Anything CREATED within the cooldown window regardless of status —
+    #      catches the flap pattern where a completed remediation would
+    #      otherwise be re-instanced every tick.
+    blocking_goals = db.query(AgentGoal).filter(
+        (AgentGoal.status.in_(['active', 'paused']))
+        | (AgentGoal.created_at >= cutoff)
     ).all()
-    active_remediations = set()
-    for g in active_goals:
+    recent_remediations = set()
+    for g in blocking_goals:
         cfg = g.config_json or {}
         rem = cfg.get('remediation')
         if rem:
-            active_remediations.add(rem)
+            recent_remediations.add(rem)
 
     count = 0
+    skipped_by_cooldown = []
     for loophole in loopholes:
         severity = loophole.get('severity', 'low')
         if severity not in ('critical', 'high'):
             continue
 
         loophole_type = loophole.get('type', '')
-        if loophole_type in active_remediations:
-            continue  # Already has active remediation goal
+        if loophole_type in recent_remediations:
+            skipped_by_cooldown.append(loophole_type)
+            continue  # Cooldown — already has goal in flight or in last hour
 
         template = LOOPHOLE_REMEDIATION_MAP.get(loophole_type)
         if not template:
@@ -1684,9 +1864,14 @@ def auto_remediate_loopholes(db) -> int:
         )
         if result.get('success'):
             count += 1
-            active_remediations.add(loophole_type)
+            recent_remediations.add(loophole_type)
             logger.info(f"Auto-remediation: created goal for '{loophole_type}' loophole")
 
+    if skipped_by_cooldown:
+        logger.debug(
+            f"Auto-remediation: cooldown-suppressed "
+            f"{len(skipped_by_cooldown)} loophole(s): "
+            f"{sorted(set(skipped_by_cooldown))}")
     if count:
         db.flush()
     return count

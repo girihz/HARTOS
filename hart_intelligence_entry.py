@@ -18,6 +18,201 @@ if sys.platform == 'win32' and 'pytest' not in sys.modules:
         except (ValueError, OSError):
             pass
 
+# ── Defang importlib.metadata.packages_distributions() before transformers ──
+# transformers/utils/import_utils.py:45 calls
+#     PACKAGE_DISTRIBUTION_MAPPING = importlib.metadata.packages_distributions()
+# at module-import time, with NO guard.  The function walks every
+# *.dist-info/METADATA in site-packages and accesses
+# `dist.metadata['Name']`.  ANY corrupt dist-info (METADATA missing,
+# Name: header malformed, or pip rewriting it concurrently) raises
+# KeyError('Name') → transformers crashes its import → langchain →
+# hart_intelligence_entry crashes → Tier-1 HARTOS init dies → agent
+# daemon never starts → admin Agent Dashboard stays empty for the rest
+# of the process lifetime (Tier-1 init is one-shot).
+#
+# Regression observed 2026-04-26 23:05:23 in dev .venv (transient
+# corrupt dist-info).  The fix monkey-patches the stdlib function with
+# a try/except wrapper so a single bad dist-info no longer cascades to
+# a full HARTOS Tier-1 outage.  Running BEFORE any langchain /
+# transformers import in this module guarantees transformers picks up
+# the wrapped version.
+import importlib.metadata as _md_safe
+_orig_pd = getattr(_md_safe, 'packages_distributions', None)
+if _orig_pd is not None and not getattr(_orig_pd, '_hartos_guarded', False):
+    def _safe_packages_distributions():
+        try:
+            return _orig_pd()
+        except Exception:
+            # Best-effort fallback: empty mapping.  Auto-docstring
+            # lookups against {} return generic guesses (worse but
+            # nonfatal).
+            return {}
+    _safe_packages_distributions._hartos_guarded = True
+    _md_safe.packages_distributions = _safe_packages_distributions
+del _md_safe
+
+# ── Defang transformers `_LazyModule.__getattr__` recursion ──
+# transformers ships a `_LazyModule` class whose `__getattr__` does
+# ``hasattr(self, candidate_name)`` which itself triggers
+# ``__getattr__`` again on the not-yet-bound attribute → ~1500-frame
+# recursion that holds the `transformers` per-package import lock for
+# minutes on cold disk.  Triggered by ANY downstream
+# ``from transformers import GPT2TokenizerFast`` (langchain_core does
+# this transitively).  Live thread dump 2026-04-28 22:18 captured the
+# hartos-init thread in 28+ frames of this recursion, blocking every
+# concurrent caller of ``get_world_model_bridge`` (15 dashboard
+# requests + peer_discovery + telemetry) for the rest of the process
+# lifetime.
+#
+# Fix: import `GPT2TokenizerFast` from its underlying submodule and
+# write it to ``transformers.__dict__`` BEFORE any lazy lookup fires.
+# Once the attribute is bound, `hasattr()` short-circuits at the dict
+# and never calls `__getattr__`.  Every downstream caller gets the
+# bound class via plain dict lookup, no recursion.
+#
+# This used to live in Nunba's `app.py::_prewarm_hartos_chain` (commit
+# c0894a2a, 2026-04-28).  That prewarm was deleted in favour of the
+# `hartos_bootstrap` facade — but the direct-bind got deleted with it,
+# letting the recursion regress.  The right home for this is HARTOS,
+# not Nunba: it must run before HARTOS's own
+# `from langchain_classic.llms import OpenAI` (next stmt below) AND
+# before any consumer's deferred bootstrap touches transformers.
+try:
+    import transformers as _tf_safe
+    from transformers.models.gpt2.tokenization_gpt2_fast import (
+        GPT2TokenizerFast as _GPT2TokenizerFast_direct,
+    )
+    if not hasattr(_tf_safe, '__dict__') or \
+            'GPT2TokenizerFast' not in _tf_safe.__dict__:
+        _tf_safe.__dict__['GPT2TokenizerFast'] = _GPT2TokenizerFast_direct
+    del _tf_safe, _GPT2TokenizerFast_direct
+except Exception:
+    # If transformers isn't installed or moved the symbol, fall through.
+    # Worker threads will hit the lazy path and pay the recursion once;
+    # bad but not fatal (and surfaced via the hartos_init_error.log).
+    pass
+
+# ── Defang transformers `_LazyModule.__getattr__` re-entry recursion ──
+#
+# Symptom: Tier-1 init thread spends minutes (and burns the GIL the
+# whole time, starving Hypercorn workers) inside
+# ``transformers.utils.import_utils.py:2215`` —
+#
+#     transformers_module = sys.modules.get("transformers")
+#     if transformers_module and hasattr(transformers_module, candidate_name):
+#                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#
+# That ``hasattr(transformers_module, candidate_name)`` triggers
+# ``transformers.__getattr__(candidate_name)`` (because transformers'
+# top-level module object IS a ``_LazyModule`` with a custom
+# ``__getattr__``), which hits the SAME ``hasattr`` line on a different
+# candidate, which recurses again.  130+ frames deep, all
+# ``active+gil``, no other thread can run.  The recursion is
+# bounded (SLOW_TO_FAST_CONVERTERS is finite) so ``RecursionError``
+# never fires — it just burns CPU forever on a graph walk that should
+# be a single dict lookup.
+#
+# Why the GPT2TokenizerFast bind above isn't enough: that fix only
+# covers ONE leaf of the lazy graph.  Whichever ``*TokenizerFast``
+# is requested first triggers the same recursion via different
+# candidate paths.
+#
+# Architectural note (impact-assessed): we considered three other
+# approaches and rejected each — see
+# ``memory/feedback_langchain_uplift_path.md``:
+#   1. ``sys.setrecursionlimit(N)`` — recursion is bounded, never
+#      raises; forcing N too low breaks legitimate deep stacks.
+#   2. Lazy-import langchain in HARTOS — multi-week refactor; AND
+#      HevolveAI (encrypted .so.enc, NOT refactor-able) is a second
+#      transformers consumer that would still trigger this recursion
+#      at runtime, so the layer-A fix doesn't cover all consumers.
+#   3. Uplift langchain-classic → langchain-core + LangGraph — same
+#      multi-week scope as (2), still doesn't cover HevolveAI.
+#
+# (1)–(3) are all consumer-side fixes.  This patch is at the
+# ``transformers._LazyModule`` layer, which means BOTH consumers
+# (open langchain + closed-source HevolveAI) benefit without changes
+# to either.  That's why a third-party monkey-patch is the
+# architecturally correct answer here, not a band-aid.
+#
+# Mechanism: install a re-entry guard on ``_LazyModule.__getattr__``.
+# When a thread is already mid-``__getattr__`` for a (module, name)
+# pair and the same pair is requested again (which is what
+# ``hasattr`` does inside the same method), raise ``AttributeError``
+# immediately.  ``hasattr`` swallows ``AttributeError`` and returns
+# ``False`` — semantically identical to "the attribute hasn't been
+# bound yet" which is exactly what the calling code is asking.
+#
+# Cross-name recursion (``__getattr__('A')`` triggering
+# ``__getattr__('B')``) is preserved — only same-name re-entry on
+# the same thread is short-circuited.  That's the precise shape of
+# the bug.
+#
+# TODO(upstream): file an issue with HuggingFace transformers
+# proposing the fix at the source — replace the offending
+# ``hasattr(transformers_module, candidate_name)`` with
+# ``candidate_name in transformers_module.__dict__``.  Once a
+# released transformers carries the upstream fix, this monkey-patch
+# becomes vestigial and can be removed.  Track via
+# ``memory/feedback_transformers_lazy_module_patch.md``.
+try:
+    import threading as _tf_threading
+    from transformers.utils import import_utils as _tf_import_utils
+
+    _tf_lazy_module_class = getattr(_tf_import_utils, '_LazyModule', None)
+    if _tf_lazy_module_class is not None and not getattr(
+            _tf_lazy_module_class, '_hartos_reentry_guarded', False):
+        _orig_getattr = _tf_lazy_module_class.__getattr__
+        _resolving = _tf_threading.local()
+
+        # Bind both the original method AND the threading.local() store
+        # via default arguments so the closure carries its own
+        # references.  Module-body cleanup (`del _orig_getattr` etc.)
+        # below is then safe — without this, Python's closure-by-name
+        # lookup would NameError when the lazy module later actually
+        # invokes __getattr__ at runtime (symptom:
+        # ``Tier-1 FAILED — name '_orig_getattr' is not defined``).
+        def _hartos_reentry_guarded_getattr(
+                self, name, _orig=_orig_getattr, _local=_resolving):
+            in_progress = getattr(_local, 'set', None)
+            if in_progress is None:
+                in_progress = set()
+                _local.set = in_progress
+            key = (id(self), name)
+            if key in in_progress:
+                # Same (module, name) re-entry on this thread —
+                # ``hasattr`` probe inside ``__getattr__``.  The
+                # caller is asking "is this already bound?"; we are
+                # mid-resolution so the answer is "not yet".  Raising
+                # AttributeError tells hasattr→False, which is the
+                # semantic the caller wanted.
+                raise AttributeError(
+                    f"module {self.__name__!r} has no attribute {name!r} "
+                    f"(HARTOS re-entry guard: same-name __getattr__ "
+                    f"recursion broken)"
+                )
+            in_progress.add(key)
+            try:
+                return _orig(self, name)
+            finally:
+                in_progress.discard(key)
+
+        _tf_lazy_module_class.__getattr__ = _hartos_reentry_guarded_getattr
+        _tf_lazy_module_class._hartos_reentry_guarded = True
+    # NOTE: not deleting _orig_getattr / _resolving — the patched
+    # method's default args already hold references; deleting the
+    # module-scope names would leave them dangling at module-body cleanup
+    # but otherwise harmless.  Leave them visible (underscore-prefixed,
+    # excluded from `from … import *` semantics) to keep the call site
+    # debuggable via dir().
+    del _tf_threading, _tf_import_utils, _tf_lazy_module_class
+except Exception:
+    # transformers not installed, version moved _LazyModule, or some
+    # other surprise — fall through.  We've still got the
+    # GPT2TokenizerFast direct-bind above; recursion may resurface
+    # but won't crash boot.
+    pass
+
 from bs4 import BeautifulSoup
 from enum import Enum
 from cultural_wisdom import get_cultural_prompt_compact
@@ -167,10 +362,28 @@ try:
 except ImportError:
     from pydantic import BaseModel, Field, root_validator
 from threadlocal import thread_local_data
+# Crossbar HTTP publisher — canonical path is `crossbarhttp3.CrossbarHttpPublisher`
+# (the same publisher used by integrations/social/realtime.py:25).  We fall
+# back to the legacy `crossbarhttp.Client` API only if the canonical
+# publisher is not installed.  Either path is OPTIONAL — if neither is
+# importable the module-load must NOT crash; this layer is dead-code in
+# flat mode where MessageBus uses LOCAL EventBus + PeerLink without HTTP.
+#
+# Regression 2026-04-26: a `.venv` with broken `crossbarhttp` (no
+# __init__.py, Client at .crossbarhttp.Client) made the previous
+# `crossbarhttp.Client(...)` module-level call raise AttributeError,
+# crashing the whole HARTOS import (Tier-1 dead → agent daemon dead →
+# admin dashboard empty).  Wrapping in try/except + using the canonical
+# crossbarhttp3 first kills that failure mode.
+_crossbar_publisher = None
 try:
-    import crossbarhttp
+    from crossbarhttp3 import CrossbarHttpPublisher as _CrossbarPub
 except Exception:
-    crossbarhttp = None
+    _CrossbarPub = None
+try:
+    import crossbarhttp as _legacy_cb  # may be a broken stub
+except Exception:
+    _legacy_cb = None
 from PIL import Image
 import numpy as np
 # Cohere rerank - make optional to avoid pydantic v2 incompatibility with old langchain
@@ -620,13 +833,13 @@ except ImportError:
 except Exception as e:
     app.logger.warning(f"Provision init skipped: {e}")
 
-try:
-    from integrations.social.consent_service import register_consent_routes
-    register_consent_routes(app)
-except ImportError:
-    pass
-except Exception as e:
-    app.logger.warning(f"Consent service init skipped: {e}")
+# Legacy ``register_consent_routes`` block removed in the
+# consent-surface consolidation (orchestrator review acd11f55,
+# 2026-04-25).  The HTTP write surface for user consent now lives at
+# ``integrations.social.consent_api`` (consent_bp, JWT-authed,
+# append-only, mounted at ``/api/social/consent``).  ``init_social``
+# in ``integrations/social/__init__.py`` registers the new blueprint;
+# no extra wiring is required here.
 
 # MCP HTTP Bridge — exposes local MCP tools via REST for Nunba/external clients
 try:
@@ -753,6 +966,68 @@ except ImportError:
     pass
 except Exception as e:
     app.logger.warning(f"Resource Governor start skipped: {e}")
+
+# Central Orchestrator Client — heartbeat to hevolve.ai central + master
+# kill-switch polling.  Env-gated: no-op when HEVOLVE_CENTRAL_ORCHESTRATOR_URL
+# is unset (default flat-mode install), so we burn ZERO resources on a
+# poll loop nobody asked for.  When configured, the client posts small
+# heartbeats (node_id + guardrail_hash + benchmark best-scores + halted
+# flag), polls /halt for a master-signed stop signal, and routes that
+# through HiveCircuitBreaker.halt_network() — which itself verifies the
+# master-key signature before tripping.  See docs/ml_intern_brief §5-D.
+try:
+    from core import central_orchestrator_client as _coc_mod
+    _coc = _coc_mod.get_client()
+    if _coc.is_configured():
+        if _coc.start():
+            app.logger.info(
+                "Central Orchestrator Client started "
+                "(env-gated: HEVOLVE_CENTRAL_ORCHESTRATOR_URL set)"
+            )
+            # Watchdog — catch silent thread death.  Expected interval
+            # is 2× heartbeat (heartbeat loop wakes at min(heartbeat,
+            # halt_poll, 5s) so 120s gives comfortable headroom without
+            # triggering on a single missed poll.
+            try:
+                from security.node_watchdog import get_watchdog
+                _wd = get_watchdog()
+                if _wd:
+                    _wd.register(
+                        'central_orchestrator_client',
+                        expected_interval=120,
+                        restart_fn=_coc.start,
+                        stop_fn=_coc.stop,
+                    )
+                    app.logger.info(
+                        "Central Orchestrator Client registered with watchdog"
+                    )
+            except ImportError:
+                pass
+            except Exception as e:
+                app.logger.debug(
+                    f"Central Orchestrator watchdog registration skipped: {e}"
+                )
+            # atexit — signal the loop to exit cleanly on process shutdown.
+            # Daemon thread exits with the process regardless; this just
+            # flushes any in-flight heartbeat.
+            import atexit as _atexit
+            _atexit.register(_coc.stop)
+        else:
+            # start() returned False — either already running, or node
+            # tier is 'central' itself (brief's design: central doesn't
+            # self-heartbeat).  Both paths log inside start().
+            pass
+    else:
+        app.logger.debug(
+            "Central Orchestrator Client inactive "
+            "(HEVOLVE_CENTRAL_ORCHESTRATOR_URL unset) — flat-mode default"
+        )
+except ImportError:
+    app.logger.debug(
+        "Central Orchestrator Client not available, skipping"
+    )
+except Exception as e:
+    app.logger.warning(f"Central Orchestrator Client init skipped: {e}")
 
 # Instruction Queue API — never miss a user instruction
 try:
@@ -1565,7 +1840,29 @@ except Exception:
 chain = None
 
 
-client = crossbarhttp.Client('http://aws_rasa.hertzai.com:8088/publish') if crossbarhttp else None
+# URL precedence: WAMP_URL env (set by Nunba desktop / regional / central) →
+# legacy cloud default.  Flat mode (no cloud) sets WAMP_URL to localhost so
+# DNS to aws_rasa.hertzai.com is never attempted (#323).
+_wamp_url = os.environ.get('WAMP_URL') or 'http://localhost:8088/publish'
+try:
+    if _CrossbarPub is not None:
+        client = _CrossbarPub(_wamp_url)
+    elif _legacy_cb is not None and hasattr(_legacy_cb, 'Client'):
+        client = _legacy_cb.Client(_wamp_url)
+    else:
+        # Legacy package may expose Client at .crossbarhttp.Client
+        # (broken namespace install).  Probe before giving up.
+        _nested = getattr(_legacy_cb, 'crossbarhttp', None) if _legacy_cb else None
+        client = _nested.Client(_wamp_url) if (_nested and hasattr(_nested, 'Client')) else None
+except Exception as _cb_err:
+    client = None
+    try:
+        import logging as _logging_cb_warn
+        _logging_cb_warn.getLogger(__name__).warning(
+            f"Crossbar HTTP publisher init skipped: {type(_cb_err).__name__}: {_cb_err} — "
+            f"MessageBus LOCAL+PEERLINK transports remain active.")
+    except Exception:
+        pass
 
 # Create thread pool executor for async Crossbar publishing
 crossbar_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='crossbar_publish')
@@ -5649,8 +5946,8 @@ def _chat_reply(user_id, request_id, response_text: str, **payload):
         # or draft-first early returns, so we save here — the ONE place every
         # reply goes through. The user prompt comes via the 'user_prompt' kwarg
         # from callers that have it (most /chat paths do).
+        _prompt = payload.pop('user_prompt', '')
         try:
-            _prompt = payload.pop('user_prompt', '')
             if _prompt and response_text:
                 _mem = get_memory(user_id=user_id)
                 if _mem and hasattr(_mem, 'save_context'):
@@ -5661,6 +5958,41 @@ def _chat_reply(user_id, request_id, response_text: str, **payload):
                     )
         except Exception as _mem_err:
             app.logger.debug(f"_chat_reply: memory save skipped: {_mem_err}")
+
+        # U1-U8 cross-device mirroring (task #389): submit persist + WAMP
+        # publish for both sides of the turn to the chat_messages
+        # executor — the chat response is already serialized and on its
+        # way to the client; the DB write and chat.new fan-out must not
+        # add latency to this path.  On worker saturation we fall back
+        # to inline (see persist_and_publish_async).  request_id links
+        # the (user, assistant) pair for downstream dedup.  device_id /
+        # agent_id / lang / attachments are optional; callers pass them
+        # via **payload when known.
+        try:
+            from integrations.social import chat_messages as _cm
+            _dev = payload.get('device_id')
+            _agent = payload.get('agent_id')
+            _prompt_id = payload.get('prompt_id')
+            _lang_hint = (payload.get('preferred_lang')
+                          or payload.get('language') or _lang)
+            _atts = payload.get('attachments')
+            _rid = str(request_id) if request_id is not None else None
+            if _prompt:
+                _cm.persist_and_publish_async(
+                    str(user_id), 'user', _prompt,
+                    agent_id=_agent, prompt_id=_prompt_id,
+                    request_id=_rid, device_id=_dev,
+                    lang=_lang_hint, attachments=_atts,
+                )
+            _cm.persist_and_publish_async(
+                str(user_id), 'assistant', response_text,
+                agent_id=_agent, prompt_id=_prompt_id,
+                request_id=_rid, device_id=_dev,
+                lang=_lang_hint, attachments=None,
+            )
+        except Exception as _chat_sync_err:
+            app.logger.debug(
+                f"_chat_reply: chat-sync mirror skipped: {_chat_sync_err}")
 
     payload['response'] = response_text
     return jsonify(payload)
@@ -8914,7 +9246,74 @@ def main():
     skills_thread.start()
 
     from core.port_registry import get_port
-    serve(app, host='0.0.0.0', port=get_port('backend'), threads=50)
+    _serve_app(app, host='0.0.0.0', port=get_port('backend'))
+
+
+def _serve_app(app, host: str, port: int) -> None:
+    """Boot the WSGI app on Hypercorn (preferred) or Waitress (fallback).
+
+    Hypercorn = ASGI: asyncio event loop multiplexes connection IO so
+    idle keep-alive / SSE clients don't burn worker threads (waitress
+    holds one thread per connection regardless of activity).  Sync
+    Flask handlers run in `loop.run_in_executor()` against a pool of
+    HEVOLVE_WORKER_THREADS (default 256) — slow paths (LLM inference,
+    pip install in /tts/setup-engine) occupy executor threads but
+    never block the IO layer, so /dashboard/agents and /health stay
+    responsive while a TTS install grinds.
+
+    Single-process today.  Multi-process (HEVOLVE_WORKERS=N) requires
+    sharding the in-process singletons first (EventBus, ResourceGovernor,
+    agent_daemon, watchdog, goal_seeding) — each fork would otherwise
+    spawn N parallel agent fleets fighting over the same goals + the
+    same Windows Job Object handle.  Until then `workers=1` is the
+    correct value; same code path will lift to N workers for free
+    once the sharding work lands.
+
+    Falls back to Waitress on ImportError so older deployments / partial
+    installs / cx_Freeze bundles missing the hypercorn h2/wsproto chain
+    still boot — this preserves the prior behavior bit-for-bit.
+    """
+    log = logging.getLogger('hevolve_social')
+    try:
+        worker_threads = int(os.environ.get('HEVOLVE_WORKER_THREADS', '256'))
+    except (TypeError, ValueError):
+        worker_threads = 256
+
+    try:
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        from hypercorn.asyncio import serve as _hcserve
+        from hypercorn.config import Config
+        from hypercorn.middleware import AsyncioWSGIMiddleware
+
+        config = Config()
+        config.bind = [f'{host}:{port}']
+        config.keep_alive_timeout = 120     # SSE-friendly long polls
+        config.h11_max_incomplete_size = 16 * 1024 * 1024  # 16MB request bodies
+        config.accesslog = None             # HARTOS emits its own access log
+        config.errorlog = '-'
+
+        asgi_app = AsyncioWSGIMiddleware(app)
+
+        async def _runner():
+            loop = asyncio.get_running_loop()
+            loop.set_default_executor(
+                ThreadPoolExecutor(max_workers=worker_threads,
+                                   thread_name_prefix='hartos'))
+            await _hcserve(asgi_app, config)
+
+        log.info(
+            f"Starting Hypercorn (ASGI) on {host}:{port} "
+            f"(executor_threads={worker_threads}, single-process)"
+        )
+        asyncio.run(_runner())
+        return
+    except ImportError as exc:
+        log.warning(
+            f"Hypercorn unavailable ({exc}) — falling back to Waitress")
+
+    log.info(f"Starting Waitress (WSGI) on {host}:{port} (threads=50)")
+    serve(app, host=host, port=port, threads=50)
 
 
 if __name__ == '__main__':

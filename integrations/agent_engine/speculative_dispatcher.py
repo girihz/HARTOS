@@ -370,13 +370,16 @@ class SpeculativeDispatcher:
             _lang = ''
         _lang = _lang.strip().lower()[:5]
         if _lang:
-            try:
-                from hart_intelligence_entry import SUPPORTED_LANG_DICT
+            from core.safe_hartos_attr import safe_hartos_attr
+            SUPPORTED_LANG_DICT = safe_hartos_attr('SUPPORTED_LANG_DICT')
+            if SUPPORTED_LANG_DICT is not None:
                 if _lang not in SUPPORTED_LANG_DICT:
-                    logger.debug(f"draft: language_change '{_lang}' not in SUPPORTED_LANG_DICT — ignoring")
+                    logger.debug(
+                        "draft: language_change '%s' not in "
+                        "SUPPORTED_LANG_DICT — ignoring", _lang)
                     _lang = ''
-            except ImportError:
-                pass  # Can't validate — accept the code as-is
+            # else: HARTOS not yet loaded — accept the code as-is, same
+            # fall-through the original ImportError branch had.
         return {
             'response': draft_reply,
             'speculation_id': speculation_id,
@@ -1025,23 +1028,61 @@ class SpeculativeDispatcher:
 
     def _deliver_expert_response(self, user_id: str, prompt_id: str,
                                   speculation_id: str, response: str):
-        """Dual-channel async delivery: Crossbar chat topic + TTS pupit topic."""
+        """Dual-channel async delivery: Crossbar chat topic + TTS pupit topic.
+
+        Worker-thread safe — uses ``core.safe_hartos_attr`` to read
+        hart_intelligence symbols without triggering Python's per-module
+        import lock (worker threads racing the canonical loader on the
+        langchain_core / transformers import chain caused multi-minute
+        agent_daemon freezes; resolving via sys.modules avoids the lock).
+        """
+        from core.safe_hartos_attr import safe_hartos_attr
+
         # 1. Publish text via canonical publish_async (MessageBus → Crossbar)
         try:
-            from hart_intelligence import publish_async
-            topic = f'com.hertzai.hevolve.chat.{user_id}'
-            publish_async(topic, response)
-        except Exception:
-            pass
+            publish_async = safe_hartos_attr('publish_async')
+            if publish_async is not None:
+                topic = f'com.hertzai.hevolve.chat.{user_id}'
+                publish_async(topic, response)
+                logger.info(
+                    "Expert chat publish: spec=%s user=%s topic=%s len=%d",
+                    speculation_id, user_id, topic, len(response or ''),
+                )
+            else:
+                logger.info(
+                    "Expert chat publish skipped: spec=%s user=%s — "
+                    "HARTOS publish_async not yet resolvable (loader still "
+                    "initialising). Drop the speculative bubble; the main "
+                    "reply path will deliver when ready.",
+                    speculation_id, user_id,
+                )
+        except Exception as e:
+            logger.warning(
+                "Expert chat publish failed: spec=%s user=%s err=%s",
+                speculation_id, user_id, e,
+            )
 
         # 2. Synthesize TTS and publish to pupit audio topic — ensures speculative
         #    expert improvements get the SAME audio treatment as regular replies
         #    (users on TTS-enabled sessions hear the improved response).
         try:
-            from hart_intelligence_entry import _tts_synthesize_and_publish
-            _tts_synthesize_and_publish(response, str(user_id), speculation_id)
+            _tts_synthesize_and_publish = safe_hartos_attr(
+                '_tts_synthesize_and_publish')
+            if _tts_synthesize_and_publish is not None:
+                _tts_synthesize_and_publish(
+                    response, str(user_id), speculation_id)
+                logger.info(
+                    "Expert TTS publish: spec=%s user=%s",
+                    speculation_id, user_id,
+                )
+            else:
+                logger.info(
+                    "Expert TTS publish skipped: spec=%s user=%s — "
+                    "HARTOS _tts_synthesize_and_publish not yet resolvable.",
+                    speculation_id, user_id,
+                )
         except Exception as e:
-            logger.debug(f"Expert TTS publish skipped: {e}")
+            logger.debug(f"Expert TTS publish failed: spec={speculation_id} err={e}")
 
         logger.info(f"Expert enhancement delivered: spec={speculation_id}, "
                      f"user={user_id}")

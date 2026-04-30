@@ -84,16 +84,24 @@ class HiveConsensus:
     @classmethod
     def upgrade_proposal(
         cls,
-        agent_id: str,
+        prompt_id: str,
         goal_type: str,
         new_content: str,
         probe_evidence: Optional[Dict[str, Any]] = None,
         target_files: Optional[List[str]] = None,
+        user_id: Optional[str] = None,
     ) -> ConsensusDecision:
         """Evaluate an upgrade proposal against the 4 vote sources.
 
         Args:
-            agent_id: the seeded agent whose prompt/weights are changing
+            prompt_id: canonical persona identity of the seeded agent
+                whose prompt/weights are changing (LOCAL_AGENTS /
+                SEED_BOOTSTRAP_GOALS identity). Per the ml_intern
+                brief correlation-id contract, this is the carrier
+                field — NOT an ad-hoc agent_id. When a per-user LoRA
+                overlay is involved, pass user_id as well; the
+                underlying prompt/weight upgrade itself is still
+                shared across users of the same prompt_id.
             goal_type: goal_type for peer-probe quorum lookup
             new_content: the proposed new system prompt or description
             probe_evidence: optional dict containing local probe
@@ -101,6 +109,9 @@ class HiveConsensus:
                 from storage.get_latest_result(goal_type).
             target_files: list of files the upgrade intends to touch.
                 Consulted by ConstitutionalFilter.check_code_change().
+            user_id: optional per-user scope for LoRA overlays. Does
+                not affect voting; recorded in the reasoning trace
+                for audit.
 
         Returns:
             ConsensusDecision with votes list + final approved bool.
@@ -109,11 +120,13 @@ class HiveConsensus:
             fails closed, not open.
         """
         subject = {
-            'agent_id': agent_id,
+            'prompt_id': prompt_id,
             'goal_type': goal_type,
             'new_content_preview': (new_content or '')[:300],
             'target_files': list(target_files or []),
         }
+        if user_id:
+            subject['user_id'] = user_id
 
         votes: List[Vote] = []
         votes.append(cls._vote_circuit_breaker())
@@ -291,17 +304,19 @@ class HiveConsensus:
 
 
 def upgrade_proposal(
-    agent_id: str,
+    prompt_id: str,
     goal_type: str,
     new_content: str,
     probe_evidence: Optional[Dict[str, Any]] = None,
     target_files: Optional[List[str]] = None,
+    user_id: Optional[str] = None,
 ) -> ConsensusDecision:
     """Convenience wrapper — `HiveConsensus.upgrade_proposal(...)`."""
     return HiveConsensus.upgrade_proposal(
-        agent_id=agent_id,
+        prompt_id=prompt_id,
         goal_type=goal_type,
         new_content=new_content,
         probe_evidence=probe_evidence,
         target_files=target_files,
+        user_id=user_id,
     )

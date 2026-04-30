@@ -203,6 +203,7 @@ py-modules = [
     "agent_identity",
     "hart_onboarding",
     "hart_cli",
+    "hartos_bootstrap",
 ]
 
 [tool.setuptools.packages.find]
@@ -272,3 +273,48 @@ ignore = ["E501", "W503", "E203"]
 [tool.bandit]
 exclude_dirs = ["venv", "venv310", "tests", "autogen-0.2.37", ".pycharm_plugin", "build", "dist"]
 skips = ["B101", "B404", "B603", "B607"]
+
+# Ruff config — singleton-pattern enforcement for the canonical
+# hart_intelligence facade.  See `core/safe_hartos_attr.py` for the
+# accessor pattern.  Rationale: worker-thread `from hart_intelligence
+# import …` calls race the canonical loader on Python's per-module
+# import lock, causing multi-minute agent_daemon freezes (Tier-1 init
+# never completes).  Resolving via the singleton accessor reads
+# sys.modules directly — no import lock acquisition.
+#
+# TID251 (banned-api) lints AST nodes only — it will NOT trip on the
+# string appearing in comments or docstrings, which is why we picked it
+# over a grep CI step.
+[tool.ruff]
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "venv310",
+    "build",
+    "dist",
+    "tests",
+    "autogen-0.2.37",
+    ".pycharm_plugin",
+]
+
+[tool.ruff.lint]
+extend-select = ["TID"]   # flake8-tidy-imports — gives us TID251
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"hart_intelligence".msg = """
+Worker code must not import hart_intelligence directly — that triggers \
+Python's per-module import lock and races the canonical loader \
+(routes/hartos_backend_adapter.py:_attempt_hartos_init), causing \
+multi-minute agent_daemon freezes when worker threads compete with \
+the loader on the langchain_core / transformers import chain. \
+Use core.safe_hartos_attr.safe_hartos_attr('symbol_name') instead — \
+it's a sys.modules dict lookup that returns None until the canonical \
+loader finishes (caller no-ops gracefully). Only the loader carries \
+`# noqa: TID251` to opt out of this rule.
+"""
+"hart_intelligence_entry".msg = """
+Same singleton-pattern rule as hart_intelligence — workers must use \
+core.safe_hartos_attr.safe_hartos_attr() instead of importing this \
+module directly.
+"""
