@@ -39,11 +39,12 @@ def fresh_catalog() -> ModelCatalog:
 class TestPopulateTtsCatalog:
     """Tests for populate_tts_catalog from integrations.channels.media.tts_router."""
 
-    # ENGINE_REGISTRY currently has 11 engines (luxtts removed — poor
-    # naturalness; omnivoice added — universal 646-lang voice-clone):
-    #   chatterbox_turbo, cosyvoice3, f5_tts, indic_parler, omnivoice,
-    #   chatterbox_ml, pocket_tts, espeak, makeittalk, piper, kokoro
-    EXPECTED_COUNT = 11
+    # ENGINE_REGISTRY currently has 12 engines after the European/CJK
+    # ladder additions (melotts + xtts_v2 + mms_tts) and the piper/
+    # makeittalk drop.  luxtts was removed earlier (poor naturalness).
+    # The exact contents of the dict change as the ladder is tuned —
+    # this assertion only pins the COUNT and the load-bearing IDs.
+    EXPECTED_COUNT = 12
 
     EXPECTED_IDS = {
         'tts-chatterbox-turbo',
@@ -55,8 +56,10 @@ class TestPopulateTtsCatalog:
         'tts-pocket-tts',
         'tts-kokoro',
         'tts-espeak',
-        'tts-makeittalk',
-        'tts-piper',
+        # piper / makeittalk dropped from default ENGINE_REGISTRY:
+        # piper still ships but is loaded via Nunba's tts/piper_tts.py
+        # in-process; makeittalk is cloud-only and lives outside the
+        # default catalog now.
     }
 
     # These IDs must also appear as keys in ModelOrchestrator._CATALOG_TO_VRAM_KEY
@@ -524,7 +527,7 @@ class TestPopulateFromSubsystems:
         Total    : 31
     """
 
-    EXPECTED_TTS_COUNT = 11
+    EXPECTED_TTS_COUNT = 12  # see TestPopulateTtsCatalog comment
     EXPECTED_STT_COUNT = 11
     EXPECTED_VLM_COUNT = 5  # +1 for qwen08b caption model
     EXPECTED_VIDEOGEN_COUNT = 2

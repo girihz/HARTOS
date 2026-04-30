@@ -42,39 +42,25 @@ def _publish_routing_status(user_id: str, message: str, request_id: str = ''):
     The client (WebWorker/React Native) renders these as thinking indicators
     so the user sees: "Processing locally..." → "Checking hive network..." etc.
     """
-    if not user_id:
-        return
-    try:
-        import json as _json
-        # Singleton accessor — see core.safe_hartos_attr for why we
-        # don't ``from hart_intelligence import publish_async`` here.
-        from core.safe_hartos_attr import safe_hartos_attr
-        publish_async = safe_hartos_attr('publish_async')
-        if publish_async is None:
-            logger.debug(
-                "ComputeRouter status drop: user=%s msg=%r — "
-                "HARTOS publish_async unresolvable (loader still init).",
-                user_id, message[:60] if message else '',
-            )
-            return
-        payload = _json.dumps({
-            'text': [message],
-            'priority': 49,
-            'action': 'Thinking',
-            'bot_type': 'ComputeRouter',
-            'request_id': request_id or '',
-            'historical_request_id': [],
-            'options': [], 'newoptions': [],
-        })
-        publish_async(f'com.hertzai.hevolve.chat.{user_id}', payload)
+    from core.peer_link.crossbar_publish import publish_thinking_trace
+    ok = publish_thinking_trace(
+        text=message,
+        user_id=user_id,
+        request_id=request_id or '',
+        bot_type='ComputeRouter',
+    )
+    if ok:
         logger.debug(
             "ComputeRouter status published: user=%s msg=%r",
             user_id, message[:60] if message else '',
         )
-    except Exception as e:
+    elif user_id:
+        # Helper returned False: HARTOS publish_async not yet resolvable.
+        # Empty user_id is a clean no-op — don't log noise for that.
         logger.debug(
-            "ComputeRouter status publish failed: user=%s err=%s",
-            user_id, e,
+            "ComputeRouter status drop: user=%s msg=%r — "
+            "HARTOS publish_async unresolvable (loader still init).",
+            user_id, message[:60] if message else '',
         )
 
 # ═══════════════════════════════════════════════════════════════

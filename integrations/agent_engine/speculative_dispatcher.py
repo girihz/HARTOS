@@ -20,6 +20,7 @@ import atexit
 import json
 import logging
 import os
+import re
 import time
 import uuid
 import threading
@@ -43,6 +44,73 @@ _RESPONSE_ADEQUATE = 'RESPONSE_ADEQUATE'
 # it could handle the question. A confident "none" still takes the
 # fast path; an unsure "none" is treated as a quiet "local".
 _DRAFT_CONFIDENCE_FLOOR = 0.85
+
+# Refusal patterns the draft must NEVER emit.  See the role-contract
+# block in `_build_draft_classifier_prompt` — the draft is the
+# first-responder, NOT the authority on system capability.  Any reply
+# that asserts the system can't do something is a prompt-following
+# failure (or the model slipped a refusal through the system prompt)
+# and must be replaced with a standby + escalation to the expert.
+#
+# Targets HIGH-CONFIDENCE capability refusals only — not legitimate
+# negative phrasing like "I don't know the answer".  Match shape:
+# "I" + negation + (capability noun OR system-action verb).  Word
+# boundaries + IGNORECASE guard against false positives like
+# "I cannot wait to help".
+# Capability verbs the draft might falsely claim it can't perform.
+# Factored out so the refusal-pattern alternatives stay in sync.
+_REFUSAL_VERBS = (
+    r"access|fetch|reach|browse|connect|connect to|read|retrieve|"
+    r"download|verify|view|see|check|crawl|open|load|hit|resolve|"
+    r"directly|currently|presently"
+)
+# Capability nouns paired with "I do(n't| not) have <NOUN>" or
+# "I lack <NOUN>" / "I have no <NOUN>" — anything that frames an
+# absent capability rather than negative recall ("I don't know").
+_REFUSAL_NOUNS = (
+    r"access|tools?|the ability|the capability|permission|a way|any way|"
+    r"built-?in|external|the internet|web access|internet access|"
+    r"means|way to"
+)
+_REFUSAL_PATTERN = re.compile(
+    r"\b(?:"
+    # "I cannot/can't <optional softener> <verb>"
+    r"I (?:can'?t|cannot)\s+"
+    r"(?:directly\s+|currently\s+|presently\s+)?"
+    r"(?:" + _REFUSAL_VERBS + r")"
+    r"|"
+    # "I am unable/not able TO <optional softener> <verb>"
+    # and contraction "I'm unable/not able TO <verb>"
+    # (regex split because "I'm" has no space between I and m,
+    # while "I am" requires the space)
+    r"(?:I'?m|I am)\s+(?:unable|not able)\s+to\s+"
+    r"(?:directly\s+|currently\s+|presently\s+)?"
+    r"(?:" + _REFUSAL_VERBS + r")"
+    r"|"
+    # "I (don't|do not) have <noun>"  e.g. "I don't have built-in tools"
+    r"I do(?:n'?t| not) have\s+"
+    r"(?:" + _REFUSAL_NOUNS + r")"
+    r"|"
+    # "I lack <noun>"  e.g. "I lack access to GitHub"
+    r"I lack\s+(?:" + _REFUSAL_NOUNS + r")"
+    r"|"
+    # "I have no <noun>"  e.g. "I have no tools to retrieve…"
+    r"I have no\s+(?:access|way|tools?|ability|means)"
+    r"|"
+    # "I'm just/only a (large language model|LLM|AI|chatbot|…)"
+    # — split for I'm vs I am as above.
+    r"(?:I'?m|I am) (?:just|only) (?:a|an) "
+    r"(?:large language model|LLM|AI|language model|chatbot|"
+    r"text-based assistant)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Generic standby reply substituted when the draft slips a refusal
+# through. Keeps the user comfortable while the expert path runs.
+# Intentionally short and capability-neutral — the expert's actual
+# answer will replace this within the latency budget.
+_REFUSAL_STANDBY_REPLY = "Let me check that for you…"
 
 
 class SpeculativeDispatcher:
@@ -277,6 +345,34 @@ class SpeculativeDispatcher:
         draft_reply = parsed.get('reply') or draft_raw.strip()[:500]
         delegate = parsed.get('delegate', 'local')  # default on parse fail
         confidence = float(parsed.get('confidence') or 0.0)
+
+        # REFUSAL GUARD: the draft is the first-responder role, NOT the
+        # authority on system capability. Any reply that asserts the
+        # system can't do something is a prompt-following failure — the
+        # role contract in the classifier prompt explicitly forbids
+        # refusals of this shape.  When the model slips one through
+        # anyway (typically when the user asks for a tool-bound
+        # capability the draft can't see — URL fetch, file read,
+        # GitHub PR check, etc.), we replace the standby with a generic
+        # holding reply and force escalation to the local expert.  The
+        # user never sees the refusal; the expert (with full tool
+        # access) produces the real answer and the SSE/WAMP fan-out
+        # delivers it to replace the standby.
+        # Size-agnostic — same rule applies whether the draft slot
+        # holds a 0.8B, 4B, or 27B model.  None of them see the full
+        # tool registry the expert binds.
+        refusal_overridden = False
+        if draft_reply and _REFUSAL_PATTERN.search(draft_reply):
+            logger.info(
+                "draft-first: refusal detected in draft reply "
+                "(delegate=%r, conf=%.2f) — replacing with standby + "
+                "forcing delegate=local. Original reply prefix: %r",
+                delegate, confidence, draft_reply[:120],
+            )
+            draft_reply = _REFUSAL_STANDBY_REPLY
+            delegate = 'local'
+            refusal_overridden = True
+
         # REASONING-QUALITY GUARD: an unsure "none" is not good enough to
         # ship as the final answer. Promote it to "local" so an expert
         # verifier still runs in the background. Keeps the single
@@ -313,6 +409,14 @@ class SpeculativeDispatcher:
                 'latency_ms': draft_latency_ms,
                 'reply_len': len(draft_reply) if draft_reply else 0,
                 'escalated': delegate != parsed.get('delegate', 'local'),
+                # refusal_overridden lets us calibrate per-model adherence
+                # to the role contract.  A draft model with the right
+                # prompt should hit this near-zero — sustained non-zero
+                # rate is a signal that either the prompt isn't being
+                # followed (model too small / fine-tune mismatch) or the
+                # model is the wrong fit for the draft slot on this
+                # hardware.
+                'refusal_overridden': refusal_overridden,
             }
             logger.info(f"draft-telemetry: {json.dumps(_telemetry)}")
         except Exception:
@@ -517,6 +621,41 @@ class SpeculativeDispatcher:
             "classify the user's intent on several independent axes. The "
             "classification flags are what route the message downstream — "
             "be accurate.\n\n"
+            # ── First-responder role contract — size-agnostic ─────────────
+            # Same wording is correct whether the draft is 0.8B, 4B, or 27B.
+            # Even a capable large draft model in this slot does NOT see the
+            # full tool registry (web fetch, code exec, GitHub, filesystem,
+            # vision, computer control, MCP-attached servers, channels), the
+            # user's loaded persona / agent_config, multi-turn memory, or the
+            # ReAct loop.  Only the expert role can decide capability
+            # boundaries.  The first-responder must NEVER refuse on behalf
+            # of the system.
+            "ROLE CONTRACT — READ BEFORE ANSWERING:\n"
+            "You are the first-responder, NOT the authority.  You do not "
+            "know which tools, integrations, or capabilities the expert "
+            "role has — that set is dynamic, user-installed, and not "
+            "visible to you.  Therefore:\n"
+            "- NEVER write 'I cannot', 'I don't have access', 'I'm unable', "
+            "'I'm just a', 'I do not have the ability', or any phrase "
+            "asserting the system can't do something.  You don't get to "
+            "decide that.\n"
+            "- NEVER claim no internet/tools/file access; you have no way "
+            "to verify what is or isn't reachable from the expert role.\n"
+            "- You MAY answer directly ONLY for trivial recall, simple "
+            "math, greetings, or questions that need NO live data, NO "
+            "external system access, NO filesystem, NO code execution, "
+            "and NO per-user state beyond this single turn.\n"
+            "- For ANYTHING else (URLs, code, files, current state, "
+            "multi-step reasoning, capability questions): set "
+            "delegate=\"local\" (or \"hive\" for very large requests) "
+            "and write a brief standby reply such as \"Let me check that "
+            "for you…\", \"Looking that up…\", or \"One moment…\".  The "
+            "standby will be replaced by the expert's actual answer "
+            "automatically — your only job is to keep the user comfortable "
+            "while the authoritative path runs.\n"
+            "- Refusals are the expert's job, and only after consulting "
+            "actual tools.  If you ever feel the urge to refuse: pick a "
+            "standby instead and delegate.\n\n"
             f"User: {user_prompt}\n\n"
             "Respond with ONE JSON object on a single line and NOTHING else:\n"
             '{"reply": "<your short reply to the user, 1-3 sentences>", '
@@ -1037,12 +1176,13 @@ class SpeculativeDispatcher:
         agent_daemon freezes; resolving via sys.modules avoids the lock).
         """
         from core.safe_hartos_attr import safe_hartos_attr
+        from core.peer_link.message_bus import chat_topic_for
 
         # 1. Publish text via canonical publish_async (MessageBus → Crossbar)
         try:
             publish_async = safe_hartos_attr('publish_async')
             if publish_async is not None:
-                topic = f'com.hertzai.hevolve.chat.{user_id}'
+                topic = chat_topic_for(user_id)
                 publish_async(topic, response)
                 logger.info(
                     "Expert chat publish: spec=%s user=%s topic=%s len=%d",

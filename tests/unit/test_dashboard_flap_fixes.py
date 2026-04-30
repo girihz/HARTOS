@@ -37,6 +37,12 @@ class FakeGoal:
         self.config_json = kwargs.get('config_json', {})
         self.created_at = kwargs.get('created_at', datetime.utcnow())
         self.spark_spent = kwargs.get('spark_spent', 0)
+        # goal_type became a first-class column on AgentGoal as part of
+        # the speech-therapy seeding work; seed_bootstrap_goals now reads
+        # it directly off the row instead of digging into config_json.
+        # Default to '' so unrelated tests (which never set it) keep
+        # working.
+        self.goal_type = kwargs.get('goal_type', '')
         for k, v in kwargs.items():
             setattr(self, k, v)
 

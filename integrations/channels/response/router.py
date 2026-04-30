@@ -235,10 +235,8 @@ class ChannelResponseRouter:
             }
             payload = json.dumps(notification)
             # Primary chat topic (existing desktop/web subscription)
-            publish_async(
-                f'com.hertzai.hevolve.chat.{user_id}',
-                payload,
-            )
+            from core.peer_link.message_bus import chat_topic_for
+            publish_async(chat_topic_for(user_id), payload)
             # Dedicated channel response topic (cross-device)
             publish_async(
                 f'com.hertzai.hevolve.channel.response.{user_id}',

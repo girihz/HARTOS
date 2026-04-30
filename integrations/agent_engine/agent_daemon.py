@@ -233,6 +233,14 @@ class AgentDaemon:
 
         Feeds dense attribution chain to WorldModelBridge via agent_attribution.
         """
+        # Single canonical daemon yield gate (user activity + system
+        # pressure).  Without this the proactive tick saturates GIL with
+        # speculative dispatches (DB churn + LLM HTTP) while the user is
+        # actively chatting — py-spy showed 8s+ sampling lag.
+        from .dispatch import should_yield_to_user
+        if should_yield_to_user():
+            return
+
         now = time.time()
 
         # Attribution: track this tick as a long-horizon action
@@ -512,25 +520,20 @@ class AgentDaemon:
         from integrations.social.models import get_db, AgentGoal, Product
         from integrations.coding_agent.idle_detection import IdleDetectionService
         from .goal_manager import GoalManager, CODING_GOAL_TYPES
-        from .dispatch import dispatch_goal, is_user_recently_active
+        from .dispatch import dispatch_goal, should_yield_to_user
 
-        # Yield LLM to user requests — don't compete for inference
-        if is_user_recently_active():
-            logger.debug("Agent daemon: user/CREATE active, yielding LLM")
+        # Single canonical yield gate — user activity + system pressure.
+        # See dispatch.should_yield_to_user() docstring for the contract.
+        if should_yield_to_user():
+            logger.debug("Agent daemon: yielding (user active or system pressure)")
             return
-
-        # RESOURCE GATE: throttle dispatch when system is under pressure
-        # Prevents machine slowness while Nunba/HARTOS is running
+        # _throttle is consumed lower down for soft scaling decisions —
+        # re-read after the hard yield gate so we still have a value.
         try:
             from integrations.service_tools.model_lifecycle import (
                 get_model_lifecycle_manager)
-            _pressure = get_model_lifecycle_manager().get_system_pressure()
-            _throttle = _pressure.get('throttle_factor', 1.0)
-            if _throttle < 0.1:
-                logger.debug(
-                    "Agent daemon: system under heavy pressure "
-                    f"(throttle={_throttle:.2f}), skipping dispatch")
-                return
+            _throttle = get_model_lifecycle_manager().get_system_pressure().get(
+                'throttle_factor', 1.0)
         except Exception:
             _throttle = 1.0
 

@@ -2487,7 +2487,20 @@ class HiveBenchmarkProver:
     def _continuous_loop(self) -> None:
         """Background loop: rotate benchmarks, run, publish."""
         logger.info("Benchmark continuous loop started")
+        from integrations.agent_engine.dispatch import should_yield_to_user
         while self._loop_running:
+            # Single canonical daemon yield gate — re-checked every
+            # iteration so a long-running cycle yields as soon as the
+            # user starts typing.  ensemble_mmlu fully saturates the
+            # local LLM (100 questions × N models); running it during
+            # chat is the textbook CPU-stall shape.
+            if should_yield_to_user():
+                for _ in range(_LOOP_INTERVAL_SECONDS):
+                    if not self._loop_running:
+                        break
+                    time.sleep(1)
+                continue
+
             try:
                 # Pick next benchmark
                 benchmark = _BENCHMARK_ROTATION[
