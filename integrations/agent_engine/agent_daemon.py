@@ -233,6 +233,25 @@ class AgentDaemon:
 
         Feeds dense attribution chain to WorldModelBridge via agent_attribution.
         """
+        # Yield to user activity + system pressure — same gates _tick uses.
+        # Without these the proactive tick saturates GIL with speculative
+        # dispatches (DB churn + LLM HTTP) while the user is actively chatting,
+        # producing the CPU-stall symptom (py-spy reports 8s+ sampling lag).
+        try:
+            from .dispatch import is_user_recently_active
+            if is_user_recently_active():
+                return
+        except Exception:
+            pass
+        try:
+            from integrations.service_tools.model_lifecycle import (
+                get_model_lifecycle_manager)
+            _pressure = get_model_lifecycle_manager().get_system_pressure()
+            if _pressure.get('throttle_factor', 1.0) < 0.1:
+                return
+        except Exception:
+            pass
+
         now = time.time()
 
         # Attribution: track this tick as a long-horizon action
