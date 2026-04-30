@@ -1911,8 +1911,27 @@ def publish_async(topic, message, timeout=2.0):
 
     Also publishes to the confirmation topic (mirrors cloud chatbot.py:publish()).
 
+    SIDE-EFFECT — Nunba monkey-patches this at runtime:
+        Nunba's ``routes/hartos_backend_adapter.py`` wraps this
+        function in-place to also call ``_capture_thinking(message)``
+        for every published message.  That feeds Nunba's per-request
+        thinking-trace buffer that the ``/chat`` HTTP response embeds.
+
+        Implication for callers: bypassing this function (publishing
+        directly via ``MessageBus.publish``) silently skips the
+        capture.  If you change the chat-bubble path to call the bus
+        directly, Nunba's HTTP /chat responses lose their thinking
+        traces.  Either keep going through ``publish_async`` or
+        migrate Nunba's interceptor to a bus subscriber on
+        ``chat.response`` (tracked in
+        ``memory/project_publish_aop_migration.md`` — the right
+        long-term shape).
+
     Args:
-        topic: Crossbar topic to publish to (legacy format)
+        topic: Crossbar topic to publish to (legacy format).  Use
+            ``core.peer_link.message_bus.chat_topic_for(user_id)``
+            to build per-user chat topic strings instead of inline
+            f-strings.
         message: Message payload (JSON string or dict)
         timeout: Maximum time for HTTP Crossbar publish (default: 2.0 seconds)
     """
@@ -2406,7 +2425,8 @@ def _push_workflow_flowchart(user_id, prompt_id, request_id=None):
             "historical_request_id": [],
             "options": [], "newoptions": [],
         }
-        publish_async(f'com.hertzai.hevolve.chat.{user_id}', json.dumps(crossbar_message))
+        from core.peer_link.message_bus import chat_topic_for
+        publish_async(chat_topic_for(user_id), json.dumps(crossbar_message))
     except Exception:
         pass
 

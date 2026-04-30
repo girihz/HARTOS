@@ -1176,12 +1176,13 @@ class SpeculativeDispatcher:
         agent_daemon freezes; resolving via sys.modules avoids the lock).
         """
         from core.safe_hartos_attr import safe_hartos_attr
+        from core.peer_link.message_bus import chat_topic_for
 
         # 1. Publish text via canonical publish_async (MessageBus → Crossbar)
         try:
             publish_async = safe_hartos_attr('publish_async')
             if publish_async is not None:
-                topic = f'com.hertzai.hevolve.chat.{user_id}'
+                topic = chat_topic_for(user_id)
                 publish_async(topic, response)
                 logger.info(
                     "Expert chat publish: spec=%s user=%s topic=%s len=%d",

@@ -120,6 +120,22 @@ def resolve_legacy_topic(legacy_topic: str):
     return None, ''
 
 
+def chat_topic_for(user_id: str) -> str:
+    """Return the legacy WAMP chat topic for a given user.
+
+    Single source of truth for the per-user chat-bubble topic.
+    Replaces the inline ``f'com.hertzai.hevolve.chat.{user_id}'``
+    pattern that was duplicated at every publish call site.
+
+    Output is byte-identical to the inline f-string callers were
+    producing — every subscriber (Android RN, Web SPA, Nunba
+    adapter) sees zero wire change.  This is purely a refactor
+    seam so the legacy topic name lives in one place the day we
+    eventually retire it.
+    """
+    return f'com.hertzai.hevolve.chat.{user_id}'
+
+
 class _LRUDedup:
     """LRU set for message deduplication. O(1) check and insert."""
 
@@ -191,6 +207,19 @@ class MessageBus:
         SSE is treated like LOCAL trust-wise (same-machine, loopback
         only, MCP-token gated) so payloads pass through unredacted.
         Outbound legs (PEERLINK + CROSSBAR) get the DLP scrub.
+
+        SUBTLE — Nunba's adapter does NOT see direct ``bus.publish``
+        calls.  Nunba's ``routes/hartos_backend_adapter.py``
+        monkey-patches ``hart_intelligence.publish_async``, not this
+        method.  Callers that go directly through the bus
+        (``bus.publish(...)``) bypass that monkey-patch — Nunba's
+        per-request thinking-trace buffer never sees those messages.
+        For chat-bubble publishes, prefer
+        ``hart_intelligence.publish_async(chat_topic_for(user_id),
+        json.dumps(payload))`` so the interceptor still fires.
+        Migration to a bus subscriber on ``chat.response`` is the
+        right long-term shape (tracked in
+        ``memory/project_publish_aop_migration.md``).
 
         Args:
             topic: Dot-notation topic (e.g., 'chat.response')
