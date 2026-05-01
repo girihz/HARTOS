@@ -414,11 +414,21 @@ class TestPersonaInjection:
     persona must be threaded through so the standby reply comes back
     in character instead of generic first-responder voice."""
 
-    def test_no_persona_no_persona_block(self, dispatcher):
+    def test_no_persona_uses_default_brand_identity(self, dispatcher):
+        """When no per-agent persona is passed, the prompt falls back
+        to the default brand identity ('You are Nunba…') instead of
+        the playing-a-persona wrapper.  Distinct from
+        test_persona_is_prepended which exercises the explicit-persona
+        path."""
         built = dispatcher._build_draft_classifier_prompt('hi there')
-        assert 'persona' not in built.lower()
-        # The job preamble + answering rules must both be present so the
-        # 0.8B knows what to do with the JSON schema below.
+        # No "playing the following persona" wrapper — that's the
+        # explicit-persona path, this is the default-identity path.
+        assert 'playing the following persona' not in built
+        # Default brand identity is present so the 0.8B doesn't
+        # fall through to its training-default name ("I'm Qwen…").
+        assert 'You are Nunba' in built
+        # The job preamble + answering rules must both be present so
+        # the 0.8B knows what to do with the JSON schema below.
         assert 'Your job is to produce a short reply' in built
         assert 'ANSWERING RULES' in built
 

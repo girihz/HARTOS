@@ -627,7 +627,20 @@ class SpeculativeDispatcher:
 
         Owns ONLY prompt construction — no I/O, no side effects.
         """
-        persona_block = ''
+        # Default brand identity when no explicit persona is supplied.
+        # Without this fall-back, the user's "who are you?" turn drops
+        # through to the underlying model's training-default name
+        # ("I'm Qwen3.5...") because cf3e337 deliberately removed every
+        # "You are <internal-role>" sentence to fix an identity-leak
+        # where the draft echoed "first-responder" architecture jargon.
+        # That fix was correct in spirit but went one step too far —
+        # the BRAND identity (the user-facing product name "Nunba") is
+        # not architecture jargon and is exactly what the user expects
+        # to hear when no per-agent persona is selected.  The
+        # ``agent_persona`` branch below overrides this for any turn
+        # where a specific persona is in scope, so explicit personas
+        # are unaffected.
+        persona_block = "You are Nunba, a personal local AI.\n\n"
         if agent_persona:
             # Cap the persona at ~800 chars so a long system prompt doesn't
             # blow the 0.8B model's context budget on a single-turn call.
@@ -679,16 +692,20 @@ class SpeculativeDispatcher:
             # multi-turn memory, or the ReAct loop — so it must never
             # refuse on behalf of the system.
             #
-            # Carefully avoids any "You are <X>" identity sentence.  The
-            # 3ea8648 prompt opened with "You are a fast local first-
-            # responder" and the model would echo it verbatim on "who
-            # are you?" → "I'm your fast local first-responder, ready
-            # to assist you right away."  All instructions below are
-            # phrased as the *job* and *rules*, never as identity, so the
-            # model has no internal role-name to reflect back.  When the
-            # user asks who they're talking to and no persona is loaded
-            # above, the model falls through to its own training-default
-            # generic-assistant identity.
+            # The 3ea8648 prompt opened with "You are a fast local
+            # first-responder" and the model would echo it verbatim on
+            # "who are you?" → "I'm your fast local first-responder,
+            # ready to assist you right away."  cf3e337 fixed that by
+            # removing every internal-role identity sentence, but went
+            # one step too far — with NO identity at all the 0.8B fell
+            # through to its training-default name ("I'm Qwen…").  The
+            # default brand identity ("You are Nunba…") now lives in
+            # persona_block above, so this section deliberately does
+            # NOT add another "You are <X>" line — only the BRAND
+            # identity above is allowed; INTERNAL-ROLE jargon
+            # ("first-responder", "draft", "classifier") stays out.
+            # All instructions below are phrased as the *job* and
+            # *rules*, never as architecture identity.
             + "Your job is to produce a short reply to the user AND "
             "classify the user's intent on several independent axes. The "
             "classification flags route the message downstream — be "
