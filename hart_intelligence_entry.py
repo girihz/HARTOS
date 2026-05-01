@@ -1416,8 +1416,16 @@ RAG_API = config.get('RAG_API', '')
 from core.config_cache import (
     get_db_url, get_action_api, get_student_api,
     get_vision_api, get_book_parsing_api, is_bundled as _config_is_bundled,
+    get_central_db_url,
 )
 DB_URL = get_db_url()
+# Distinct from DB_URL: always points at the central cloud (kong-routed)
+# instead of collapsing to localhost in bundled mode.  Used by /prompts
+# and /prompts/public to merge in agents the user owns on hevolve.ai
+# but never synced down to this machine.  Empty string disables the
+# cross-device merge (local-only listing) — matches the same fail-quiet
+# contract _merge_prompts_with_cloud already has on cloud failures.
+CENTRAL_DB_URL = get_central_db_url()
 ACTION_API = get_action_api()
 STUDENT_API = get_student_api()
 LLAVA_API = get_vision_api()
@@ -7622,8 +7630,14 @@ def get_prompts():
     # 2. Merge in cloud-only agents the user owns on hevolve.ai —
     # the local store doesn't know about agents the user created from
     # another device.  Powers Nunba's "Hybrid" intelligence preference.
-    _merge_prompts_with_cloud(
-        prompts, f'{DB_URL}/getprompt_onlyuserid/?user_id={req_user_id}')
+    # MUST use CENTRAL_DB_URL not DB_URL — in bundled Nunba mode DB_URL
+    # collapses to http://localhost:5000 (this same Flask process), so
+    # merging would just hit our own /getprompt_onlyuserid handler and
+    # see the same local prompts again — silent no-op.
+    if CENTRAL_DB_URL:
+        _merge_prompts_with_cloud(
+            prompts,
+            f'{CENTRAL_DB_URL}/getprompt_onlyuserid/?user_id={req_user_id}')
 
     return jsonify(prompts)
 
@@ -7662,8 +7676,12 @@ def get_public_prompts():
                 except Exception:
                     continue
 
-    # 2. Merge in cloud-only public agents.
-    _merge_prompts_with_cloud(prompts, f'{DB_URL}/getprompt_all/')
+    # 2. Merge in cloud-only public agents.  Same central-vs-local-DB_URL
+    # rationale as /prompts above — DB_URL is localhost in bundled mode
+    # and would no-op the merge.
+    if CENTRAL_DB_URL:
+        _merge_prompts_with_cloud(
+            prompts, f'{CENTRAL_DB_URL}/getprompt_all/')
 
     return jsonify(prompts)
 
