@@ -640,7 +640,13 @@ class SpeculativeDispatcher:
         # ``agent_persona`` branch below overrides this for any turn
         # where a specific persona is in scope, so explicit personas
         # are unaffected.
-        persona_block = "You are Nunba, a personal local AI.\n\n"
+        #
+        # Single source of truth — core.constants.NUNBA_BRAND_IDENTITY.
+        # Same constant is imported by Nunba's _fallback_chat in
+        # routes/hartos_backend_adapter.py so the two paths can never
+        # drift on brand wording.
+        from core.constants import NUNBA_BRAND_IDENTITY
+        persona_block = f"{NUNBA_BRAND_IDENTITY}\n\n"
         if agent_persona:
             # Cap the persona at ~800 chars so a long system prompt doesn't
             # blow the 0.8B model's context budget on a single-turn call.
