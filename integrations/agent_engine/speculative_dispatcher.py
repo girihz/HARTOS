@@ -276,7 +276,8 @@ class SpeculativeDispatcher:
                              node_id: str = None,
                              agent_persona: Optional[str] = None,
                              preferred_lang: str = 'en',
-                             user_pref: str = 'auto') -> dict:
+                             user_pref: str = 'auto',
+                             agent_bound: bool = False) -> dict:
         """Draft-first dispatch: tiny model answers immediately, signals whether
         to delegate.
 
@@ -404,6 +405,30 @@ class SpeculativeDispatcher:
             logger.info(
                 f"draft-first: low-confidence 'none' ({confidence:.2f} < "
                 f"{_DRAFT_CONFIDENCE_FLOOR}) → escalating to local verifier"
+            )
+            delegate = 'local'
+
+        # AGENT-BINDING GUARD: when the caller bound this turn to a
+        # specific agent (prompt_id resolves to a real agent on disk,
+        # not the request-id fallback), the user has chosen a
+        # specialist and expects THAT specialist's voice — not the
+        # 0.8B draft answering in its generic voice.  Even a trivial
+        # greeting like "hi" should pass through the specialist so
+        # its persona / system prompt / tool registry shapes the
+        # reply.  Promote delegate=none → local so the expert path
+        # always takes the turn for agent-bound requests.
+        #
+        # When agent_bound=False (no specific agent in scope, e.g.
+        # default chat or guest free-floating), the draft's "none"
+        # decision stays — the 0.8B can handle trivial questions
+        # without paying the 4B cost.
+        if delegate == 'none' and agent_bound:
+            logger.info(
+                "draft-first: prompt_id=%r is bound to a specific "
+                "agent — escalating delegate=none → 'local' so the "
+                "agent's expert path takes the turn instead of the "
+                "0.8B draft's generic voice.",
+                prompt_id,
             )
             delegate = 'local'
 

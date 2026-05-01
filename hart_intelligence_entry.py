@@ -6572,12 +6572,19 @@ def chat():
         try:
             from integrations.agent_engine.speculative_dispatcher import get_speculative_dispatcher
             dispatcher = get_speculative_dispatcher()
+            # agent_bound=True when prompt_id refers to a real agent on
+            # disk — the dispatcher uses this signal to never let the
+            # 0.8B draft short-circuit the specialist on trivial Q&A.
+            # Computed BEFORE the request-id coalesce so a fallback
+            # request_id doesn't masquerade as an agent.
+            _agent_bound = bool(prompt_id)
             result = dispatcher.dispatch_draft_first(
                 prompt, str(user_id),
                 str(prompt_id) if prompt_id else str(request_id or 'anon'),
                 agent_persona=custom_prompt or None,
                 preferred_lang=preferred_lang,
                 user_pref=intelligence_preference,
+                agent_bound=_agent_bound,
             )
             # Only commit when the dispatcher actually produced a reply.
             # no_draft_model / circuit breaker / guardrail block all leave
