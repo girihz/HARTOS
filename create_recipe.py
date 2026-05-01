@@ -1753,7 +1753,12 @@ def create_agents(user_id: str,task,prompt_id) -> Tuple[Any, Any, Any, Any, Any,
             register_journey_tools(helper, assistant, user_id)
             tool_logger.info("Sales journey tools loaded (Tier 2) based on prompt content")
     except Exception as e:
-        tool_logger.debug(f"Goal-aware tool loading skipped: {e}")
+        # Promoted from debug to warning: a failure here means the agent
+        # boots without its goal-specific tools, so it can talk about the
+        # task but not actually do it (LLM emits prose, no tool calls,
+        # goal "completes" with zero side-effects).  Silent for ~6 weeks
+        # before being caught.  Loud now so any future regression surfaces.
+        tool_logger.warning(f"Goal-aware tool loading FAILED: {e}")
 
     assistant.description = 'this is an assistant agent that coordinates & executes requested tasks & actions'
     executor.description = 'this is an executor agent that Specialized agent for code execution & response handling'

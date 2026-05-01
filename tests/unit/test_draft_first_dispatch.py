@@ -417,7 +417,77 @@ class TestPersonaInjection:
     def test_no_persona_no_persona_block(self, dispatcher):
         built = dispatcher._build_draft_classifier_prompt('hi there')
         assert 'persona' not in built.lower()
-        assert 'You are a fast local first-responder' in built
+        # The job preamble + answering rules must both be present so the
+        # 0.8B knows what to do with the JSON schema below.
+        assert 'Your job is to produce a short reply' in built
+        assert 'ANSWERING RULES' in built
+
+    def test_prompt_carries_capability_summary(self, dispatcher):
+        """The draft must see a positive capability list so it knows
+        what the system CAN do — primary teaching mechanism that
+        replaces relying solely on negative 'never refuse' rules.
+
+        Auto-discovered from tool_allowlist + ModelCatalog + MCP +
+        channels + expert agents.  The test environment has at least
+        the static tool slice loaded (tool_allowlist is import-pure),
+        so 'web search' should appear regardless of which optional
+        subsystems are wired up at test time.
+        """
+        built = dispatcher._build_draft_classifier_prompt('hi there')
+        assert 'Available capabilities' in built, (
+            "draft prompt missing the positive capability summary"
+        )
+        # Static tool slice is always present; one canonical entry
+        # acts as the smoke check that summary plumbing is wired.
+        assert 'web search' in built
+
+    def test_every_static_tool_has_description(self):
+        """Drift guard: every name in _FAST_TOOLS|_BALANCED_TOOLS must
+        have an entry in _TOOL_DESCRIPTIONS, otherwise a new tool
+        added at the allowlist gets surfaced to the draft prompt by
+        its raw identifier ('post_content' instead of 'post content')
+        — workable but ugly.  Catches the drift on PR rather than in
+        prod.
+        """
+        from integrations.agent_engine.tool_allowlist import (
+            _FAST_TOOLS, _BALANCED_TOOLS, _TOOL_DESCRIPTIONS,
+        )
+        all_tools = _FAST_TOOLS | _BALANCED_TOOLS
+        missing = sorted(all_tools - set(_TOOL_DESCRIPTIONS))
+        assert not missing, (
+            f"_TOOL_DESCRIPTIONS is missing entries for: {missing}.  "
+            "Add a ≤3-word phrase per name so the draft prompt's "
+            "capability summary stays human-readable."
+        )
+
+    def test_prompt_has_no_identity_statement(self, dispatcher):
+        """Regression: the 3ea8648 prompt opened with 'You are a fast
+        local first-responder' and the role contract reinforced 'You
+        are the first-responder, NOT the authority' — the 0.8B then
+        echoed it verbatim on 'who are you?', producing 'I'm your fast
+        local first-responder, ready to assist you right away.'
+
+        Fix is structural: never tell the model what it IS, only what
+        its JOB is and what RULES to follow.  The model then falls
+        through to its own training-default generic-assistant identity
+        when asked, instead of reflecting an internal architecture
+        term.
+
+        Guard: no 'You are <internal-role-name>' positive identity
+        statement may appear in the built prompt.
+        """
+        built = dispatcher._build_draft_classifier_prompt('who are you?')
+        for forbidden in (
+            'You are a fast local first-responder',
+            'You are the first-responder',
+            'You are a draft',
+            'You are a classifier',
+            'You are a fast model',
+            'You are a local model',
+        ):
+            assert forbidden not in built, (
+                f"prompt leaked internal role identity: {forbidden!r}"
+            )
 
     def test_persona_is_prepended(self, dispatcher):
         persona = (

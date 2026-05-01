@@ -126,10 +126,50 @@ def is_bundled() -> bool:
 
 
 def get_db_url() -> str:
-    """Database API base URL (replaces hardcoded mailer.hertzai.com)."""
+    """Database API base URL (replaces hardcoded mailer.hertzai.com).
+
+    Resolves to the LOCAL Nunba backend in bundled mode — every
+    db_routes.py endpoint (/create_action, /createpromptlist,
+    /getprompt, /getprompt_onlyuserid, /getprompt_all, …) is mounted
+    on the same Flask process, so the same DB_URL covers
+    write+read+update from inside the bundled app.
+
+    For cross-device CLOUD reads (e.g. /prompts wants to merge in
+    agents the user owns on hevolve.ai but never synced down to this
+    machine), use get_central_db_url() instead — that one always
+    points at the central cloud regardless of bundle mode.
+    """
     if is_bundled():
         return _local_base()
     return get_secret('DB_URL', get_config().get('IP_ADDRESS', {}).get('database_url', ''))
+
+
+# Central cloud DB base URL.  Pinned to the kong-routed central
+# instance; does NOT collapse to localhost in bundled mode the way
+# get_db_url() does.  Override with HEVOLVE_CENTRAL_DB_URL when
+# running against a private Hevolve installation.  Resolves to '' if
+# the env override is set to empty, which callers must treat as
+# "no central available — skip cross-device merge".
+_DEFAULT_CENTRAL_DB_URL = 'https://azurekong.hertzai.com:8443/db'
+
+
+def get_central_db_url() -> str:
+    """Central cloud DB base URL — always the central instance.
+
+    Used by readers that want cross-device data (e.g. /prompts merging
+    in agents created on another device, /prompts/public showing
+    cloud-only catalogue entries).  Distinct from get_db_url() because
+    that one collapses to localhost in bundled mode and would silently
+    no-op the merge.
+
+    Default: kong-routed central instance.  Override:
+        HEVOLVE_CENTRAL_DB_URL=https://my-private-cloud:8443/db
+    Empty override is honored ('' = disable cross-device reads).
+    """
+    override = os.environ.get('HEVOLVE_CENTRAL_DB_URL')
+    if override is not None:
+        return override
+    return _DEFAULT_CENTRAL_DB_URL
 
 
 def get_action_api() -> str:

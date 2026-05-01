@@ -219,6 +219,13 @@ local_scheme = "no-local-version"
 fallback_version = "0.0.0"
 write_to = "hart_version.py"
 tag_regex = "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+# Pre-filter at the `git describe` level so CI-created `nightly-*`
+# tags (which are commit-id + run-id artifacts, NOT semver) never
+# reach the version parser.  Without this, vcs_versioning asserts on
+# the unparseable tag before tag_regex (above) gets a chance to
+# fall back — build dies with `AssertionError: version is not None`
+# at vcs_versioning/_scm_version.py:329.
+git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*"]
 
 [tool.black]
 line-length = 100

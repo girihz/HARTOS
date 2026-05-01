@@ -2478,7 +2478,10 @@ def create_agents_for_user(user_id: str, prompt_id) -> Tuple[autogen.AssistantAg
             register_ip_protection_tools(helper, assistant, user_id)
             current_app.logger.info("IP protection tools loaded (Tier 2) for reuse agent")
     except Exception as e:
-        current_app.logger.debug(f"Goal-aware tool loading skipped: {e}")
+        # Same observability promotion as create_recipe.py — a failure
+        # here strips the agent of goal-specific tools, agent talks
+        # without acting.  Caught loud so future regressions surface.
+        current_app.logger.warning(f"Goal-aware tool loading FAILED: {e}")
 
     assistant.description = 'Designed to handle specific tasks by interacting directly with other agents or the user. It acts as the primary orchestrator for task management and ensures tasks are completed efficiently'
     user_proxy.description = 'Acts as a user, performing tasks assigned by the Assistant Agent. It simulates user actions and provides results or feedback as required.'

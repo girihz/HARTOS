@@ -1416,8 +1416,16 @@ RAG_API = config.get('RAG_API', '')
 from core.config_cache import (
     get_db_url, get_action_api, get_student_api,
     get_vision_api, get_book_parsing_api, is_bundled as _config_is_bundled,
+    get_central_db_url,
 )
 DB_URL = get_db_url()
+# Distinct from DB_URL: always points at the central cloud (kong-routed)
+# instead of collapsing to localhost in bundled mode.  Used by /prompts
+# and /prompts/public to merge in agents the user owns on hevolve.ai
+# but never synced down to this machine.  Empty string disables the
+# cross-device merge (local-only listing) — matches the same fail-quiet
+# contract _merge_prompts_with_cloud already has on cloud failures.
+CENTRAL_DB_URL = get_central_db_url()
 ACTION_API = get_action_api()
 STUDENT_API = get_student_api()
 LLAVA_API = get_vision_api()
@@ -7555,9 +7563,38 @@ def _create_social_agent_from_prompt(user_id, prompt_id):
 # Local-first Prompt CRUD (syncs to cloud DB)
 # ═══════════════════════════════════════════════════════════════
 
+def _merge_prompts_with_cloud(local_prompts: list, cloud_url: str) -> list:
+    """Append cloud prompts to ``local_prompts``, dedup by prompt_id.
+
+    Local-first: when the same prompt_id exists in both, the local copy
+    is kept (it carries the newer recipe payload + filesystem-side
+    metadata).  Cloud failures are swallowed so a flaky DB never
+    breaks the local-only listing — same best-effort contract both
+    /prompts and /prompts/public have always offered.
+
+    Single source of truth for the merge so /prompts (user-scoped) and
+    /prompts/public (catalogue) cannot drift in dedup logic, error
+    handling, or the 'cloud'/'has_recipe' field defaults.
+    """
+    local_ids = {str(p.get('prompt_id', '')) for p in local_prompts}
+    try:
+        res = pooled_get(cloud_url, timeout=5)
+        if res.status_code == 200:
+            for item in (res.json() or []):
+                if str(item.get('prompt_id', '')) in local_ids:
+                    continue
+                item['source'] = 'cloud'
+                item.setdefault('has_recipe', False)
+                local_prompts.append(item)
+    except Exception:
+        pass
+    return local_prompts
+
+
 @app.route('/prompts', methods=['GET'])
 def get_prompts():
-    """List prompts for a user. Local-first, cloud DB fallback."""
+    """List prompts for a user.  Local files (filtered by creator) merged
+    with the user's cloud-side prompts via _merge_prompts_with_cloud."""
     req_user_id = request.args.get('user_id', '')
     if not req_user_id:
         return jsonify({'error': 'user_id required'}), 400
@@ -7590,27 +7627,24 @@ def get_prompts():
                 except Exception:
                     continue
 
-    # 2. Fallback: try cloud DB if no local results
-    if not prompts:
-        try:
-            res = pooled_get(
-                f'{DB_URL}/getprompt_onlyuserid/?user_id={req_user_id}',
-                timeout=5)
-            if res.status_code == 200:
-                cloud_data = res.json()
-                for item in cloud_data:
-                    item['source'] = 'cloud'
-                    item['has_recipe'] = False
-                prompts = cloud_data
-        except Exception:
-            pass
+    # 2. Merge in cloud-only agents the user owns on hevolve.ai —
+    # the local store doesn't know about agents the user created from
+    # another device.  Powers Nunba's "Hybrid" intelligence preference.
+    # MUST use CENTRAL_DB_URL not DB_URL — in bundled Nunba mode DB_URL
+    # collapses to http://localhost:5000 (this same Flask process), so
+    # merging would just hit our own /getprompt_onlyuserid handler and
+    # see the same local prompts again — silent no-op.
+    if CENTRAL_DB_URL:
+        _merge_prompts_with_cloud(
+            prompts,
+            f'{CENTRAL_DB_URL}/getprompt_onlyuserid/?user_id={req_user_id}')
 
     return jsonify(prompts)
 
 
 @app.route('/prompts/public', methods=['GET'])
 def get_public_prompts():
-    """Return all public prompts/agents. Local-first, cloud DB fallback.
+    """Return all public prompts/agents.  Local-first, cloud-merge.
     Equivalent to the legacy /getprompt_all/ cloud endpoint."""
     prompts = []
 
@@ -7642,18 +7676,12 @@ def get_public_prompts():
                 except Exception:
                     continue
 
-    # 2. Also fetch from cloud DB to get remote-only agents
-    try:
-        res = pooled_get(f'{DB_URL}/getprompt_all/', timeout=5)
-        if res.status_code == 200:
-            cloud_data = res.json()
-            local_ids = {str(p['prompt_id']) for p in prompts}
-            for item in cloud_data:
-                if str(item.get('prompt_id', '')) not in local_ids:
-                    item['source'] = 'cloud'
-                    prompts.append(item)
-    except Exception:
-        pass
+    # 2. Merge in cloud-only public agents.  Same central-vs-local-DB_URL
+    # rationale as /prompts above — DB_URL is localhost in bundled mode
+    # and would no-op the merge.
+    if CENTRAL_DB_URL:
+        _merge_prompts_with_cloud(
+            prompts, f'{CENTRAL_DB_URL}/getprompt_all/')
 
     return jsonify(prompts)
 
