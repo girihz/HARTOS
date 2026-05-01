@@ -417,7 +417,39 @@ class TestPersonaInjection:
     def test_no_persona_no_persona_block(self, dispatcher):
         built = dispatcher._build_draft_classifier_prompt('hi there')
         assert 'persona' not in built.lower()
-        assert 'You are a fast local first-responder' in built
+        # The job preamble + answering rules must both be present so the
+        # 0.8B knows what to do with the JSON schema below.
+        assert 'Your job is to produce a short reply' in built
+        assert 'ANSWERING RULES' in built
+
+    def test_prompt_has_no_identity_statement(self, dispatcher):
+        """Regression: the 3ea8648 prompt opened with 'You are a fast
+        local first-responder' and the role contract reinforced 'You
+        are the first-responder, NOT the authority' — the 0.8B then
+        echoed it verbatim on 'who are you?', producing 'I'm your fast
+        local first-responder, ready to assist you right away.'
+
+        Fix is structural: never tell the model what it IS, only what
+        its JOB is and what RULES to follow.  The model then falls
+        through to its own training-default generic-assistant identity
+        when asked, instead of reflecting an internal architecture
+        term.
+
+        Guard: no 'You are <internal-role-name>' positive identity
+        statement may appear in the built prompt.
+        """
+        built = dispatcher._build_draft_classifier_prompt('who are you?')
+        for forbidden in (
+            'You are a fast local first-responder',
+            'You are the first-responder',
+            'You are a draft',
+            'You are a classifier',
+            'You are a fast model',
+            'You are a local model',
+        ):
+            assert forbidden not in built, (
+                f"prompt leaked internal role identity: {forbidden!r}"
+            )
 
     def test_persona_is_prepended(self, dispatcher):
         persona = (

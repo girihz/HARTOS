@@ -617,30 +617,38 @@ class SpeculativeDispatcher:
         return (
             persona_block
             + lang_block
-            + "You are a fast local first-responder. Produce a short reply AND "
+            # ── Job + answering rules — size-agnostic, identity-free ─────
+            # Same wording works whether the draft is 0.8B, 4B, or 27B.
+            # The model in this slot does NOT see the full tool registry
+            # (web fetch, code exec, GitHub, filesystem, vision, computer
+            # control, MCP servers, channels), the user's loaded persona,
+            # multi-turn memory, or the ReAct loop — so it must never
+            # refuse on behalf of the system.
+            #
+            # Carefully avoids any "You are <X>" identity sentence.  The
+            # 3ea8648 prompt opened with "You are a fast local first-
+            # responder" and the model would echo it verbatim on "who
+            # are you?" → "I'm your fast local first-responder, ready
+            # to assist you right away."  All instructions below are
+            # phrased as the *job* and *rules*, never as identity, so the
+            # model has no internal role-name to reflect back.  When the
+            # user asks who they're talking to and no persona is loaded
+            # above, the model falls through to its own training-default
+            # generic-assistant identity.
+            + "Your job is to produce a short reply to the user AND "
             "classify the user's intent on several independent axes. The "
-            "classification flags are what route the message downstream — "
-            "be accurate.\n\n"
-            # ── First-responder role contract — size-agnostic ─────────────
-            # Same wording is correct whether the draft is 0.8B, 4B, or 27B.
-            # Even a capable large draft model in this slot does NOT see the
-            # full tool registry (web fetch, code exec, GitHub, filesystem,
-            # vision, computer control, MCP-attached servers, channels), the
-            # user's loaded persona / agent_config, multi-turn memory, or the
-            # ReAct loop.  Only the expert role can decide capability
-            # boundaries.  The first-responder must NEVER refuse on behalf
-            # of the system.
-            "ROLE CONTRACT — READ BEFORE ANSWERING:\n"
-            "You are the first-responder, NOT the authority.  You do not "
-            "know which tools, integrations, or capabilities the expert "
-            "role has — that set is dynamic, user-installed, and not "
-            "visible to you.  Therefore:\n"
+            "classification flags route the message downstream — be "
+            "accurate.\n\n"
+            "ANSWERING RULES — READ BEFORE REPLYING:\n"
+            "You only see this single turn. The system's actual tool / "
+            "integration / capability set is dynamic and not visible from "
+            "here — so you don't get to decide what the system can or "
+            "can't do.  Therefore:\n"
             "- NEVER write 'I cannot', 'I don't have access', 'I'm unable', "
             "'I'm just a', 'I do not have the ability', or any phrase "
-            "asserting the system can't do something.  You don't get to "
-            "decide that.\n"
+            "asserting the system can't do something.\n"
             "- NEVER claim no internet/tools/file access; you have no way "
-            "to verify what is or isn't reachable from the expert role.\n"
+            "to verify what is or isn't reachable.\n"
             "- You MAY answer directly ONLY for trivial recall, simple "
             "math, greetings, or questions that need NO live data, NO "
             "external system access, NO filesystem, NO code execution, "
@@ -650,12 +658,11 @@ class SpeculativeDispatcher:
             "delegate=\"local\" (or \"hive\" for very large requests) "
             "and write a brief standby reply such as \"Let me check that "
             "for you…\", \"Looking that up…\", or \"One moment…\".  The "
-            "standby will be replaced by the expert's actual answer "
-            "automatically — your only job is to keep the user comfortable "
-            "while the authoritative path runs.\n"
-            "- Refusals are the expert's job, and only after consulting "
-            "actual tools.  If you ever feel the urge to refuse: pick a "
-            "standby instead and delegate.\n\n"
+            "standby is replaced by the authoritative answer automatically "
+            "— your only job is to keep the user comfortable while that "
+            "runs.\n"
+            "- Refusals are not your call.  If you ever feel the urge to "
+            "refuse: pick a standby instead and delegate.\n\n"
             f"User: {user_prompt}\n\n"
             "Respond with ONE JSON object on a single line and NOTHING else:\n"
             '{"reply": "<your short reply to the user, 1-3 sentences>", '
