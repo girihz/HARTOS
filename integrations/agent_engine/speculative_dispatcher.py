@@ -113,6 +113,25 @@ _REFUSAL_PATTERN = re.compile(
 _REFUSAL_STANDBY_REPLY = "Let me check that for you…"
 
 
+def _capability_summary_safe() -> str:
+    """Return the runtime capability summary for the draft prompt, or
+    an empty string when the helper itself can't be imported.
+
+    Lazy import — tool_allowlist pulls model_registry / ModelCatalog /
+    MCP / channel subsystems on first call.  In bare unit-test envs
+    those aren't loaded, so we treat any failure as 'no summary' and
+    let the rest of the prompt carry on.  Empty string is the signal
+    the f-string in _build_draft_classifier_prompt skips the section.
+    """
+    try:
+        from integrations.agent_engine.tool_allowlist import (
+            get_capability_summary,
+        )
+        return get_capability_summary() or ""
+    except Exception:
+        return ""
+
+
 class SpeculativeDispatcher:
     """Fast-first, expert-takeover speculative execution engine.
 
@@ -614,6 +633,16 @@ class SpeculativeDispatcher:
                 f"{_tone}\n\n"
             )
 
+        # Compute the runtime capability summary ONCE per prompt build so
+        # the static-tools / ModelCatalog / MCP / channel walks don't run
+        # twice for the conditional injection below.
+        cap_summary = _capability_summary_safe()
+        cap_block = (
+            f"Available capabilities (the system can do these via the "
+            f"routing path below): {cap_summary}.\n\n"
+            if cap_summary else ""
+        )
+
         return (
             persona_block
             + lang_block
@@ -639,7 +668,13 @@ class SpeculativeDispatcher:
             "classify the user's intent on several independent axes. The "
             "classification flags route the message downstream — be "
             "accurate.\n\n"
-            "ANSWERING RULES — READ BEFORE REPLYING:\n"
+            # Positive capability summary — primary teaching mechanism so
+            # the model knows what the system CAN do.  Auto-discovered:
+            # static tool list + ModelCatalog (TTS/STT/VLM/video/audio,
+            # rolled up by type) + MCP servers + channels + expert-agent
+            # categories.  Computed once into cap_block above.
+            + cap_block
+            + "ANSWERING RULES — READ BEFORE REPLYING:\n"
             "You only see this single turn. The system's actual tool / "
             "integration / capability set is dynamic and not visible from "
             "here — so you don't get to decide what the system can or "

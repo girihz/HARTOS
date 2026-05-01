@@ -422,6 +422,44 @@ class TestPersonaInjection:
         assert 'Your job is to produce a short reply' in built
         assert 'ANSWERING RULES' in built
 
+    def test_prompt_carries_capability_summary(self, dispatcher):
+        """The draft must see a positive capability list so it knows
+        what the system CAN do — primary teaching mechanism that
+        replaces relying solely on negative 'never refuse' rules.
+
+        Auto-discovered from tool_allowlist + ModelCatalog + MCP +
+        channels + expert agents.  The test environment has at least
+        the static tool slice loaded (tool_allowlist is import-pure),
+        so 'web search' should appear regardless of which optional
+        subsystems are wired up at test time.
+        """
+        built = dispatcher._build_draft_classifier_prompt('hi there')
+        assert 'Available capabilities' in built, (
+            "draft prompt missing the positive capability summary"
+        )
+        # Static tool slice is always present; one canonical entry
+        # acts as the smoke check that summary plumbing is wired.
+        assert 'web search' in built
+
+    def test_every_static_tool_has_description(self):
+        """Drift guard: every name in _FAST_TOOLS|_BALANCED_TOOLS must
+        have an entry in _TOOL_DESCRIPTIONS, otherwise a new tool
+        added at the allowlist gets surfaced to the draft prompt by
+        its raw identifier ('post_content' instead of 'post content')
+        — workable but ugly.  Catches the drift on PR rather than in
+        prod.
+        """
+        from integrations.agent_engine.tool_allowlist import (
+            _FAST_TOOLS, _BALANCED_TOOLS, _TOOL_DESCRIPTIONS,
+        )
+        all_tools = _FAST_TOOLS | _BALANCED_TOOLS
+        missing = sorted(all_tools - set(_TOOL_DESCRIPTIONS))
+        assert not missing, (
+            f"_TOOL_DESCRIPTIONS is missing entries for: {missing}.  "
+            "Add a ≤3-word phrase per name so the draft prompt's "
+            "capability summary stays human-readable."
+        )
+
     def test_prompt_has_no_identity_statement(self, dispatcher):
         """Regression: the 3ea8648 prompt opened with 'You are a fast
         local first-responder' and the role contract reinforced 'You
