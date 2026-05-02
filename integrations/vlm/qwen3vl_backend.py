@@ -671,6 +671,158 @@ class Qwen3VLBackend:
         result.setdefault('strategy', 'describe_first')
         return result
 
+    # ─── Shared grounding-strategy helpers ──────────────────────────────
+    # Extracted from point_and_act so the multi-iteration agentic loop
+    # (integrations/vlm/local_loop.py) can use them too.  point_and_act
+    # is intentionally LEFT UNCHANGED in this commit — it keeps its
+    # inline copies of the same logic so its end-to-end behaviour is
+    # byte-identical.  The duplication is deliberate-for-now: it means
+    # this change is strictly additive (loop GAINS strategies, no other
+    # caller's behaviour shifts).  A follow-up DRY pass can replace
+    # point_and_act's inlined code with calls to these helpers once
+    # the loop integration has soaked.
+    #
+    # Why it matters: commit 8fa6e97 (Apr 10, 2026 — "Single VLM call:
+    # plan + ground in one prompt — halves per-step latency") moved the
+    # loop OFF point_and_act onto its own inline prompt to halve
+    # latency.  That trade-off shipped the latency win but silently
+    # dropped point_and_act's smart grounding (taskbar_list shortcut +
+    # center/bottom/top-edge bias detection + elimination_retry).
+    # These helpers restore those strategies to the loop without
+    # paying point_and_act's two-phase latency cost.
+
+    def try_taskbar_pre_check(self, screenshot_b64, task,
+                              screen_w, screen_h, started_at):
+        """Pre-VLM-call taskbar shortcut.
+
+        When the task targets a taskbar item ("open Chrome", "click
+        Start button", etc.), skip the heavy describe_first VLM call
+        and use _taskbar_list_lookup directly.  Returns the click
+        action dict on a hit, None on a miss (caller falls through to
+        its normal VLM grounding path).
+
+        Args:
+            screenshot_b64: current screen as base64 (JPEG/PNG)
+            task: user instruction
+            screen_w, screen_h: physical screen pixel dimensions for
+                pyautogui coordinate scaling (norm 0-1000 → screen px)
+            started_at: time.time() value from the caller's start —
+                used to compute total latency for telemetry parity
+                with point_and_act.
+
+        Returns:
+            dict (point_and_act-compatible action shape) or None.
+        """
+        if not self._is_taskbar_task(task):
+            return None
+        logger.info(f"Using taskbar_list strategy for: {task}")
+        match, list_raw = self._taskbar_list_lookup(screenshot_b64, task)
+        if not match:
+            logger.info("taskbar_list: no match found, falling through")
+            return None
+        nx, ny, match_line = match
+        px = int(nx * screen_w / 1000)
+        py = int(ny * screen_h / 1000)
+        return {
+            'action': 'left_click',
+            'screen_x': px, 'screen_y': py,
+            'norm_x': nx, 'norm_y': ny,
+            'text': '', 'done': False,
+            'reasoning': f'taskbar_list: {match_line}',
+            'raw': list_raw,
+            'latency': time.time() - started_at,
+            'strategy': 'taskbar_list',
+        }
+
+    def detect_grounding_bias(self, nx, ny, action, task):
+        """Pure-function bias detector for VLM-grounded click coords.
+
+        Returns 'center' | 'bottom-edge' | 'top-edge' | None.  Mirrors
+        the inline checks in point_and_act so the loop can ask the
+        same question on its own grounded coords.  Coordinates are
+        in 0-1000 normalized space.
+        """
+        if nx is None or ny is None or action != 'left_click':
+            return None
+        is_center = (350 < nx < 650 and 350 < ny < 650)
+        task_lower = task.lower()
+        task_is_taskbar = self._is_taskbar_task(task) or any(
+            kw in task_lower for kw in
+            ('taskbar', 'start button', 'system tray')
+        )
+        is_bottom_edge = (ny > 930 and not task_is_taskbar)
+        is_top_edge = (ny < 30)
+        if is_bottom_edge:
+            return 'bottom-edge'
+        if is_top_edge:
+            return 'top-edge'
+        if is_center:
+            return 'center'
+        return None
+
+    def retry_with_elimination(self, screenshot_b64, task,
+                               img_w, img_h, bias_kind):
+        """Elimination-retry VLM call for biased coordinates.
+
+        When detect_grounding_bias flags a coord, this re-asks the VLM
+        with a more pointed prompt (top/bottom/left/right thirds,
+        avoid taskbar strip).  Returns (result, nx, ny) on a clean
+        re-grounding, None when the retry reproduces the same bias
+        (caller keeps the original coords).
+
+        bias_kind: one of 'center' | 'bottom-edge' | 'top-edge'.
+        """
+        logger.info(
+            f"{bias_kind}-biased coords for non-taskbar task, "
+            f"retrying with elimination strategy"
+        )
+        elim_prompt = (
+            f'I need to find the target for: {task}\n'
+            f'Describe its location precisely BEFORE giving coordinates:\n'
+            f'  - Top half or bottom half?\n'
+            f'  - Left third, middle third, or right third?\n'
+            f'  - Is it inside a window, in a menu, or on the taskbar?\n'
+            f'If the task asks to open an app and that app is not '
+            f'already visible, the correct action is usually NOT a '
+            f'click — respond with DONE and I will use a keyboard '
+            f'shortcut instead.\n'
+            f'Otherwise, give the precise <point>x,y</point> (0-1000 normalized) '
+            f'and avoid the taskbar strip (y > 930) unless the target '
+            f'is an actual taskbar icon.'
+        )
+        elim_raw = self._call_api([{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": elim_prompt},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/jpeg;base64,{screenshot_b64}"
+                }},
+            ]
+        }])
+        elim_result, enx, eny = self._parse_action_response(
+            elim_raw, img_w, img_h, task=task,
+        )
+        # Reject only if the retry reproduced the original bias.
+        if enx is None or eny is None:
+            return None
+        if bias_kind == 'bottom-edge':
+            task_lower = task.lower()
+            task_is_taskbar = self._is_taskbar_task(task) or any(
+                kw in task_lower for kw in
+                ('taskbar', 'start button', 'system tray')
+            )
+            if eny > 930 and not task_is_taskbar:
+                return None
+        elif bias_kind == 'top-edge':
+            if eny < 30:
+                return None
+        elif bias_kind == 'center':
+            if 350 < enx < 650 and 350 < eny < 650:
+                return None
+        elim_result['strategy'] = 'elimination_retry'
+        logger.info(f"Elimination retry gave ({enx},{eny}) — using it")
+        return elim_result, enx, eny
+
     def verify_goal(self, screenshot_b64, goal):
         """Check if the goal is achieved by looking at the current screenshot.
 

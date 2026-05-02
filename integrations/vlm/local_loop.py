@@ -269,54 +269,116 @@ def run_local_agentic_loop(
                 # Halves latency: ~10s per step instead of ~20s.
                 from integrations.vlm.local_computer_tool import VLM_IMG_W, VLM_IMG_H
 
-                combined_prompt = (
-                    f"You are a computer use agent on {_os_name}.\n"
-                    f"Task: {enhanced}\n\n"
-                )
-                if extracted_responses:
-                    last = extracted_responses[-1].get('content', '')
-                    if isinstance(last, dict):
-                        combined_prompt += (
-                            f"Previous action: {last.get('action', '?')} — "
-                            f"{last.get('reasoning', '')[:80]}.\n"
-                            f"Check the screenshot: did it succeed?\n\n"
+                # Taskbar pre-check (additive — restores point_and_act's
+                # smart strategy that 8fa6e97 dropped when this loop
+                # adopted its own inline prompt).  When the task targets
+                # a taskbar item ("open Chrome", "click Start", etc.),
+                # _taskbar_list_lookup short-circuits the VLM call
+                # entirely and returns a click coord direct from the
+                # taskbar enumeration — typically <1s vs the 5-10s a
+                # full VLM grounding takes.  On miss, returns None and
+                # the existing inline prompt path runs unchanged.
+                _step_started = time.time()
+                try:
+                    import pyautogui as _pag_pre
+                    _sw_pre, _sh_pre = _pag_pre.size()
+                except Exception:
+                    _sw_pre = _sh_pre = None
+                _taskbar_action = None
+                if _sw_pre and _sh_pre:
+                    try:
+                        _taskbar_action = qwen3vl.try_taskbar_pre_check(
+                            screenshot_b64, enhanced,
+                            _sw_pre, _sh_pre, _step_started,
                         )
-                combined_prompt += (
-                    _VLM_ACTION_LIST +
-                    "\n"
-                    "What is the SINGLE next action? Respond in JSON ONLY:\n"
-                    "{\n"
-                    '  "Reasoning": "What you see and why this action",\n'
-                    '  "Next Action": "left_click|right_click|double_click|'
-                    'type|key|hotkey|scroll_up|scroll_down|wait|shell|'
-                    'open_file_gui|None",\n'
-                    '  "coordinate": [x, y],\n'
-                    '  "value": "text to type or key name",\n'
-                    '  "command": "shell command when Next Action is shell",\n'
-                    '  "path": "file or app name when Next Action is open_file_gui",\n'
-                    '  "Status": "IN_PROGRESS|DONE"\n'
-                    "}\n\n"
-                    "For click actions: provide <point>x,y</point> normalized "
-                    "0-1000 coordinates.\n"
-                    "For type/key/hotkey: set coordinate to null, put text in value.\n"
-                    "Only fall back to clicks when the task requires interacting "
-                    "with something already visible on screen that cannot be "
-                    "done via a command.\n"
-                    'When task is complete: "Next Action": "None", "Status": "DONE".'
-                )
+                    except Exception as _tb_err:
+                        logger.debug(
+                            f"taskbar_pre_check failed (non-fatal): {_tb_err}")
+                if _taskbar_action is not None:
+                    # Use the taskbar lookup result directly — skip the
+                    # combined-prompt VLM call below.  Build an
+                    # action_json shape compatible with the rest of the
+                    # iteration body.
+                    action_json = {
+                        'Reasoning': _taskbar_action.get('reasoning', ''),
+                        'Next Action': _taskbar_action.get('action', 'left_click'),
+                        'coordinate': [
+                            _taskbar_action.get('screen_x'),
+                            _taskbar_action.get('screen_y'),
+                        ],
+                        'value': '',
+                        'Status': 'IN_PROGRESS',
+                        '_strategy': 'taskbar_list',
+                    }
+                    raw = _taskbar_action.get('raw', '')
+                    logger.info(
+                        f"Loop: taskbar_list shortcut → "
+                        f"({_taskbar_action.get('screen_x')},"
+                        f"{_taskbar_action.get('screen_y')})"
+                    )
+                    # Fall through to the existing post-action handling
+                    # below (which executes action_json + records it).
+                    # Skip the combined_prompt + _call_api block.
+                    _skip_combined_prompt = True
+                else:
+                    _skip_combined_prompt = False
 
-                raw = qwen3vl._call_api([{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": combined_prompt},
-                        {"type": "image_url", "image_url": {
-                            "url": f"data:image/jpeg;base64,{screenshot_b64}"}},
-                    ]
-                }])
-                # Guard against None (e.g. thinking-only response with no content)
-                if raw is None:
-                    raw = ''
-                action_json = _parse_vlm_response(raw)
+                # Skip the heavy combined-prompt VLM call entirely when
+                # taskbar_pre_check above already produced a click —
+                # the taskbar lookup is the authoritative grounding for
+                # taskbar tasks (point_and_act has used the same
+                # short-circuit since cb92a2e).  Without this guard the
+                # _call_api below would overwrite action_json with a
+                # less-grounded result.
+                if not _skip_combined_prompt:
+                    combined_prompt = (
+                        f"You are a computer use agent on {_os_name}.\n"
+                        f"Task: {enhanced}\n\n"
+                    )
+                    if extracted_responses:
+                        last = extracted_responses[-1].get('content', '')
+                        if isinstance(last, dict):
+                            combined_prompt += (
+                                f"Previous action: {last.get('action', '?')} — "
+                                f"{last.get('reasoning', '')[:80]}.\n"
+                                f"Check the screenshot: did it succeed?\n\n"
+                            )
+                    combined_prompt += (
+                        _VLM_ACTION_LIST +
+                        "\n"
+                        "What is the SINGLE next action? Respond in JSON ONLY:\n"
+                        "{\n"
+                        '  "Reasoning": "What you see and why this action",\n'
+                        '  "Next Action": "left_click|right_click|double_click|'
+                        'type|key|hotkey|scroll_up|scroll_down|wait|shell|'
+                        'open_file_gui|None",\n'
+                        '  "coordinate": [x, y],\n'
+                        '  "value": "text to type or key name",\n'
+                        '  "command": "shell command when Next Action is shell",\n'
+                        '  "path": "file or app name when Next Action is open_file_gui",\n'
+                        '  "Status": "IN_PROGRESS|DONE"\n'
+                        "}\n\n"
+                        "For click actions: provide <point>x,y</point> normalized "
+                        "0-1000 coordinates.\n"
+                        "For type/key/hotkey: set coordinate to null, put text in value.\n"
+                        "Only fall back to clicks when the task requires interacting "
+                        "with something already visible on screen that cannot be "
+                        "done via a command.\n"
+                        'When task is complete: "Next Action": "None", "Status": "DONE".'
+                    )
+
+                    raw = qwen3vl._call_api([{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": combined_prompt},
+                            {"type": "image_url", "image_url": {
+                                "url": f"data:image/jpeg;base64,{screenshot_b64}"}},
+                        ]
+                    }])
+                    # Guard against None (e.g. thinking-only response with no content)
+                    if raw is None:
+                        raw = ''
+                    action_json = _parse_vlm_response(raw)
 
                 # Extract coordinates from <point>x,y</point> if present in raw
                 next_action = action_json.get('Next Action', 'None')
@@ -352,6 +414,63 @@ def run_local_agentic_loop(
                     action_json['coordinate'] = [screen_x, screen_y]
                     logger.info(f"Action: {next_action} at ({screen_x},{screen_y}) "
                                 f"norm=({nx},{ny})")
+
+                    # Bias-detection + elimination retry — additive
+                    # restoration of point_and_act's strategy 3 that
+                    # 8fa6e97 dropped when this loop adopted its own
+                    # inline prompt.  Catches center/bottom/top-edge
+                    # hallucinations in the 0-1000 normalized coords
+                    # the loop just produced and reissues the VLM with
+                    # an elimination prompt that explicitly forbids
+                    # the suspect region.  Skipped when the action
+                    # came from taskbar_pre_check (its coords are
+                    # already lookup-grounded, no need to retry).
+                    # All wrapped in try/except so a retry-time error
+                    # NEVER takes down the iteration — original coords
+                    # remain in action_json.
+                    if action_json.get('_strategy') != 'taskbar_list':
+                        try:
+                            _bias = qwen3vl.detect_grounding_bias(
+                                nx, ny, 'left_click', enhanced,
+                            )
+                            if _bias:
+                                _retry = qwen3vl.retry_with_elimination(
+                                    screenshot_b64, enhanced,
+                                    VLM_IMG_W, VLM_IMG_H, _bias,
+                                )
+                                if _retry is not None:
+                                    _r_dict, _enx, _eny = _retry
+                                    nx, ny = _enx, _eny
+                                    # Re-scale retry coords to screen
+                                    # space using the same rule as the
+                                    # original (0-1000 vs image-pixel).
+                                    try:
+                                        import pyautogui as _pag_r
+                                        _swr, _shr = _pag_r.size()
+                                        if nx <= 1000 and ny <= 1000:
+                                            screen_x = int(nx * _swr / 1000)
+                                            screen_y = int(ny * _shr / 1000)
+                                        else:
+                                            screen_x = int(nx * _swr / VLM_IMG_W)
+                                            screen_y = int(ny * _shr / VLM_IMG_H)
+                                    except Exception:
+                                        screen_x, screen_y = nx, ny
+                                    action_json['coordinate'] = [
+                                        screen_x, screen_y,
+                                    ]
+                                    action_json['_strategy'] = (
+                                        'elimination_retry'
+                                    )
+                                    logger.info(
+                                        f"Loop bias retry ({_bias}) → "
+                                        f"({screen_x},{screen_y}) "
+                                        f"norm=({nx},{ny})"
+                                    )
+                        except Exception as _bias_err:
+                            logger.debug(
+                                f"bias retry failed (non-fatal, "
+                                f"keeping original coords): {_bias_err}"
+                            )
                     # Sanity check: flag clicks in the likely taskbar region.
                     # If the VLM's reasoning talks about a Start menu item or
                     # app window but the coordinate lands in the bottom 50px,
