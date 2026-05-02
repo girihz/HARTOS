@@ -7304,6 +7304,57 @@ def time_agent():
     return jsonify({'response':f'{res}'}), 200
 
 
+@app.route('/api/vlm/stop', methods=['POST'])
+def vlm_stop():
+    """Halt an in-progress VLM computer-use loop for a (user, prompt).
+
+    Ports OmniParser/omnitool/gradio/agentic_rpc.py:/stop into HARTOS
+    proper.  When the user clicks Stop in Nunba's indicator window,
+    the request lands here, the loop's stop flag is set, and the
+    next iteration of run_local_agentic_loop exits cleanly with
+    exit_reason='stopped' before another action runs on the screen.
+
+    Body (JSON):
+        {"user_id": "<uid>", "prompt_id": "<pid>"}
+    Response:
+        {"status": "stopped"|"no_active_session", "user_id", "prompt_id"}
+
+    Empty body / missing prompt_id → bulk-stop every active session
+    for the given user_id.  Empty user_id is rejected (bulk-stop
+    across all users would be a foot-gun).
+    """
+    data = request.get_json(silent=True) or {}
+    user_id = data.get('user_id')
+    prompt_id = data.get('prompt_id')
+
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 400
+
+    from integrations.vlm.local_loop import (
+        request_stop, list_active_sessions,
+    )
+
+    if prompt_id:
+        found = request_stop(str(user_id), str(prompt_id))
+        return jsonify({
+            'status': 'stopped' if found else 'no_active_session',
+            'user_id': str(user_id),
+            'prompt_id': str(prompt_id),
+        }), 200
+
+    # Bulk-stop: every session for this user_id
+    stopped = []
+    for uid, pid in list_active_sessions():
+        if uid == str(user_id):
+            if request_stop(uid, pid):
+                stopped.append({'user_id': uid, 'prompt_id': pid})
+    return jsonify({
+        'status': 'stopped' if stopped else 'no_active_session',
+        'user_id': str(user_id),
+        'stopped_sessions': stopped,
+    }), 200
+
+
 @app.route('/visual_agent',methods=['POST'])
 def visual_agent():
     app.logger.info('GOT REQUEST IN Visual AGENT API')

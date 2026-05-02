@@ -75,6 +75,98 @@ SYSTEM_PROMPT = (
 )
 
 
+# ─── Stop registry — port of OmniParser agentic_rpc.app_state["active_sessions"] ───
+# When the VLM is mid-loop on the user's screen and the user clicks
+# the indicator window's Stop button, Nunba POSTs to /api/vlm/stop on
+# HARTOS.  That handler calls request_stop() below, which sets the
+# user's threading.Event.  The next iteration of run_local_agentic_loop
+# checks the event via _is_stop_requested() and exits cleanly with
+# exit_reason='stopped' instead of running another action on the user's
+# screen.
+#
+# Why threading.Event: pyautogui actions inside an iteration are
+# already synchronous on the loop's thread, so we can't preempt mid-
+# action.  But every action has natural seams (between iterations and
+# after each pyautogui call), and Event.is_set() is a cheap atomic
+# check we can sprinkle there without locking.
+#
+# Why per-(user_id, prompt_id) key: same instance can have multiple
+# concurrent VLM sessions if more than one user is connected.  Stop
+# fires on a specific session, not globally, mirroring OmniParser's
+# active_sessions dict shape.
+import threading as _threading
+
+_vlm_stop_flags: dict = {}              # f"{user_id}:{prompt_id}" -> Event
+_vlm_stop_lock = _threading.Lock()
+
+
+def _stop_key(user_id: str, prompt_id: str) -> str:
+    return f"{user_id}:{prompt_id}"
+
+
+def _register_session(user_id: str, prompt_id: str) -> _threading.Event:
+    """Called by run_local_agentic_loop on entry — creates the Event so
+    a /api/vlm/stop POST can later flip it."""
+    key = _stop_key(user_id, prompt_id)
+    with _vlm_stop_lock:
+        ev = _vlm_stop_flags.get(key)
+        if ev is None:
+            ev = _threading.Event()
+            _vlm_stop_flags[key] = ev
+        else:
+            # Existing flag from a prior session — clear it so this run
+            # starts un-stopped.  Preserves the singleton-Event pattern
+            # without leaking state across runs.
+            ev.clear()
+    return ev
+
+
+def _unregister_session(user_id: str, prompt_id: str) -> None:
+    """Called by run_local_agentic_loop on exit (success or stop) —
+    drops the Event so the dict doesn't grow unbounded."""
+    key = _stop_key(user_id, prompt_id)
+    with _vlm_stop_lock:
+        _vlm_stop_flags.pop(key, None)
+
+
+def _is_stop_requested(user_id: str, prompt_id: str) -> bool:
+    """Cheap check called at iteration boundaries inside the loop."""
+    key = _stop_key(user_id, prompt_id)
+    with _vlm_stop_lock:
+        ev = _vlm_stop_flags.get(key)
+    return bool(ev and ev.is_set())
+
+
+def request_stop(user_id: str, prompt_id: str) -> bool:
+    """Public API — called by /api/vlm/stop in hart_intelligence_entry.py.
+
+    Sets the stop flag on a registered session.  Returns True when a
+    matching session was found, False when the user has no active VLM
+    loop (caller logs accordingly so the UI can distinguish "stopped"
+    from "nothing to stop").
+
+    Pairs with the loop's iteration-boundary check at the top of every
+    iteration.  Stop becomes visible to the loop on its NEXT iteration
+    — typically within 1-3 seconds depending on which step is in
+    flight (screenshot, LLM call, action execution).
+    """
+    key = _stop_key(user_id, prompt_id)
+    with _vlm_stop_lock:
+        ev = _vlm_stop_flags.get(key)
+        if ev is None:
+            return False
+        ev.set()
+    return True
+
+
+def list_active_sessions() -> list:
+    """Return [(user_id, prompt_id), ...] of currently-running VLM
+    loops.  Used by /api/vlm/stop with no payload to bulk-stop, and by
+    diagnostics."""
+    with _vlm_stop_lock:
+        return [tuple(k.split(':', 1)) for k in _vlm_stop_flags.keys()]
+
+
 def run_local_agentic_loop(
     message: dict,
     tier: str,
@@ -141,7 +233,24 @@ def run_local_agentic_loop(
     extracted_responses = []
     start_time = time.time()
 
+    # Register this session in the stop registry so /api/vlm/stop can
+    # signal it.  Cleanup happens just before the final return below
+    # (no try/finally — the existing iteration body wraps every error
+    # in its own try/continue so exceptions never escape this scope).
+    _register_session(user_id, prompt_id)
+
     for iteration in range(max_iterations):
+        # User-requested stop wins over every other exit condition.
+        # Check FIRST so a stop fired during the previous iteration's
+        # action lands at this seam without one more click happening.
+        if _is_stop_requested(user_id, prompt_id):
+            logger.info(
+                f"VLM loop stopped by /api/vlm/stop at iteration "
+                f"{iteration + 1} (user={user_id}, prompt={prompt_id})"
+            )
+            exit_reason = 'stopped'
+            break
+
         elapsed = time.time() - start_time
         if elapsed > max_eta:
             logger.warning(f"VLM loop hit ETA limit ({max_eta}s) at iteration {iteration}")
@@ -355,9 +464,16 @@ def run_local_agentic_loop(
         f"{execution_time:.1f}s (exit_reason={exit_reason})"
     )
 
+    # Drop this session's stop flag so the registry doesn't grow
+    # across runs.  Pairs with _register_session above.
+    _unregister_session(user_id, prompt_id)
+
     # status mirrors exit_reason: only 'done' is a real success. Callers
     # (LangChain router, autogen) can inspect exit_reason to craft an honest
     # response instead of confidently lying when the loop timed out.
+    # 'stopped' is its own honest exit_reason — Nunba's indicator UX
+    # reads it to render the right "Stopped" badge instead of a
+    # generic "incomplete".
     return {
         "status": "success" if exit_reason == 'done' else "incomplete",
         "exit_reason": exit_reason,
