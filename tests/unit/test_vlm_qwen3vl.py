@@ -1726,6 +1726,170 @@ class TestPointAndActBottomEdgeRetry:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Phase 3.5 — complementary path router (memory/vlm_best_of_all_worlds_plan §13)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestRouteTaskHeuristic:
+    """route_task is a pure-keyword classifier (no VLM call).  These
+    are the regression-contract test cases listed in the plan §13:
+    the gate later checks that real benchmark prompts route to the
+    expected path; here we cover the heuristic itself."""
+
+    def setup_method(self, _):
+        from integrations.vlm.qwen3vl_backend import Qwen3VLBackend
+        self.backend = Qwen3VLBackend()
+
+    # ── single_shot (default) ─────────────────────────────────
+    def test_click_start_button_routes_single_shot(self):
+        assert self.backend.route_task('Click the Start button') == 'single_shot'
+
+    def test_tap_play_button_routes_single_shot(self):
+        assert self.backend.route_task('tap the play button') == 'single_shot'
+
+    def test_point_to_x_routes_single_shot(self):
+        assert self.backend.route_task('Point to the Chrome icon') == 'single_shot'
+
+    def test_press_enter_routes_single_shot(self):
+        assert self.backend.route_task('press enter') == 'single_shot'
+
+    def test_empty_task_routes_single_shot(self):
+        assert self.backend.route_task('') == 'single_shot'
+        assert self.backend.route_task(None) == 'single_shot'
+
+    # ── enumerate (parse_and_reason path) ─────────────────────
+    def test_list_all_clickable_routes_enumerate(self):
+        assert self.backend.route_task(
+            'list all clickable elements on screen') == 'enumerate'
+
+    def test_whats_on_screen_routes_enumerate(self):
+        assert self.backend.route_task("what's on screen?") == 'enumerate'
+
+    def test_what_is_on_the_screen_routes_enumerate(self):
+        assert self.backend.route_task('what is on the screen') == 'enumerate'
+
+    def test_show_me_all_buttons_routes_enumerate(self):
+        assert self.backend.route_task(
+            'show me all the buttons') == 'enumerate'
+
+    def test_find_all_links_routes_enumerate(self):
+        assert self.backend.route_task('find all links') == 'enumerate'
+
+    def test_enumerate_keyword_routes_enumerate(self):
+        assert self.backend.route_task(
+            'enumerate the menu items') == 'enumerate'
+
+    def test_every_clickable_routes_enumerate(self):
+        assert self.backend.route_task(
+            'identify every clickable element') == 'enumerate'
+
+    def test_how_many_buttons_routes_enumerate(self):
+        assert self.backend.route_task(
+            'how many buttons are visible') == 'enumerate'
+
+    # ── multi_step (run_local_agentic_loop path) ──────────────
+    def test_open_then_click_routes_multi_step(self):
+        assert self.backend.route_task(
+            'Open Notepad and type Hello') == 'multi_step'
+
+    def test_open_app_and_play_routes_multi_step(self):
+        assert self.backend.route_task(
+            'Open Spotify and play Sgt Pepper') == 'multi_step'
+
+    def test_navigate_to_routes_multi_step(self):
+        assert self.backend.route_task(
+            'navigate to settings') == 'multi_step'
+
+    def test_fill_in_form_routes_multi_step(self):
+        assert self.backend.route_task(
+            'Fill in this form with my email') == 'multi_step'
+
+    def test_step_marker_routes_multi_step(self):
+        assert self.backend.route_task(
+            'Step 1: open the file. Step 2: copy text') == 'multi_step'
+
+    def test_then_click_routes_multi_step(self):
+        assert self.backend.route_task(
+            'Open Chrome then click the search box') == 'multi_step'
+
+    # ── False-positive guards ─────────────────────────────────
+    def test_specialist_does_not_trip_list_pattern(self):
+        """'specialist' contains 'list' — word-boundary anchoring
+        must prevent a false enumerate route."""
+        assert self.backend.route_task(
+            'click the specialist button') == 'single_shot'
+
+    def test_then_inside_word_does_not_trip(self):
+        """'lengthen' / 'strengthen' contain 'then' as substring —
+        word-boundary anchoring must prevent a false multi_step
+        route on a single-action task."""
+        assert self.backend.route_task(
+            'click the strengthen button') == 'single_shot'
+
+
+class TestDispatchGrounding:
+    """dispatch_grounding routes to the right method based on
+    route_task and tags the result with the chosen route."""
+
+    def test_single_shot_route_calls_point_and_act(self, sample_screenshot_b64):
+        from integrations.vlm.qwen3vl_backend import Qwen3VLBackend
+        backend = Qwen3VLBackend()
+        with patch.object(backend, 'point_and_act',
+                          return_value={'action': 'left_click',
+                                        'screen_x': 100, 'screen_y': 200}) as mock_pa, \
+             patch.object(backend, 'parse_and_reason') as mock_pr:
+            result = backend.dispatch_grounding(
+                sample_screenshot_b64, 'Click the OK button')
+        mock_pa.assert_called_once()
+        mock_pr.assert_not_called()
+        assert result['route'] == 'single_shot'
+
+    def test_enumerate_route_calls_parse_and_reason(self, sample_screenshot_b64):
+        from integrations.vlm.qwen3vl_backend import Qwen3VLBackend
+        backend = Qwen3VLBackend()
+        with patch.object(backend, 'parse_and_reason',
+                          return_value={'parsed_content_list': [],
+                                        'action_json': {}}) as mock_pr, \
+             patch.object(backend, 'point_and_act') as mock_pa:
+            result = backend.dispatch_grounding(
+                sample_screenshot_b64, 'list all buttons on screen')
+        mock_pr.assert_called_once()
+        mock_pa.assert_not_called()
+        assert result['route'] == 'enumerate'
+
+    def test_multi_step_route_returns_sentinel(self, sample_screenshot_b64):
+        """multi_step can't call run_local_agentic_loop (circular import);
+        instead returns a sentinel the caller acts on."""
+        from integrations.vlm.qwen3vl_backend import Qwen3VLBackend
+        backend = Qwen3VLBackend()
+        with patch.object(backend, 'point_and_act') as mock_pa, \
+             patch.object(backend, 'parse_and_reason') as mock_pr:
+            result = backend.dispatch_grounding(
+                sample_screenshot_b64, 'Open Notepad and type Hello')
+        mock_pa.assert_not_called()
+        mock_pr.assert_not_called()
+        assert result['route'] == 'multi_step'
+        assert result['recommend'] == 'run_local_agentic_loop'
+        assert result['action'] is None
+
+    def test_explicit_route_override(self, sample_screenshot_b64):
+        """Caller can pass route= to bypass the heuristic — e.g. the
+        loop already decided multi_step and is calling per-iter
+        with route='single_shot'."""
+        from integrations.vlm.qwen3vl_backend import Qwen3VLBackend
+        backend = Qwen3VLBackend()
+        with patch.object(backend, 'point_and_act',
+                          return_value={'action': 'left_click'}) as mock_pa:
+            # Task would normally route enumerate; override forces
+            # single_shot.
+            result = backend.dispatch_grounding(
+                sample_screenshot_b64, 'list all buttons',
+                route='single_shot')
+        mock_pa.assert_called_once()
+        assert result['route'] == 'single_shot'
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Local Computer Tool Tests
 # ═══════════════════════════════════════════════════════════════════════════
 

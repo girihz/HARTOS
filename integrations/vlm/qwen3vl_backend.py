@@ -489,6 +489,134 @@ class Qwen3VLBackend:
 
         return best_match, list_raw
 
+    # ─── Phase 3.5: Complementary path router ──────────────────────────
+    # The keystone of vlm_best_of_all_worlds_plan.md.  The three sibling
+    # methods (point_and_act / parse_and_reason / run_local_agentic_loop)
+    # aren't competitors — each has a real specialty.  route_task picks
+    # the right path per task class instead of always hitting the same
+    # primary first.  See plan §13 for the full design rationale.
+
+    # Compiled at module-import time.  Word-boundary anchored so 'list'
+    # inside 'specialist' doesn't trip the enumerate route.  Patterns
+    # ordered most-specific-first within each list.
+    _ENUMERATE_PATTERNS = [
+        re.compile(r'\blist (?:all|every|each)\b', re.I),
+        re.compile(r"\bwhat(?:\'s| is) on (?:the )?screen\b", re.I),
+        re.compile(r'\bshow me (?:all|every|each)\b', re.I),
+        re.compile(r'\bfind all\b', re.I),
+        re.compile(r'\benumerate\b', re.I),
+        re.compile(r'\bevery (?:clickable|button|icon|element|link|item)\b',
+                   re.I),
+        re.compile(r'\bhow many\b', re.I),
+    ]
+    _MULTI_STEP_PATTERNS = [
+        re.compile(r'\b(?:and then|after that|then click|then type)\b',
+                   re.I),
+        re.compile(r'\bnavigate to\b', re.I),
+        re.compile(r'\bfill (?:in|out)\b', re.I),
+        re.compile(
+            r'\b(?:open|launch|start|run)\b.+\band\b.+'
+            r'\b(?:click|type|select|press|enter|play|search)\b',
+            re.I,
+        ),
+        re.compile(r'\b(?:step \d+|first[,.]?\s+then|step-by-step)\b',
+                   re.I),
+    ]
+
+    def route_task(self, task: str, context: dict = None) -> str:
+        """Pick the best grounding path for *task*.
+
+        Returns one of:
+          ``'enumerate'``   — task asks about multiple/all UI elements
+                              → use :meth:`parse_and_reason` for SoM
+                              bbox view (revives the otherwise-dead path)
+          ``'multi_step'``  — task chains multiple actions
+                              → caller should drive
+                              :func:`integrations.vlm.local_loop.run_local_agentic_loop`
+          ``'single_shot'`` — one action on one target (default)
+                              → use :meth:`point_and_act`
+
+        Heuristic v1 (this implementation): keyword classifier on
+        the task string only.  Fast (microseconds), no VLM call.
+        Plan §13 v2: the draft 0.8B can self-classify in the same
+        prompt that produces the action — defer until v1 baseline
+        is established.
+
+        Empty / None task returns 'single_shot' (the safest default —
+        single VLM call, no over-commitment to a multi-iter loop).
+
+        ``context`` reserved for future use (re-dispatch hints from
+        prior iterations: e.g. the loop's body sees ``Status: DONE``
+        after one click and feeds back ``{'observed_done_after': 1}``
+        which would downgrade a multi_step verdict to single_shot).
+        Currently ignored.
+        """
+        if not task:
+            return 'single_shot'
+        for pat in self._ENUMERATE_PATTERNS:
+            if pat.search(task):
+                return 'enumerate'
+        for pat in self._MULTI_STEP_PATTERNS:
+            if pat.search(task):
+                return 'multi_step'
+        return 'single_shot'
+
+    def dispatch_grounding(self, screenshot_b64, task, *,
+                           history=None, prev_screenshot_b64=None,
+                           route: str = None):
+        """Route *task* to the best grounding method via :meth:`route_task`,
+        then call it.  Single entry point so callers don't have to know
+        which of the three siblings to invoke for which task class.
+
+        Behavior per route:
+          * ``'enumerate'``   → :meth:`parse_and_reason` (SoM result)
+          * ``'single_shot'`` → :meth:`point_and_act` (drop-in shape)
+          * ``'multi_step'``  → returns a sentinel
+            ``{'route': 'multi_step', 'recommend':
+            'run_local_agentic_loop', 'reasoning': '...'}``
+            so the caller can escalate to the loop dispatcher (which
+            lives in local_loop.py and would create a circular import
+            if called from inside the backend).
+
+        ``route`` may be passed explicitly to override the heuristic
+        (e.g. the loop dispatcher already decided multi_step and is
+        calling per-iteration with route='single_shot').
+
+        Every result has ``'route'`` set so the regression gate can
+        catch silent routing drift across runs.
+        """
+        if route is None:
+            route = self.route_task(task)
+
+        if route == 'enumerate':
+            result = self.parse_and_reason(
+                screenshot_b64, task, history=history)
+            result.setdefault('route', 'enumerate')
+            return result
+
+        if route == 'multi_step':
+            # Sentinel — local_loop owns the multi-iter dispatch.
+            # Returning instead of importing avoids backend → loop →
+            # backend circular dependency.
+            return {
+                'action': None,
+                'route': 'multi_step',
+                'recommend': 'run_local_agentic_loop',
+                'reasoning': (
+                    'task chains multiple actions; caller should '
+                    'dispatch to run_local_agentic_loop which calls '
+                    'this backend per-iteration with route=single_shot'
+                ),
+                'latency': 0.0,
+            }
+
+        # Default: single_shot via point_and_act.
+        result = self.point_and_act(
+            screenshot_b64, task,
+            history=history, prev_screenshot_b64=prev_screenshot_b64)
+        result.setdefault('route', 'single_shot')
+        return result
+
     def point_and_act(self, screenshot_b64, task, history=None, prev_screenshot_b64=None):
         """
         Optimized hybrid grounding strategy based on benchmark results.

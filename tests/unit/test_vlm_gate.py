@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from vlm_gate_lib import (  # noqa: E402
     summarize_bucket, strategy_attribution,
-    compare_buckets, compare_attribution, render_baseline_md,
+    compare_buckets, compare_attribution, compare_router_decisions,
+    render_baseline_md,
 )
 
 
@@ -226,6 +227,57 @@ class TestCompareAttribution(unittest.TestCase):
         baseline = {('Start', 'point_and_act'): 'taskbar_pre_check'}
         current: dict = {}
         self.assertEqual(compare_attribution(current, baseline), [])
+
+
+class TestCompareRouterDecisions(unittest.TestCase):
+    """Phase 3.5: silent router drift = regression even if accuracy
+    looks the same.  Verified by comparing per-task actual route
+    against baseline."""
+
+    def test_no_regression_when_routes_match(self):
+        baseline = [{'task': 'click X', 'expected': 'single_shot',
+                     'actual': 'single_shot', 'pass': True}]
+        current = [{'task': 'click X', 'expected': 'single_shot',
+                    'actual': 'single_shot', 'pass': True}]
+        self.assertEqual(compare_router_decisions(current, baseline), [])
+
+    def test_silent_route_drift_fails(self):
+        """Same task, baseline says single_shot, current says enumerate
+        — even if both pass their expected, the change in actual = drift."""
+        baseline = [{'task': 'click X', 'expected': 'single_shot',
+                     'actual': 'single_shot', 'pass': True}]
+        current = [{'task': 'click X', 'expected': 'enumerate',
+                    'actual': 'enumerate', 'pass': True}]
+        regressions = compare_router_decisions(current, baseline)
+        self.assertEqual(len(regressions), 1)
+        self.assertIn('silent router drift', regressions[0])
+
+    def test_missing_task_in_current_fails(self):
+        """Task removed from router_results = regression."""
+        baseline = [{'task': 'click X', 'expected': 'single_shot',
+                     'actual': 'single_shot', 'pass': True}]
+        current = []
+        regressions = compare_router_decisions(current, baseline)
+        self.assertEqual(len(regressions), 1)
+        self.assertIn('missing in current', regressions[0])
+
+    def test_new_task_failing_flagged(self):
+        """A task added since baseline that FAILS should be flagged
+        (forces author to bump baseline if intentional)."""
+        baseline = []
+        current = [{'task': 'new task', 'expected': 'single_shot',
+                    'actual': 'enumerate', 'pass': False}]
+        regressions = compare_router_decisions(current, baseline)
+        self.assertEqual(len(regressions), 1)
+        self.assertIn('new test', regressions[0])
+
+    def test_new_task_passing_not_flagged(self):
+        """A task added that PASSES is fine — author can baseline-bump
+        whenever convenient."""
+        baseline = []
+        current = [{'task': 'new task', 'expected': 'single_shot',
+                    'actual': 'single_shot', 'pass': True}]
+        self.assertEqual(compare_router_decisions(current, baseline), [])
 
 
 class TestRenderBaselineMd(unittest.TestCase):

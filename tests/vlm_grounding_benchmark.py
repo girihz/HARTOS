@@ -374,7 +374,8 @@ for target, trs in target_results.items():
 # the methods section's table can call summarize_bucket on the fly.
 from vlm_gate_lib import (
     summarize_bucket, strategy_attribution,
-    compare_buckets, compare_attribution, render_baseline_md,
+    compare_buckets, compare_attribution, compare_router_decisions,
+    render_baseline_md,
 )
 
 method_results = []
@@ -593,17 +594,61 @@ if _methods_available:
           f"(e.g. EXACT/GOOD threshold violated by avg+1σ), retry with "
           f"#{ranked[1]!r} before surfacing the result to the agent.")
 
+# ════════════════════════════════════════════════════════════════════
+# ROUTER-DECISION TESTS — Phase 3.5 of the plan §13.
+#
+# The complementary path router (Qwen3VLBackend.route_task) is the
+# keystone that makes the three sibling methods actually-complementary
+# instead of just-coexisting.  Routing decisions are part of the §0
+# baseline: same task → same routing decision unless baseline-bump
+# justifies it.
+#
+# These 6 tests don't call the VLM — they just ask route_task what
+# path it would pick.  Cheap (microseconds), runs every time so the
+# baseline gate catches silent router drift.
+# ════════════════════════════════════════════════════════════════════
+
+router_results = []
+print(f"\n{'='*80}")
+print("ROUTER DECISIONS — task → expected path → actual path")
+print(f"{'='*80}")
+_ROUTER_CASES = [
+    # (task, expected_route)  — drawn from plan §13's regression contract
+    ('Click the Start button',                  'single_shot'),
+    ('Tap the play button on Spotify',          'single_shot'),
+    ('Open Notepad and type Hello',             'multi_step'),
+    ('Open Spotify and play Sgt Pepper',        'multi_step'),
+    ('list all clickable elements on screen',   'enumerate'),
+    ("what's on screen right now?",             'enumerate'),
+]
+if _methods_available:
+    for _task, _expected in _ROUTER_CASES:
+        _actual = _backend.route_task(_task)
+        _ok = (_actual == _expected)
+        marker = 'PASS' if _ok else 'FAIL'
+        print(f"  [{marker}] {_task[:48]:48s} → expect={_expected:11s} got={_actual}")
+        router_results.append({
+            'task': _task,
+            'expected': _expected,
+            'actual': _actual,
+            'pass': _ok,
+        })
+    _router_passes = sum(1 for r in router_results if r['pass'])
+    print(f"\nRouter: {_router_passes}/{len(router_results)} routing decisions match expected")
+
 # ── Save JSON ────────────────────────────────────────────────────────
 out = {
     'screen': f'{SW}x{SH}', 'image': f'{IMG_W}x{IMG_H}',
     'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
     'results': results,
     'method_results': method_results,
+    'router_results': router_results,
 }
 with open('tests/vlm_benchmark_results.json', 'w') as f:
     json.dump(out, f, indent=2, default=str)
 print(f"\nResults saved to tests/vlm_benchmark_results.json")
-print(f"Strategy tests: {len(results)}, method tests: {len(method_results)}")
+print(f"Strategy tests: {len(results)}, method tests: {len(method_results)}, "
+      f"router tests: {len(router_results)}")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -667,6 +712,8 @@ if _ARGS.gate:
         + compare_attribution(
             strategy_attribution(method_results),
             strategy_attribution(_baseline.get('method_results', [])))
+        + compare_router_decisions(
+            router_results, _baseline.get('router_results', []))
     )
     if _regressions:
         print(f"[gate] FAIL — {len(_regressions)} regression(s):")

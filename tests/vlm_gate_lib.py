@@ -118,6 +118,53 @@ def compare_attribution(
     return regressions
 
 
+def compare_router_decisions(
+    current_router: List[dict],
+    baseline_router: List[dict],
+) -> List[str]:
+    """Router-decision drift detection.  Phase 3.5 of the plan §13
+    regression contract:
+
+        "Router decisions are part of the §0 baseline.  Router shifting
+        decisions silently is treated as a regression even if accuracy
+        looks the same."
+
+    Each entry shape: ``{'task': str, 'expected': str, 'actual': str, 'pass': bool}``.
+    Two failure modes flagged:
+      1. ``actual != expected`` in the current run — heuristic broke for
+         a task in the regression contract.
+      2. ``actual`` differs between baseline and current — silent drift
+         even if both happen to "pass" (could happen if the expected
+         field was bumped along with a code change).
+    """
+    regressions: List[str] = []
+    baseline_by_task = {r['task']: r for r in baseline_router}
+    current_by_task = {r['task']: r for r in current_router}
+
+    for task, base in baseline_by_task.items():
+        cur = current_by_task.get(task)
+        if cur is None:
+            regressions.append(
+                f'router task "{task[:60]}": present in baseline, missing in current')
+            continue
+        if cur.get('actual') != base.get('actual'):
+            regressions.append(
+                f'router task "{task[:60]}": actual route '
+                f'"{cur.get("actual")}" != baseline "{base.get("actual")}" '
+                f'(silent router drift)')
+
+    # Also catch cases where the current run flipped a 'pass' to 'fail'
+    # without the baseline having any record (new tests not yet baselined).
+    for task, cur in current_by_task.items():
+        if not cur.get('pass') and task not in baseline_by_task:
+            regressions.append(
+                f'router task "{task[:60]}": new test added since baseline '
+                f'and FAILS — expected="{cur.get("expected")}" '
+                f'actual="{cur.get("actual")}" (bump baseline if intentional)')
+
+    return regressions
+
+
 def render_baseline_md(out_dict: dict) -> str:
     """Human-readable baseline summary committed alongside the JSON."""
     lines = [
@@ -155,4 +202,17 @@ def render_baseline_md(out_dict: dict) -> str:
         lines.append(
             f'| {target} | `{winner["method"]}` | `{winner.get("strategy", "?")}` | '
             f'{winner["error"]:.0f} |')
+    # Phase 3.5: router-decision section.  Same baseline-bump discipline
+    # — silent change to a routed path is treated as a regression.
+    router_results = out_dict.get('router_results', [])
+    if router_results:
+        lines += ['', '## Router decisions (Phase 3.5 §13 contract)',
+                  '', '| Task | Expected | Actual | Pass |',
+                  '|---|---|---|:---:|']
+        for r in router_results:
+            mark = '[OK]' if r.get('pass') else '[FAIL]'
+            task_short = r.get('task', '')[:60]
+            lines.append(
+                f'| {task_short} | `{r.get("expected","?")}` | '
+                f'`{r.get("actual","?")}` | {mark} |')
     return '\n'.join(lines) + '\n'
