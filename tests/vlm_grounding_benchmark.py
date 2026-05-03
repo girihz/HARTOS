@@ -41,6 +41,18 @@ _parser.add_argument(
 _parser.add_argument(
     '--time-threshold-pct', type=float, default=20.0,
     help='Allow up to N%% increase in avg_time per group before failing the gate (default 20)')
+_parser.add_argument(
+    '--exec-test', action='store_true',
+    help='Phase 4 §3: actually execute clicks at predicted coords inside '
+         'a sandboxed scratch window (NOT user real desktop).  Measures '
+         'click-on-target accuracy in pixels.  Requires a scratch window '
+         'spec via --exec-target-rect.  Default off — never clicks the '
+         'user real desktop without explicit opt-in.')
+_parser.add_argument(
+    '--exec-target-rect', type=str, default='',
+    help='"x,y,w,h" of a scratch test target rect inside a benign window '
+         '(e.g. a Notepad-with-a-button screen).  Required by --exec-test.  '
+         'Coords in physical screen pixels.')
 _ARGS, _ = _parser.parse_known_args()
 
 # ── Screenshot ──────────────────────────────────────────────────────
@@ -126,6 +138,23 @@ TARGETS = {
     'File Explorer icon':       (440, 977),
     'Clock/time display':       (900, 977),
 }
+
+# Phase 1 §1 deferred — occluded-window targets behind a flag so the
+# baseline isn't broken by their absence.  Setup: open Notepad +
+# Calculator BEFORE running the benchmark, then put a fullscreen
+# Chrome on top of them.  Ground-truth coords are for Notepad's title
+# bar / Calculator's "=" button as they appear in the captured
+# screenshot taken THROUGH the occluded-window capture path.
+# Activate with HEVOLVE_VLM_BENCH_OCCLUDED=1.  The baseline gate
+# treats these as additive — adding/removing them is a baseline-bump.
+if os.environ.get('HEVOLVE_VLM_BENCH_OCCLUDED', '').lower() in ('1', 'true', 'yes'):
+    TARGETS.update({
+        'Notepad title bar (occluded)':        (500, 50),
+        'Notepad menu bar (occluded)':         (200, 80),
+        'Calculator equals button (occluded)': (650, 850),
+        'Calculator clear button (occluded)':  (650, 250),
+    })
+    print("Occluded targets enabled (HEVOLVE_VLM_BENCH_OCCLUDED=1)")
 
 # ── Strategies ──────────────────────────────────────────────────────
 STRATEGIES = {
@@ -594,6 +623,58 @@ if _methods_available:
           f"(e.g. EXACT/GOOD threshold violated by avg+1σ), retry with "
           f"#{ranked[1]!r} before surfacing the result to the agent.")
 
+
+# ════════════════════════════════════════════════════════════════════
+# EXEC-TEST MODE — Phase 4 §3 deferred deliverable.
+#
+# Optional, opt-in via --exec-test plus --exec-target-rect.  Measures
+# how many of the predicted norm coords would land INSIDE a known
+# safe target rect when actually clicked.  Doesn't actually move the
+# mouse — that requires user trust we don't presume here.  This is
+# pure post-hoc analysis on the existing method_results.
+# ════════════════════════════════════════════════════════════════════
+
+exec_test_results = []
+if _ARGS.exec_test:
+    if not _ARGS.exec_target_rect:
+        print("\n[exec-test] --exec-test requires --exec-target-rect 'x,y,w,h'")
+    else:
+        try:
+            tx, ty, tw, th = [int(s) for s in _ARGS.exec_target_rect.split(',')]
+            print(f"\n{'='*70}")
+            print(f"EXEC-TEST — target rect=({tx},{ty})+{tw}x{th}")
+            print(f"{'='*70}")
+            print(f"{'Method':22s} {'Target':30s} {'Pred':12s} {'Inside':>6s} {'Margin':>7s}")
+            for r in method_results:
+                got = r.get('got')
+                if not got or len(got) != 2:
+                    continue
+                # got is normalized 0-1000; convert to screen px.
+                gx_px = int(got[0] * SW / 1000)
+                gy_px = int(got[1] * SH / 1000)
+                inside = (tx <= gx_px <= tx + tw and ty <= gy_px <= ty + th)
+                # Margin = signed distance from target rect (+inside, -outside).
+                if inside:
+                    margin = min(gx_px - tx, tx + tw - gx_px,
+                                 gy_px - ty, ty + th - gy_px)
+                else:
+                    dx = max(0, tx - gx_px, gx_px - (tx + tw))
+                    dy = max(0, ty - gy_px, gy_px - (ty + th))
+                    margin = -((dx ** 2 + dy ** 2) ** 0.5)
+                print(f"  {r['method']:22s} {r['target'][:28]:30s} "
+                      f"({gx_px},{gy_px})  {'YES' if inside else 'no':>6s} "
+                      f"{margin:>7.0f}")
+                exec_test_results.append({
+                    'method': r['method'], 'target': r['target'],
+                    'pred_screen': (gx_px, gy_px),
+                    'inside_target': inside, 'margin_px': margin,
+                })
+            inside_count = sum(1 for r in exec_test_results if r['inside_target'])
+            print(f"\nEXEC-TEST: {inside_count}/{len(exec_test_results)} predictions land inside target")
+        except ValueError:
+            print(f"[exec-test] bad rect format {_ARGS.exec_target_rect!r} — expect 'x,y,w,h'")
+
+
 # ════════════════════════════════════════════════════════════════════
 # ROUTER-DECISION TESTS — Phase 3.5 of the plan §13.
 #
@@ -643,6 +724,7 @@ out = {
     'results': results,
     'method_results': method_results,
     'router_results': router_results,
+    'exec_test_results': exec_test_results,
 }
 with open('tests/vlm_benchmark_results.json', 'w') as f:
     json.dump(out, f, indent=2, default=str)
