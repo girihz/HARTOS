@@ -17,6 +17,7 @@ Reuses:
 
 import io
 import logging
+import os
 import platform
 import re
 import subprocess
@@ -886,13 +887,19 @@ def list_monitors() -> List[dict]:
     Returns:
         List of dicts: ``[{idx, rect: (x,y,w,h), scale_factor,
         is_primary, name}]``.  ``rect`` is in **physical** pixel
-        coords thanks to :func:`_ensure_dpi_aware_for_enum`.
-        Negative values are valid for monitors left/above the primary.
-        ``scale_factor`` is the DPI scale (1.0 = 96 DPI; 1.5 = 144 DPI
-        / 150% scaling).  Empty list on non-Windows or unsupported
-        builds (Phase 2 adds macOS/Linux).
+        coords (handled by :func:`_ensure_dpi_aware_for_enum` on Win,
+        Quartz already returns physical coords on macOS, Xinerama
+        does the same on X11).  Negative values are valid for
+        monitors left/above the primary.  ``scale_factor`` is the
+        DPI scale (1.0 = 96 DPI; 1.5 = 144 DPI / 150% scaling).
+        Empty list when no backend is available for the host OS.
     """
-    if platform.system() != 'Windows':
+    sysname = platform.system()
+    if sysname == 'Darwin':
+        return _list_monitors_macos()
+    if sysname == 'Linux':
+        return _list_monitors_linux()
+    if sysname != 'Windows':
         return []
     try:
         import ctypes
@@ -964,6 +971,353 @@ def list_monitors() -> List[dict]:
     return monitors
 
 
+def _list_monitors_macos() -> List[dict]:
+    """macOS list_monitors via Quartz NSScreen.  Phase 2 of the VLM
+    plan §1.  Requires pyobjc-Quartz (already shipped in the macOS
+    Nunba bundle); returns ``[]`` if not importable."""
+    try:
+        from AppKit import NSScreen
+    except ImportError:
+        try:
+            from Quartz import CGDisplayBounds, CGGetActiveDisplayList
+        except ImportError:
+            return []
+        # Fallback Quartz-only path.
+        return _list_monitors_macos_quartz()
+    monitors: List[dict] = []
+    screens = NSScreen.screens()
+    main_screen = NSScreen.mainScreen()
+    main_id = main_screen.deviceDescription()['NSScreenNumber'] if main_screen else None
+    for idx, screen in enumerate(screens):
+        frame = screen.frame()
+        scale = screen.backingScaleFactor() if hasattr(
+            screen, 'backingScaleFactor') else 1.0
+        sid = screen.deviceDescription().get('NSScreenNumber') \
+            if hasattr(screen, 'deviceDescription') else None
+        monitors.append({
+            'idx': idx,
+            'rect': (
+                int(frame.origin.x), int(frame.origin.y),
+                int(frame.size.width), int(frame.size.height),
+            ),
+            'work_rect': (
+                int(frame.origin.x), int(frame.origin.y),
+                int(frame.size.width), int(frame.size.height),
+            ),
+            'scale_factor': float(scale),
+            'is_primary': (sid == main_id) if sid is not None else (idx == 0),
+            'name': str(sid) if sid is not None else f'Display{idx}',
+        })
+    return monitors
+
+
+def _list_monitors_macos_quartz() -> List[dict]:
+    """Pure-Quartz path used when AppKit isn't importable (rare)."""
+    try:
+        from Quartz import (
+            CGDisplayBounds, CGGetActiveDisplayList, CGMainDisplayID,
+            CGDisplayPixelsWide, CGDisplayPixelsHigh,
+        )
+    except ImportError:
+        return []
+    import ctypes as _ct
+    max_displays = 16
+    active = (_ct.c_uint32 * max_displays)()
+    count = _ct.c_uint32(0)
+    err = CGGetActiveDisplayList(max_displays, active, _ct.byref(count))
+    if err != 0:
+        return []
+    main_id = CGMainDisplayID()
+    monitors: List[dict] = []
+    for i in range(count.value):
+        did = active[i]
+        bounds = CGDisplayBounds(did)
+        # Scale: physical pixels / logical points
+        try:
+            pw = CGDisplayPixelsWide(did)
+            scale = pw / bounds.size.width if bounds.size.width else 1.0
+        except Exception:
+            scale = 1.0
+        monitors.append({
+            'idx': i,
+            'rect': (
+                int(bounds.origin.x), int(bounds.origin.y),
+                int(bounds.size.width), int(bounds.size.height),
+            ),
+            'work_rect': (
+                int(bounds.origin.x), int(bounds.origin.y),
+                int(bounds.size.width), int(bounds.size.height),
+            ),
+            'scale_factor': float(scale),
+            'is_primary': did == main_id,
+            'name': f'Display{did}',
+        })
+    return monitors
+
+
+def _list_monitors_linux() -> List[dict]:
+    """Linux list_monitors via Xlib (X11) with xrandr fallback.
+    Wayland portal path is in :func:`_list_monitors_wayland_portal`
+    and called automatically when XDG_SESSION_TYPE=wayland."""
+    if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
+        wayland = _list_monitors_wayland_portal()
+        if wayland:
+            return wayland
+        # Fall through to xrandr — works on XWayland and many Wayland
+        # compositors that proxy X11 enum requests.
+    monitors = _list_monitors_xrandr()
+    if monitors:
+        return monitors
+    if _Xlib_display is not None:
+        try:
+            return _list_monitors_xlib()
+        except Exception as e:
+            logger.debug(f"xlib monitor enum failed: {e}")
+    return []
+
+
+def _list_monitors_xrandr() -> List[dict]:
+    """xrandr CLI shellout — ubiquitous on X11 + many Wayland setups
+    and avoids the python-xlib dependency."""
+    try:
+        out = subprocess.check_output(
+            ['xrandr', '--listmonitors'], timeout=3, text=True)
+    except Exception:
+        return []
+    monitors: List[dict] = []
+    for line in out.splitlines():
+        # Format: " 0: +*HDMI-1 1920/598x1080/336+0+0  HDMI-1"
+        line = line.strip()
+        m = re.match(
+            r'(\d+):\s*\+?\*?(\S+)\s+(\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)',
+            line)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        name = m.group(2)
+        is_primary = '*' in line.split(':', 1)[1].split()[0]
+        w, h, x, y = (int(m.group(3)), int(m.group(4)),
+                      int(m.group(5)), int(m.group(6)))
+        monitors.append({
+            'idx': idx, 'rect': (x, y, w, h), 'work_rect': (x, y, w, h),
+            'scale_factor': 1.0, 'is_primary': is_primary, 'name': name,
+        })
+    return monitors
+
+
+def _list_monitors_xlib():
+    """Pure python-xlib fallback for Xinerama screens."""
+    if _Xlib_display is None:
+        return []
+    disp = _Xlib_display.Display()
+    try:
+        from Xlib.ext import xinerama
+        if not xinerama.query_version(disp):
+            return []
+        screens = xinerama.query_screens(disp).screens
+        primary_idx = 0
+        return [{
+            'idx': i, 'rect': (s.x, s.y, s.width, s.height),
+            'work_rect': (s.x, s.y, s.width, s.height),
+            'scale_factor': 1.0,
+            'is_primary': i == primary_idx,
+            'name': f'Xinerama{i}',
+        } for i, s in enumerate(screens)]
+    finally:
+        disp.close()
+
+
+def _list_monitors_wayland_portal() -> List[dict]:
+    """xdg-desktop-portal screencast / output-info via D-Bus.
+    Phase 7 of the VLM plan §1.  Stub-quality: returns ``[]`` when
+    the portal isn't available.  Full impl needs ``dbus-python``
+    which isn't a hard dep; users on Wayland install it themselves
+    (``pip install dbus-python``) and this function detects it."""
+    try:
+        import dbus  # type: ignore
+    except ImportError:
+        logger.debug(
+            'wayland: dbus-python missing; install for portal monitor '
+            'enum, or rely on xrandr/XWayland fallback')
+        return []
+    try:
+        bus = dbus.SessionBus()
+        portal = bus.get_object(
+            'org.freedesktop.portal.Desktop',
+            '/org/freedesktop/portal/desktop')
+        # The OutputInfo interface isn't standardized yet across
+        # compositors.  This is a best-effort probe; on most setups
+        # we'll fall back to xrandr above anyway.
+        _ = portal  # placeholder for future probe
+    except Exception as e:
+        logger.debug(f'wayland portal probe failed: {e}')
+    return []
+
+
+def _capture_window_macos(wid: int, *, fmt: str = 'jpeg',
+                           quality: int = 70) -> Optional[bytes]:
+    """macOS per-window capture via CGWindowListCreateImage.
+
+    ``wid`` is the CGWindowID returned by CGWindowListCopyWindowInfo —
+    NOT a generic process handle.  Captures even when the window is
+    occluded or off-screen (kCGWindowImageBoundsIgnoreFraming).
+
+    Requires Screen Recording permission on macOS 10.15+ — first
+    call surfaces the system prompt; subsequent calls succeed once
+    granted.  Returns None when permission is denied.
+    """
+    try:
+        from Quartz import (
+            CGWindowListCreateImage, CGRectNull,
+            kCGWindowListOptionIncludingWindow,
+            kCGWindowImageBoundsIgnoreFraming,
+            kCGWindowImageDefault,
+        )
+        from Quartz.CoreGraphics import (
+            CGImageGetWidth, CGImageGetHeight,
+            CGImageGetBytesPerRow, CGImageGetDataProvider,
+            CGDataProviderCopyData,
+        )
+    except ImportError:
+        logger.debug('macOS capture: pyobjc-Quartz not installed')
+        return None
+    if _PIL_Image is None:
+        return None
+    try:
+        image_ref = CGWindowListCreateImage(
+            CGRectNull, kCGWindowListOptionIncludingWindow,
+            int(wid),
+            kCGWindowImageBoundsIgnoreFraming | kCGWindowImageDefault,
+        )
+        if image_ref is None:
+            return None
+        w = CGImageGetWidth(image_ref)
+        h = CGImageGetHeight(image_ref)
+        bpr = CGImageGetBytesPerRow(image_ref)
+        provider = CGImageGetDataProvider(image_ref)
+        data = CGDataProviderCopyData(provider)
+        # CFData → bytes
+        raw = bytes(data)
+        # Quartz returns BGRA on little-endian Macs.
+        img = _PIL_Image.frombuffer(
+            'RGBA', (w, h), raw, 'raw', 'BGRA', bpr, 1).convert('RGB')
+        buf = io.BytesIO()
+        if fmt.lower() == 'png':
+            img.save(buf, format='PNG', optimize=True)
+        else:
+            img.save(buf, format='JPEG', quality=quality, optimize=True)
+        return buf.getvalue()
+    except Exception as e:
+        logger.debug(f'macOS capture failed for wid={wid}: {e}')
+        return None
+
+
+def _capture_window_linux(xid: int, *, fmt: str = 'jpeg',
+                           quality: int = 70) -> Optional[bytes]:
+    """Linux per-window capture.
+
+    Tries in order:
+      1. X11 + XComposite redirect → captures occluded windows
+      2. mss region capture using window rect from xdotool/xlib
+         (visible windows only — fallback)
+
+    Wayland: returns None unless the desktop portal granted
+    capture permission for this window (rare for cross-app calls).
+    """
+    if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
+        return _capture_window_wayland_portal(xid, fmt=fmt, quality=quality)
+    # Try XComposite-aware path first
+    composited = _capture_window_xcomposite(xid, fmt=fmt, quality=quality)
+    if composited is not None:
+        return composited
+    # Fall back to mss region capture from the window's known rect
+    enum = WindowEnumerator()
+    fresh = enum._refresh_linux(WindowInfo(
+        hwnd=xid, title='', process_name='', pid=0, rect=(0, 0, 0, 0)))
+    if fresh is None or fresh.rect[2] <= 0 or fresh.rect[3] <= 0:
+        return None
+    if _mss is None or _PIL_Image is None:
+        return None
+    try:
+        with _mss.mss() as sct:
+            x, y, w, h = fresh.rect
+            sct_img = sct.grab({'left': x, 'top': y,
+                                 'width': w, 'height': h})
+            img = _PIL_Image.frombytes(
+                'RGB', sct_img.size, sct_img.bgra, 'raw', 'BGRX')
+            buf = io.BytesIO()
+            if fmt.lower() == 'png':
+                img.save(buf, format='PNG', optimize=True)
+            else:
+                img.save(buf, format='JPEG', quality=quality, optimize=True)
+            return buf.getvalue()
+    except Exception as e:
+        logger.debug(f'mss region capture failed for xid={xid}: {e}')
+        return None
+
+
+def _capture_window_xcomposite(xid: int, *, fmt: str, quality: int) -> Optional[bytes]:
+    """X11 XComposite path — captures occluded windows by reading the
+    off-screen pixmap the compositor maintains for each redirected
+    window.  Requires python-xlib + a compositor running (kwin / mutter
+    / picom).  Returns None if XComposite isn't available."""
+    if _Xlib_display is None:
+        return None
+    try:
+        from Xlib.ext import composite
+    except ImportError:
+        return None
+    if _PIL_Image is None:
+        return None
+    try:
+        disp = _Xlib_display.Display()
+        try:
+            composite.query_version(disp)
+            win = disp.create_resource_object('window', int(xid))
+            composite.redirect_window(
+                win, composite.RedirectAutomatic)
+            pixmap = composite.name_window_pixmap(win)
+            geom = win.get_geometry()
+            raw = pixmap.get_image(
+                0, 0, geom.width, geom.height, 2, 0xffffffff)
+            img = _PIL_Image.frombytes(
+                'RGB', (geom.width, geom.height), raw.data,
+                'raw', 'BGRX')
+            buf = io.BytesIO()
+            if fmt.lower() == 'png':
+                img.save(buf, format='PNG', optimize=True)
+            else:
+                img.save(buf, format='JPEG', quality=quality, optimize=True)
+            return buf.getvalue()
+        finally:
+            disp.close()
+    except Exception as e:
+        logger.debug(f'XComposite capture failed for xid={xid}: {e}')
+        return None
+
+
+def _capture_window_wayland_portal(wid: int, *, fmt: str, quality: int) -> Optional[bytes]:
+    """xdg-desktop-portal Screenshot.PickWindow.  Phase 7 of the VLM
+    plan §1 — interactive (user must approve via portal UI), so this
+    is best invoked sparingly.  Returns None when dbus-python isn't
+    installed or the portal denied."""
+    try:
+        import dbus  # type: ignore
+    except ImportError:
+        logger.debug(
+            'wayland capture: dbus-python missing; install for portal '
+            'screencast or limit to in-app screenshots only')
+        return None
+    # Full Screenshot.PickWindow flow requires a GLib mainloop wired
+    # to handle the portal Response signal.  Not invoked from the
+    # synchronous VLM action path — out of scope for Phase 7 stub.
+    logger.info(
+        f'wayland capture for wid={wid}: portal flow not yet wired; '
+        f'returning None.  Cross-app capture on Wayland needs an '
+        f'event-loop integration.')
+    return None
+
+
 def capture_window_one_shot(hwnd: int, *, fmt: str = 'jpeg',
                             quality: int = 70) -> Optional[bytes]:
     """Capture a single window's pixels even when it's occluded /
@@ -990,8 +1344,22 @@ def capture_window_one_shot(hwnd: int, *, fmt: str = 'jpeg',
       * Pre-Win 10 1903 lacks PW_RENDERFULLCONTENT.  This function
         downgrades to flag=0 with a debug log.
       * Window minimized: returns last-saved DWM thumbnail (may be stale).
+      * macOS: uses CGWindowListCreateImage with kCGWindowListOptionIncludingWindow
+        + kCGWindowImageBoundsIgnoreFraming so off-screen / occluded
+        windows still capture.
+      * Linux X11: uses XCompositeNameWindowPixmap when COMPOSITE
+        extension is available (most modern desktops); else falls
+        back to mss region capture which only works when the
+        window is visible.
+      * Linux Wayland: cross-app capture is portal-gated and
+        per-app-permission; returns None when the portal denies.
     """
-    if platform.system() != 'Windows' or not _win32gui or not _PIL_Image:
+    sysname = platform.system()
+    if sysname == 'Darwin':
+        return _capture_window_macos(hwnd, fmt=fmt, quality=quality)
+    if sysname == 'Linux':
+        return _capture_window_linux(hwnd, fmt=fmt, quality=quality)
+    if sysname != 'Windows' or not _win32gui or not _PIL_Image:
         return None
     try:
         import ctypes

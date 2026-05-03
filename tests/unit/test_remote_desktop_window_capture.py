@@ -488,14 +488,101 @@ class TestListMonitorsWindows(unittest.TestCase):
 
 
 class TestListMonitorsNonWindows(unittest.TestCase):
-    """Phase-2 will add macOS/Linux backends.  Until then the function
-    must return an empty list (not raise) so callers behave correctly."""
+    """Phase 2 added macOS / Linux paths.  These tests verify the
+    dispatch decision (which backend gets called) without requiring
+    the backend's deps to be installed."""
 
-    def test_empty_on_non_windows(self):
+    def test_macos_dispatches_to_macos_backend(self):
         with patch('integrations.remote_desktop.window_capture.platform.system',
-                   return_value='Darwin'):
+                   return_value='Darwin'), \
+             patch('integrations.remote_desktop.window_capture._list_monitors_macos',
+                   return_value=[{'idx': 0, 'rect': (0, 0, 1920, 1080),
+                                  'scale_factor': 2.0, 'is_primary': True,
+                                  'name': 'Display1'}]) as mock_macos:
+            from integrations.remote_desktop.window_capture import list_monitors
+            result = list_monitors()
+        mock_macos.assert_called_once()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['scale_factor'], 2.0)
+
+    def test_linux_dispatches_to_linux_backend(self):
+        with patch('integrations.remote_desktop.window_capture.platform.system',
+                   return_value='Linux'), \
+             patch('integrations.remote_desktop.window_capture._list_monitors_linux',
+                   return_value=[{'idx': 0, 'rect': (0, 0, 1920, 1080),
+                                  'scale_factor': 1.0, 'is_primary': True,
+                                  'name': 'HDMI-1'}]) as mock_linux:
+            from integrations.remote_desktop.window_capture import list_monitors
+            result = list_monitors()
+        mock_linux.assert_called_once()
+        self.assertEqual(result[0]['name'], 'HDMI-1')
+
+    def test_unknown_os_returns_empty(self):
+        """No backend → empty list (not raise)."""
+        with patch('integrations.remote_desktop.window_capture.platform.system',
+                   return_value='OS/2'):
             from integrations.remote_desktop.window_capture import list_monitors
             self.assertEqual(list_monitors(), [])
+
+    def test_macos_backend_returns_empty_when_pyobjc_missing(self):
+        """No pyobjc-Quartz → graceful empty (don't raise on Linux CI)."""
+        with patch.dict('sys.modules', {'AppKit': None, 'Quartz': None}):
+            from integrations.remote_desktop.window_capture import _list_monitors_macos
+            # On systems without AppKit / Quartz this returns [].
+            self.assertEqual(_list_monitors_macos(), [])
+
+    def test_linux_xrandr_parses_output(self):
+        """xrandr --listmonitors output parsed into the canonical dict shape."""
+        fake_output = (
+            ' 0: +*HDMI-1 1920/598x1080/336+0+0  HDMI-1\n'
+            ' 1: +DP-1 2560/600x1440/340+1920+0  DP-1\n'
+        )
+        with patch('integrations.remote_desktop.window_capture.subprocess.check_output',
+                   return_value=fake_output):
+            from integrations.remote_desktop.window_capture import _list_monitors_xrandr
+            result = _list_monitors_xrandr()
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]['rect'], (0, 0, 1920, 1080))
+        self.assertTrue(result[0]['is_primary'])
+        self.assertEqual(result[1]['rect'], (1920, 0, 2560, 1440))
+        self.assertFalse(result[1]['is_primary'])
+
+
+class TestCaptureWindowOnePerOS(unittest.TestCase):
+    """capture_window_one_shot dispatch on macOS / Linux."""
+
+    def test_macos_dispatches_to_macos_backend(self):
+        with patch('integrations.remote_desktop.window_capture.platform.system',
+                   return_value='Darwin'), \
+             patch('integrations.remote_desktop.window_capture._capture_window_macos',
+                   return_value=b'fake-jpeg-bytes') as mock_macos:
+            from integrations.remote_desktop.window_capture import capture_window_one_shot
+            result = capture_window_one_shot(42)
+        mock_macos.assert_called_once_with(42, fmt='jpeg', quality=70)
+        self.assertEqual(result, b'fake-jpeg-bytes')
+
+    def test_linux_dispatches_to_linux_backend(self):
+        with patch('integrations.remote_desktop.window_capture.platform.system',
+                   return_value='Linux'), \
+             patch('integrations.remote_desktop.window_capture._capture_window_linux',
+                   return_value=b'fake-png-bytes') as mock_linux:
+            from integrations.remote_desktop.window_capture import capture_window_one_shot
+            result = capture_window_one_shot(42, fmt='png')
+        mock_linux.assert_called_once()
+        self.assertEqual(result, b'fake-png-bytes')
+
+    def test_wayland_falls_back_to_portal(self):
+        """When XDG_SESSION_TYPE=wayland, _capture_window_linux must
+        route to _capture_window_wayland_portal."""
+        with patch('integrations.remote_desktop.window_capture.platform.system',
+                   return_value='Linux'), \
+             patch.dict('os.environ', {'XDG_SESSION_TYPE': 'wayland'}, clear=False), \
+             patch('integrations.remote_desktop.window_capture._capture_window_wayland_portal',
+                   return_value=None) as mock_portal:
+            from integrations.remote_desktop.window_capture import _capture_window_linux
+            result = _capture_window_linux(42)
+        mock_portal.assert_called_once()
+        self.assertIsNone(result)
 
 
 class TestListWindowsModuleWrapper(unittest.TestCase):
