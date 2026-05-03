@@ -9388,6 +9388,18 @@ def main():
     # Boot integrity verification (deferred from import time)
     hevolve_verify_boot()
 
+    # Boot-time prompts/ snapshot (best-effort, non-blocking).
+    # Bounds data loss to "since last reboot" if the user wipes data
+    # dir or hits a corruption.  Pairs with cloud sync (recipe_sync)
+    # which handles the cross-device case but needs network.  This
+    # is the zero-network fallback.  See core/prompts_backup.py.
+    try:
+        from core.prompts_backup import snapshot_at_boot
+        snapshot_at_boot()
+    except Exception as _snap_err:
+        logging.getLogger('hevolve_core').debug(
+            f'prompts_backup at boot skipped: {_snap_err}')
+
     # Guardrail hash verification — refuse to boot with tampered
     # hive_guardrails values unless HEVOLVE_GUARDRAIL_HASH_ENFORCE=0
     # (dev override). The module-level call inside hive_guardrails is
