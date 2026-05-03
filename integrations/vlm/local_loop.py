@@ -317,21 +317,10 @@ def run_local_agentic_loop(
                         logger.debug(
                             f"taskbar_pre_check failed (non-fatal): {_tb_err}")
                 if _taskbar_action is not None:
-                    # Use the taskbar lookup result directly — skip the
-                    # combined-prompt VLM call below.  Build an
-                    # action_json shape compatible with the rest of the
-                    # iteration body.
-                    action_json = {
-                        'Reasoning': _taskbar_action.get('reasoning', ''),
-                        'Next Action': _taskbar_action.get('action', 'left_click'),
-                        'coordinate': [
-                            _taskbar_action.get('screen_x'),
-                            _taskbar_action.get('screen_y'),
-                        ],
-                        'value': '',
-                        'Status': 'IN_PROGRESS',
-                        '_strategy': 'taskbar_list',
-                    }
+                    # Single source of truth for "point_and_act result
+                    # -> action_json shape" conversion.  Was inline
+                    # 14 lines duplicating the dict construction.
+                    action_json = _point_action_to_action_json(_taskbar_action)
                     raw = _taskbar_action.get('raw', '')
                     logger.info(
                         f"Loop: taskbar_list shortcut → "
@@ -718,6 +707,35 @@ def _call_local_llm(messages: list) -> str:
     except Exception as e:
         logger.error(f"Local LLM call failed: {e}")
         raise
+
+
+def _point_action_to_action_json(point_action: dict) -> dict:
+    """Convert a point_and_act-shaped result (from
+    Qwen3VLBackend.try_taskbar_pre_check / point_and_act / retry_with_
+    elimination) into the action_json shape the loop's post-action
+    handler expects.
+
+    Single source of truth for the shape transformation - was
+    duplicated inline in the iteration body, flagged by reviewer
+    as remaining DRY violation after the Phase 5 parser cleanup.
+
+    Both shapes are documented:
+      point_action: {action, screen_x, screen_y, norm_x, norm_y,
+                    text, done, reasoning, raw, strategy?}
+      action_json:  {Reasoning, Next Action, coordinate, value,
+                    Status, _strategy?}
+    """
+    return {
+        'Reasoning': point_action.get('reasoning', ''),
+        'Next Action': point_action.get('action', 'left_click'),
+        'coordinate': [
+            point_action.get('screen_x'),
+            point_action.get('screen_y'),
+        ],
+        'value': point_action.get('text', ''),
+        'Status': 'DONE' if point_action.get('done') else 'IN_PROGRESS',
+        '_strategy': point_action.get('strategy', 'taskbar_list'),
+    }
 
 
 def _extract_click_coord(raw: str, action_json: dict) -> tuple:

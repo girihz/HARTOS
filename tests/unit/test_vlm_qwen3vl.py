@@ -2469,6 +2469,68 @@ class TestCheckReasoningMismatch:
             lct._REASONING_MISMATCH_PATTERNS = original
 
 
+class TestPointActionToActionJson:
+    """Single source of truth for converting point_and_act result
+    into the loop's action_json shape - was inline duplication
+    flagged by reviewer."""
+
+    def test_basic_left_click_conversion(self):
+        from integrations.vlm.local_loop import _point_action_to_action_json
+        point_action = {
+            'action': 'left_click',
+            'screen_x': 240,
+            'screen_y': 980,
+            'reasoning': 'Start button found at taskbar',
+            'raw': '<point>238,977</point>',
+            'strategy': 'taskbar_list',
+        }
+        action_json = _point_action_to_action_json(point_action)
+        assert action_json['Next Action'] == 'left_click'
+        assert action_json['coordinate'] == [240, 980]
+        assert action_json['Reasoning'] == 'Start button found at taskbar'
+        assert action_json['Status'] == 'IN_PROGRESS'
+        assert action_json['_strategy'] == 'taskbar_list'
+
+    def test_done_status_propagates(self):
+        from integrations.vlm.local_loop import _point_action_to_action_json
+        point_action = {
+            'action': 'done',
+            'screen_x': 0, 'screen_y': 0,
+            'done': True,
+            'reasoning': 'Task complete',
+        }
+        action_json = _point_action_to_action_json(point_action)
+        assert action_json['Status'] == 'DONE'
+        assert action_json['Next Action'] == 'done'
+
+    def test_text_field_propagates_to_value(self):
+        """type actions carry text in 'text' field; action_json wants 'value'."""
+        from integrations.vlm.local_loop import _point_action_to_action_json
+        point_action = {
+            'action': 'type', 'screen_x': 0, 'screen_y': 0,
+            'text': 'hello world', 'reasoning': 'typing',
+        }
+        action_json = _point_action_to_action_json(point_action)
+        assert action_json['value'] == 'hello world'
+        assert action_json['Next Action'] == 'type'
+
+    def test_missing_strategy_defaults_to_taskbar_list(self):
+        """When strategy isn't set (older callers), default makes
+        sense for the only current call site (taskbar pre-check)."""
+        from integrations.vlm.local_loop import _point_action_to_action_json
+        action_json = _point_action_to_action_json({'action': 'left_click'})
+        assert action_json['_strategy'] == 'taskbar_list'
+
+    def test_empty_input_safe(self):
+        from integrations.vlm.local_loop import _point_action_to_action_json
+        action_json = _point_action_to_action_json({})
+        # Defaults are set by .get(): action -> 'left_click', text -> '',
+        # reasoning -> '', strategy -> 'taskbar_list'
+        assert action_json['Next Action'] == 'left_click'
+        assert action_json['value'] == ''
+        assert action_json['Status'] == 'IN_PROGRESS'
+
+
 class TestExtractClickCoord:
     """Loop's _extract_click_coord is the single source of truth for
     where in 0-1000 norm space the VLM said to click - was a 4th
