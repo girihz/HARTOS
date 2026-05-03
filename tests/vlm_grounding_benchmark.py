@@ -368,6 +368,15 @@ for target, trs in target_results.items():
 # capture the loop's first grounding decision.
 # ════════════════════════════════════════════════════════════════════
 
+# Single source of truth for bucket aggregation + gate logic — used
+# both by the METHOD SUMMARY table below AND by --gate / --bump-baseline
+# at the bottom.  Imported above the screenshot/benchmark execution so
+# the methods section's table can call summarize_bucket on the fly.
+from vlm_gate_lib import (
+    summarize_bucket, strategy_attribution,
+    compare_buckets, compare_attribution, render_baseline_md,
+)
+
 method_results = []
 print(f"\n{'='*90}")
 print("METHOD BENCHMARK — running parse_and_reason / point_and_act / loop_one_iter")
@@ -530,29 +539,23 @@ if _methods_available:
                 'time': elapsed, 'strategy': strat,
             })
 
-    # Per-method summary
-    from collections import defaultdict as _dd
+    # Per-method summary — uses the single-source-of-truth summarize_bucket
+    # from vlm_gate_lib so the gate and the human-readable table compute
+    # avg_err / median_err / exact / good / fail / avg_time identically.
+    # The earlier inline aggregator used a different sort key
+    # (sum/len over ALL items including 9999 FAILs) that displaced
+    # methods-with-FAILs lower than their actual avg_err warranted.
     print(f"\n{'='*70}")
     print("METHOD SUMMARY")
     print(f"{'='*70}")
     print(f"{'Method':20s} {'Avg_err':>8s} {'Median':>8s} {'EXACT':>6s} {'GOOD+':>6s} {'AvgTime':>8s} {'N':>4s}")
     print(f"{'-'*70}")
-    method_buckets = _dd(list)
-    for r in method_results:
-        method_buckets[r['method']].append(r)
-    for m_name, rs in sorted(
-        method_buckets.items(),
-        key=lambda kv: sum(r['error'] for r in kv[1]) / len(kv[1])
-    ):
-        clean = [r for r in rs if r['error'] < 9000]
-        clean = clean or rs
-        avg_err = sum(r['error'] for r in clean) / len(clean)
-        srt = sorted(r['error'] for r in clean)
-        median = srt[len(srt) // 2]
-        exact = sum(1 for r in rs if r['error'] < 30)
-        good = sum(1 for r in rs if r['error'] < 80)
-        avg_t = sum(r['time'] for r in rs) / max(len(rs), 1)
-        print(f"{m_name:20s} {avg_err:8.0f} {median:8.0f} {exact:6d} {good:6d} {avg_t:7.1f}s {len(rs):4d}")
+    _method_summary = summarize_bucket(method_results, 'method')
+    for m_name, s in sorted(_method_summary.items(),
+                            key=lambda kv: kv[1]['avg_err']):
+        print(f"{m_name:20s} {s['avg_err']:8.0f} {s['median_err']:8.0f} "
+              f"{s['exact_count']:6d} {s['good_count']:6d} "
+              f"{s['avg_time_s']:7.1f}s {s['n']:4d}")
 
     # Fallback recommendation: per-task-class winner
     print(f"\n{'='*70}")
@@ -626,14 +629,6 @@ print(f"Strategy tests: {len(results)}, method tests: {len(method_results)}")
 #                        changed (silent strategy drift catches code
 #                        paths that pass coords but lose the smarts)
 # ════════════════════════════════════════════════════════════════════
-
-
-# Pure helpers live in tests/vlm_gate_lib.py so they're importable
-# without triggering the screenshot+benchmark side effects above.
-from vlm_gate_lib import (
-    summarize_bucket, strategy_attribution,
-    compare_buckets, compare_attribution, render_baseline_md,
-)
 
 
 # ── --bump-baseline ───────────────────────────────────────────────

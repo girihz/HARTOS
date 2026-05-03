@@ -14,12 +14,20 @@ from typing import Dict, Iterable, List, Tuple
 
 
 def summarize_bucket(items: Iterable[dict], key: str) -> Dict[str, dict]:
-    """Group items by item[key] → {bucket: {avg_err, exact_count,
-    fail_count, avg_time_s, n}}.
+    """Group items by item[key] → {bucket: {avg_err, median_err,
+    exact_count, good_count, fail_count, avg_time_s, n}}.
 
-    avg_err uses only non-FAIL items (error < 9000) so a single FAIL
-    doesn't swamp the average and mask real grounding-quality drift.
-    avg_time uses ALL items (FAILs still consumed wall-clock time).
+    avg_err / median_err use only non-FAIL items (error < 9000) so a
+    single FAIL doesn't swamp the average and mask real grounding-
+    quality drift.  avg_time uses ALL items (FAILs still consumed
+    wall-clock time).
+
+    Single source of truth — both the gate (--gate) and the benchmark's
+    METHOD SUMMARY table read from this.  The legacy inline aggregator
+    in vlm_grounding_benchmark.py used a slightly different sort key
+    (sum/len over ALL items including 9999s) which displaced methods
+    with FAILs lower than they deserved; the call site now uses
+    avg_err for the sort, matching the displayed value.
     """
     buckets: Dict[str, list] = defaultdict(list)
     for r in items:
@@ -31,9 +39,12 @@ def summarize_bucket(items: Iterable[dict], key: str) -> Dict[str, dict]:
     for k, group in buckets.items():
         clean = [r for r in group if r['error'] < 9000]
         clean = clean or group
+        sorted_errs = sorted(r['error'] for r in clean)
         summary[k] = {
-            'avg_err': sum(r['error'] for r in clean) / len(clean),
+            'avg_err': sum(sorted_errs) / len(sorted_errs),
+            'median_err': sorted_errs[len(sorted_errs) // 2],
             'exact_count': sum(1 for r in group if r['error'] < 30),
+            'good_count': sum(1 for r in group if r['error'] < 80),
             'fail_count': sum(1 for r in group if r['error'] >= 9000),
             'avg_time_s': sum(r['time'] for r in group) / max(len(group), 1),
             'n': len(group),
