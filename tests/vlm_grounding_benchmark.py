@@ -22,8 +22,28 @@ b64 = base64.b64encode(buf.getvalue()).decode('ascii')
 print(f"Image: {IMG_W}x{IMG_H}, {len(buf.getvalue())//1024}KB")
 
 # ── VLM call ────────────────────────────────────────────────────────
+# Resolve the VLM URL the same way Qwen3VLBackend does: env override →
+# port_registry default.  Avoids the hardcoded 8080 that was wrong on
+# installs where the port_registry maps llm to a different port (e.g.
+# 8082 in the current Nunba bundle).
+def _resolve_vlm_url():
+    explicit = os.environ.get('HEVOLVE_VLM_ENDPOINT_URL') or os.environ.get('HEVOLVE_LLM_ENDPOINT_URL')
+    if explicit:
+        return explicit.rstrip('/') + '/chat/completions'
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from core.port_registry import get_port
+        port = get_port('llm')
+    except Exception:
+        port = int(os.environ.get('HEVOLVE_LLM_PORT', 8080))
+    return f'http://127.0.0.1:{port}/v1/chat/completions'
+
+import os
+_VLM_URL = _resolve_vlm_url()
+print(f"VLM endpoint: {_VLM_URL}")
+
 def vlm(prompt, max_tok=100):
-    r = requests.post('http://127.0.0.1:8080/v1/chat/completions', json={
+    r = requests.post(_VLM_URL, json={
         'model': 'local', 'max_tokens': max_tok, 'temperature': 0.1,
         'messages': [{'role': 'user', 'content': [
             {'type': 'text', 'text': prompt},
@@ -270,13 +290,252 @@ for target, trs in target_results.items():
     best = min(trs, key=lambda x: x['error'])
     print(f"  {target:30s} best={best['strategy']:22s} err={best['error']:.0f} grade={best['grade']}")
 
+# ════════════════════════════════════════════════════════════════════
+# METHOD BENCHMARK — runs the 3 sibling code paths against the SAME
+# 6 targets so we can pick the right path per task class instead of
+# guessing.  Sibling paths:
+#
+#   1. point_and_act      single-shot, has 3 internal strategies
+#                         (taskbar_list shortcut, describe_first,
+#                         elimination_retry).  Used by /visual_agent.
+#   2. parse_and_reason   single-shot, returns SoM + action.  Heavy.
+#                         Currently no production callers (only tests).
+#   3. run_local_agentic_loop  multi-iter loop, used by every other
+#                              VLM entry point (chat → autogen,
+#                              CREATE/REUSE recipes, robot, coding
+#                              agent).  Has its own inline prompt; got
+#                              taskbar+bias helpers added in b7936bf.
+#
+# This section measures each method's grounding accuracy + latency on
+# the same 6 targets the prompt-strategy benchmark above uses, so the
+# comparison is apples-to-apples (same image, same ground truth).
+#
+# Loop is run with max_iterations=1 and execute_action mocked to a
+# no-op so nothing actually clicks on the runner's screen — we just
+# capture the loop's first grounding decision.
+# ════════════════════════════════════════════════════════════════════
+
+method_results = []
+print(f"\n{'='*90}")
+print("METHOD BENCHMARK — running parse_and_reason / point_and_act / loop_one_iter")
+print(f"{'='*90}")
+
+# Lazy import — the existing prompt-strategy section above has no
+# dependency on HARTOS internals; only the method section does.  This
+# keeps the prompt-strategy benchmark runnable in environments that
+# don't have hart-backend importable (e.g. raw VLM probe).
+try:
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), '..'))
+    from integrations.vlm.qwen3vl_backend import get_qwen3vl_backend
+    _backend = get_qwen3vl_backend()
+    _methods_available = True
+except Exception as _e:
+    print(f"Method benchmark skipped — HARTOS not importable: {_e}")
+    _backend = None
+    _methods_available = False
+
+
+def _grade(err):
+    return 'EXACT' if err < 30 else 'GOOD' if err < 80 else 'OK' if err < 150 else 'BAD'
+
+
+def _norm_xy_from_method_result(action_dict, img_w, img_h, screen_w, screen_h):
+    """Pull the (nx, ny) in 0-1000 normalized space out of a method's
+    result dict.  Different methods name the keys differently:
+
+      point_and_act      → 'norm_x', 'norm_y' (already 0-1000)
+      parse_and_reason   → action_json['coordinate'] = [px, py] image px
+      loop_one_iter      → action_json['coordinate'] = [screen_x, screen_y]
+                           (back-scaled below to 0-1000 for comparison)
+    """
+    if action_dict is None:
+        return None, None
+    # point_and_act
+    nx = action_dict.get('norm_x')
+    ny = action_dict.get('norm_y')
+    if nx is not None and ny is not None:
+        return int(nx), int(ny)
+    # parse_and_reason / loop  — pull from coordinate field
+    coord = action_dict.get('coordinate') or (
+        action_dict.get('action_json') or {}).get('coordinate')
+    if coord and isinstance(coord, list) and len(coord) == 2:
+        cx, cy = coord
+        # If coordinate is already 0-1000 normalized, return as-is.
+        # Otherwise back-scale from screen pixels.
+        if cx <= 1000 and cy <= 1000 and (img_w == 1024 and img_h == 576):
+            return int(cx), int(cy)
+        # Treat as screen-space → back-scale to 0-1000
+        nx = int(cx * 1000 / screen_w)
+        ny = int(cy * 1000 / screen_h)
+        return nx, ny
+    return None, None
+
+
+def _run_point_and_act(target):
+    t0 = time.time()
+    res = _backend.point_and_act(b64, f'click the {target}')
+    elapsed = time.time() - t0
+    nx, ny = _norm_xy_from_method_result(res, IMG_W, IMG_H, SW, SH)
+    return nx, ny, elapsed, res.get('strategy', '?')
+
+
+def _run_parse_and_reason(target):
+    t0 = time.time()
+    res = _backend.parse_and_reason(b64, f'click the {target}')
+    elapsed = time.time() - t0
+    nx, ny = _norm_xy_from_method_result(
+        {'coordinate': (res.get('action_json') or {}).get('coordinate')},
+        IMG_W, IMG_H, SW, SH,
+    )
+    return nx, ny, elapsed, 'parse_and_reason'
+
+
+def _run_loop_one_iter(target):
+    """Drive run_local_agentic_loop for ONE iteration with the unified
+    branch enabled and execute_action mocked.  Captures the first
+    action the loop's inline prompt produces — including any
+    taskbar_pre_check shortcut and bias-retry that fired."""
+    from unittest import mock
+    from integrations.vlm import local_loop as _ll
+    # Force the unified branch (the one with my new helpers).
+    _os.environ['HEVOLVE_VLM_UNIFIED'] = 'true'
+    message = {
+        'instruction_to_vlm_agent': f'click the {target}',
+        'enhanced_instruction': f'click the {target}',
+        'user_id': 'bench', 'prompt_id': 'bench',
+        'os_to_control': 'windows', 'max_ETA_in_seconds': 60,
+    }
+    t0 = time.time()
+    with mock.patch('integrations.vlm.local_computer_tool.execute_action',
+                    return_value={'status': 'mocked', 'success': True}), \
+         mock.patch('integrations.vlm.local_computer_tool.take_screenshot',
+                    return_value=b64):
+        res = _ll.run_local_agentic_loop(message, tier='inprocess', max_iterations=1)
+    elapsed = time.time() - t0
+    actions = res.get('extracted_responses') or []
+    if not actions:
+        return None, None, elapsed, '(no action)'
+    first = actions[0].get('content') or {}
+    coord = first.get('coordinate')
+    strategy = first.get('_strategy', 'inline_prompt')
+    nx = ny = None
+    if coord and isinstance(coord, list) and len(coord) == 2:
+        cx, cy = coord
+        # Loop emits screen-space coordinates after scaling — back-scale
+        # to 0-1000 normalized for comparison with TARGETS.
+        nx = int(cx * 1000 / SW) if SW else cx
+        ny = int(cy * 1000 / SH) if SH else cy
+    return nx, ny, elapsed, strategy
+
+
+_METHODS = (
+    ('point_and_act',     _run_point_and_act),
+    ('parse_and_reason',  _run_parse_and_reason),
+    ('loop_one_iter',     _run_loop_one_iter),
+)
+
+if _methods_available:
+    print(f"{'Target':30s} {'Method':20s} {'Got':12s} {'Expected':12s} {'Err':>6s} {'Grade':6s} {'Time':>6s} {'Strat':20s}")
+    print(f"{'-'*120}")
+    for target, (exp_x, exp_y) in TARGETS.items():
+        for m_name, m_fn in _METHODS:
+            try:
+                nx, ny, elapsed, strat = m_fn(target)
+            except Exception as e:
+                print(f"{target:30s} {m_name:20s} {'ERROR':12s} {f'({exp_x},{exp_y})':12s} {'---':>6s} {'ERR':6s} {'--':>6s} {str(e)[:18]:20s}")
+                method_results.append({
+                    'target': target, 'method': m_name,
+                    'got': None, 'expected': (exp_x, exp_y),
+                    'error': 9999, 'grade': 'ERR',
+                    'time': 0, 'strategy': str(e)[:60],
+                })
+                continue
+            if nx is None or ny is None:
+                err = 9999
+                grade = 'FAIL'
+                got_str = 'FAIL'
+            else:
+                err = ((nx - exp_x) ** 2 + (ny - exp_y) ** 2) ** 0.5
+                grade = _grade(err)
+                got_str = f'({nx},{ny})'
+            print(f"{target:30s} {m_name:20s} {got_str:12s} {f'({exp_x},{exp_y})':12s} {err:6.0f} {grade:6s} {elapsed:5.1f}s {strat[:18]:20s}")
+            method_results.append({
+                'target': target, 'method': m_name,
+                'got': (nx, ny) if nx is not None else None,
+                'expected': (exp_x, exp_y),
+                'error': err, 'grade': grade,
+                'time': elapsed, 'strategy': strat,
+            })
+
+    # Per-method summary
+    from collections import defaultdict as _dd
+    print(f"\n{'='*70}")
+    print("METHOD SUMMARY")
+    print(f"{'='*70}")
+    print(f"{'Method':20s} {'Avg_err':>8s} {'Median':>8s} {'EXACT':>6s} {'GOOD+':>6s} {'AvgTime':>8s} {'N':>4s}")
+    print(f"{'-'*70}")
+    method_buckets = _dd(list)
+    for r in method_results:
+        method_buckets[r['method']].append(r)
+    for m_name, rs in sorted(
+        method_buckets.items(),
+        key=lambda kv: sum(r['error'] for r in kv[1]) / len(kv[1])
+    ):
+        clean = [r for r in rs if r['error'] < 9000]
+        clean = clean or rs
+        avg_err = sum(r['error'] for r in clean) / len(clean)
+        srt = sorted(r['error'] for r in clean)
+        median = srt[len(srt) // 2]
+        exact = sum(1 for r in rs if r['error'] < 30)
+        good = sum(1 for r in rs if r['error'] < 80)
+        avg_t = sum(r['time'] for r in rs) / max(len(rs), 1)
+        print(f"{m_name:20s} {avg_err:8.0f} {median:8.0f} {exact:6d} {good:6d} {avg_t:7.1f}s {len(rs):4d}")
+
+    # Fallback recommendation: per-task-class winner
+    print(f"\n{'='*70}")
+    print("PER-TARGET WINNER (lowest error)")
+    print(f"{'='*70}")
+    target_buckets = _dd(list)
+    for r in method_results:
+        target_buckets[r['target']].append(r)
+    for target, rs in target_buckets.items():
+        winner = min(rs, key=lambda r: r['error'])
+        print(f"  {target:30s} → {winner['method']:20s} "
+              f"err={winner['error']:.0f} ({winner['strategy']})")
+
+    print(f"\n{'='*70}")
+    print("RECOMMENDED FALLBACK CHAIN")
+    print(f"{'='*70}")
+    # Rank methods by their per-target win count + by avg error.
+    win_counts = _dd(int)
+    for target, rs in target_buckets.items():
+        winner = min(rs, key=lambda r: r['error'])
+        win_counts[winner['method']] += 1
+    avg_errs = {
+        m: sum(r['error'] for r in rs) / len(rs)
+        for m, rs in method_buckets.items()
+    }
+    ranked = sorted(
+        method_buckets.keys(),
+        key=lambda m: (-win_counts[m], avg_errs[m]),
+    )
+    for i, m in enumerate(ranked, 1):
+        print(f"  {i}. {m:20s} (wins={win_counts[m]}/{len(target_buckets)}, "
+              f"avg_err={avg_errs[m]:.0f})")
+    print(f"\nUse #{ranked[0]!r} as primary, #{ranked[1]!r} as fallback when "
+          f"primary FAILs/errors out.  When the primary's confidence is low "
+          f"(e.g. EXACT/GOOD threshold violated by avg+1σ), retry with "
+          f"#{ranked[1]!r} before surfacing the result to the agent.")
+
 # ── Save JSON ────────────────────────────────────────────────────────
 out = {
     'screen': f'{SW}x{SH}', 'image': f'{IMG_W}x{IMG_H}',
     'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
     'results': results,
+    'method_results': method_results,
 }
 with open('tests/vlm_benchmark_results.json', 'w') as f:
     json.dump(out, f, indent=2, default=str)
 print(f"\nResults saved to tests/vlm_benchmark_results.json")
-print(f"Total tests: {len(results)}")
+print(f"Strategy tests: {len(results)}, method tests: {len(method_results)}")
