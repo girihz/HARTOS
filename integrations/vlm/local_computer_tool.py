@@ -138,7 +138,10 @@ def get_active_window_info():
     return None
 
 
-def execute_action(action: dict, tier: str) -> dict:
+def execute_action(action: dict, tier: str, *,
+                   window_handle: int = None,
+                   verify: bool = False,
+                   if_occluded: str = 'skip') -> dict:
     """
     Execute a single VLM action (click, type, key, etc.).
 
@@ -146,11 +149,34 @@ def execute_action(action: dict, tier: str) -> dict:
     a window name that doesn't match the actual foreground window,
     the action is flagged (prevents clicking the wrong app's taskbar icon).
 
+    Phase 4 of vlm_best_of_all_worlds_plan.md §3 added the per-window
+    keyword arguments below.  All are backward-compatible — every
+    existing caller passes only ``(action, tier)`` and gets the same
+    behaviour as before.
+
     Args:
-        action: dict with 'action', optionally 'coordinate', 'text', 'value', 'path', 'reasoning'
-        tier: 'inprocess' or 'http'
+        action: dict with 'action', optionally 'coordinate' (in
+            window-local 0-1000 norm space when ``window_handle`` is
+            set; in screen-pixel space otherwise), 'text', 'value',
+            'path', 'reasoning'.
+        tier: 'inprocess' or 'http'.
+        window_handle: HWND from
+            :func:`integrations.remote_desktop.window_capture.list_windows`.
+            When set, ``coordinate`` is treated as window-local 0-1000
+            normalized space and translated to current screen coords
+            via the window's freshly-snapshotted rect (handles windows
+            moved between capture and click).
+        verify: when True, take a pre/post screenshot diff and retry
+            once with a 50-px nudge if no visible change occurred.
+        if_occluded: policy for non-foreground / occluded windows:
+              ``'skip'`` (default)        — return status='window_occluded'
+              ``'foreground'``            — SetForegroundWindow first, then click
+              ``'force'``                 — click regardless (PrintWindow-captured
+                                            click target may underlie another window)
+
     Returns:
-        dict with 'output' and optionally 'error', 'window_mismatch'
+        dict with 'output' and optionally 'error', 'window_mismatch',
+        'status', 'translated_from', 'translated_to', 'verify_diff'.
     """
     # Validate: if reasoning mentions a specific app, check it matches reality
     reasoning = action.get('Reasoning', action.get('reasoning', '')).lower()
@@ -164,6 +190,24 @@ def execute_action(action: dict, tier: str) -> dict:
             elif 'notepad' in reasoning and 'notepad' not in active.lower():
                 _mismatch = f"VLM thinks Notepad but active window is: {active}"
 
+    # Phase 4: per-window translation + occlusion handling.  Mutates
+    # action['coordinate'] in place when needed; returns an early
+    # status dict when the window can't be acted on safely.
+    _window_meta = None
+    if window_handle is not None:
+        _window_meta, _early = _prepare_window_for_action(
+            window_handle, action, if_occluded)
+        if _early is not None:
+            return _early
+
+    # Phase 4: pre-action screenshot for verify=True diff.
+    _pre_b64 = None
+    if verify and tier == 'inprocess':
+        try:
+            _pre_b64 = take_screenshot('inprocess')
+        except Exception as e:
+            logger.debug(f"verify pre-screenshot skipped: {e}")
+
     if tier == 'inprocess':
         result = _execute_inprocess(action)
     else:
@@ -174,7 +218,170 @@ def execute_action(action: dict, tier: str) -> dict:
         import logging
         logging.getLogger('hevolve.vlm').warning(f"[WINDOW-MISMATCH] {_mismatch}")
 
+    # Phase 4: surface window metadata so the loop's caller can audit.
+    if _window_meta is not None:
+        result.setdefault('window', _window_meta)
+
+    # Phase 4: post-click verify with one 50-px nudge retry.
+    if _pre_b64 is not None and result.get('error') is None:
+        result = _post_click_verify(
+            action, result, _pre_b64,
+            tier=tier, window_meta=_window_meta)
+
     return result
+
+
+# ─── Phase 4 helpers (per-window translation + post-click verify) ────
+
+
+def _prepare_window_for_action(window_handle: int, action: dict,
+                                if_occluded: str):
+    """Refresh the window's rect, decide if it can be acted on, and
+    translate action's window-local 0-1000 coords into screen pixels
+    in place.  Returns ``(window_meta, early_result_or_None)``.
+
+    When the second tuple element is non-None, ``execute_action``
+    returns it immediately without touching pyautogui — the window
+    can't be acted on safely.
+    """
+    try:
+        from integrations.remote_desktop.window_capture import (
+            WindowEnumerator, WindowInfo)
+    except ImportError as e:
+        logger.debug(f"window_capture unavailable: {e}")
+        return None, {
+            'output': '', 'status': 'window_capture_unavailable',
+            'error': f'window_capture import failed: {e}',
+        }
+
+    enum = WindowEnumerator()
+    fresh = enum.refresh_window_info(WindowInfo(
+        hwnd=window_handle, title='', process_name='',
+        pid=0, rect=(0, 0, 0, 0)))
+    if fresh is None:
+        return None, {
+            'output': '', 'status': 'window_destroyed',
+            'error': f'hwnd={window_handle} no longer exists',
+        }
+    wx, wy, ww, wh = fresh.rect
+    if ww <= 0 or wh <= 0:
+        return fresh.to_dict(), {
+            'output': '', 'status': 'window_offscreen',
+            'error': f'window rect collapsed to {fresh.rect}',
+            'window': fresh.to_dict(),
+        }
+    # Occlusion / minimized handling per policy.
+    needs_foreground = fresh.minimized or not fresh.visible
+    if needs_foreground:
+        if if_occluded == 'skip':
+            return fresh.to_dict(), {
+                'output': '', 'status': 'window_minimized',
+                'error': 'window minimized; pass if_occluded="foreground" '
+                         'to bring it forward first',
+                'window': fresh.to_dict(),
+            }
+        if if_occluded in ('foreground', 'force'):
+            _bring_foreground(window_handle)
+    # Translate window-local 0-1000 normalized coords → screen pixels.
+    coord = action.get('coordinate')
+    if coord and isinstance(coord, (list, tuple)) and len(coord) >= 2:
+        nx, ny = coord[0], coord[1]
+        if 0 <= nx <= 1000 and 0 <= ny <= 1000:
+            sx = wx + int(nx * ww / 1000)
+            sy = wy + int(ny * wh / 1000)
+            action['_translated_from'] = (nx, ny)
+            action['coordinate'] = [sx, sy]
+            action['_translated_to'] = (sx, sy)
+        else:
+            # Out-of-range norm coords → caller passed screen pixels;
+            # leave alone and let the action execute as-is.
+            pass
+    return fresh.to_dict(), None
+
+
+def _bring_foreground(hwnd: int) -> None:
+    """SetForegroundWindow + ShowWindow(SW_RESTORE) so a minimized /
+    backgrounded window becomes the click target.  Best-effort —
+    Windows blocks SetForegroundWindow from non-foreground processes
+    in many cases, so callers shouldn't assume it always works."""
+    if sys.platform != 'win32':
+        return
+    try:
+        import ctypes
+        SW_RESTORE = 9
+        ctypes.windll.user32.ShowWindow(int(hwnd), SW_RESTORE)
+        ctypes.windll.user32.SetForegroundWindow(int(hwnd))
+        # Brief sleep — SetForegroundWindow is async, the click can
+        # arrive before the new foreground window is composited.
+        time.sleep(0.10)
+    except Exception as e:
+        logger.debug(f"bring-foreground hwnd={hwnd} failed: {e}")
+
+
+def _post_click_verify(action: dict, result: dict, pre_b64: str, *,
+                       tier: str, window_meta: dict = None) -> dict:
+    """Take a post-action screenshot, diff against pre, and if no
+    visible change occurred, retry the action once with a 50-px
+    nudge.  Annotates the result with 'verify_diff' (0.0–1.0) and
+    'verify_retried' so callers can see what happened.
+    """
+    try:
+        time.sleep(0.20)  # let the GUI settle before re-snapshot
+        post_b64 = take_screenshot(tier)
+    except Exception as e:
+        result['verify_diff'] = None
+        result['verify_error'] = f'post-screenshot failed: {e}'
+        return result
+    diff = _quick_image_diff(pre_b64, post_b64)
+    result['verify_diff'] = round(diff, 3)
+    if diff < 0.005:
+        # No visible change — try one nudge.  Only meaningful for
+        # click-type actions with a coordinate.
+        coord = action.get('coordinate')
+        if coord and isinstance(coord, (list, tuple)) and len(coord) >= 2:
+            nudged = [int(coord[0]) + 50, int(coord[1])]
+            nudged_action = dict(action, coordinate=nudged)
+            logger.info(
+                f"verify: no visible change after click @ {coord}; "
+                f"retrying with 50-px nudge → {nudged}")
+            try:
+                if tier == 'inprocess':
+                    _ = _execute_inprocess(nudged_action)
+                else:
+                    _ = _execute_http(nudged_action)
+            except Exception as e:
+                logger.debug(f"verify-retry failed: {e}")
+            result['verify_retried'] = True
+            result['verify_nudge_to'] = nudged
+        else:
+            result['verify_retried'] = False
+    else:
+        result['verify_retried'] = False
+    return result
+
+
+def _quick_image_diff(b64_a: str, b64_b: str) -> float:
+    """Fraction of significantly-changed pixels between two base64
+    JPEGs.  Downsizes to 64×64 grayscale for speed (each image →
+    4096 bytes → 4096 cheap subtractions).  Returns 0.0 (identical)
+    to 1.0 (every pixel differs by > 16).
+    """
+    try:
+        from PIL import Image
+        import base64 as _b64
+        ima = Image.open(io.BytesIO(_b64.b64decode(b64_a))).convert('L').resize((64, 64))
+        imb = Image.open(io.BytesIO(_b64.b64decode(b64_b))).convert('L').resize((64, 64))
+        ba = ima.tobytes()
+        bb = imb.tobytes()
+        n = len(ba)
+        if n == 0:
+            return 0.0
+        # Threshold of 16 absorbs JPEG-compression noise on unchanged regions.
+        changed = sum(1 for a, b in zip(ba, bb) if abs(a - b) > 16)
+        return changed / n
+    except Exception:
+        # Conservative: report no diff so we don't trigger spurious nudges.
+        return 0.0
 
 
 def _execute_inprocess(action: dict) -> dict:

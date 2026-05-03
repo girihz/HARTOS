@@ -2149,3 +2149,195 @@ class TestLocalLoopHelpers:
 
         content = _build_vision_prompt("1: button Save", "b64data", iteration=3)
         assert any("updated screen" in c.get('text', '') for c in content if isinstance(c, dict) and 'text' in c)
+
+
+# ===========================================================================
+# Phase 4 - per-window click translation + post-click verify
+# (memory/vlm_best_of_all_worlds_plan.md section 3)
+# ===========================================================================
+
+
+class TestExecuteActionBackCompat:
+    """execute_action's new kwargs (window_handle, verify, if_occluded)
+    are all defaulted - every existing call site stays valid."""
+
+    @patch('integrations.vlm.local_computer_tool._execute_inprocess')
+    def test_no_kwargs_calls_inprocess_unchanged(self, mock_exec):
+        from integrations.vlm.local_computer_tool import execute_action
+        mock_exec.return_value = {'output': 'ok'}
+        result = execute_action({'action': 'left_click'}, 'inprocess')
+        assert result['output'] == 'ok'
+        assert 'window' not in result
+        assert 'verify_diff' not in result
+
+
+class TestPrepareWindowForAction:
+    """_prepare_window_for_action: refresh window, decide policy,
+    translate window-local 0-1000 coords to screen pixels."""
+
+    def _make_winfo(self, hwnd, rect=(100, 200, 800, 600),
+                    minimized=False, visible=True):
+        from integrations.remote_desktop.window_capture import WindowInfo
+        return WindowInfo(
+            hwnd=hwnd, title=f'win{hwnd}', process_name='test.exe',
+            pid=42, rect=rect, visible=visible, minimized=minimized)
+
+    def test_destroyed_window_returns_early(self):
+        from integrations.vlm.local_computer_tool import _prepare_window_for_action
+        with patch('integrations.remote_desktop.window_capture.WindowEnumerator') as mock_enum:
+            mock_enum.return_value.refresh_window_info.return_value = None
+            meta, early = _prepare_window_for_action(
+                12345, {'action': 'left_click', 'coordinate': [500, 500]},
+                if_occluded='skip')
+        assert early is not None
+        assert early['status'] == 'window_destroyed'
+
+    def test_zero_size_window_returns_offscreen(self):
+        from integrations.vlm.local_computer_tool import _prepare_window_for_action
+        with patch('integrations.remote_desktop.window_capture.WindowEnumerator') as mock_enum:
+            mock_enum.return_value.refresh_window_info.return_value = \
+                self._make_winfo(1, rect=(0, 0, 0, 0))
+            _, early = _prepare_window_for_action(
+                1, {'action': 'left_click', 'coordinate': [500, 500]},
+                if_occluded='skip')
+        assert early is not None
+        assert early['status'] == 'window_offscreen'
+
+    def test_minimized_window_skip_policy_returns_early(self):
+        from integrations.vlm.local_computer_tool import _prepare_window_for_action
+        with patch('integrations.remote_desktop.window_capture.WindowEnumerator') as mock_enum:
+            mock_enum.return_value.refresh_window_info.return_value = \
+                self._make_winfo(1, minimized=True)
+            _, early = _prepare_window_for_action(
+                1, {'action': 'left_click', 'coordinate': [500, 500]},
+                if_occluded='skip')
+        assert early is not None
+        assert early['status'] == 'window_minimized'
+
+    def test_minimized_window_foreground_policy_brings_forward(self):
+        from integrations.vlm.local_computer_tool import _prepare_window_for_action
+        with patch('integrations.remote_desktop.window_capture.WindowEnumerator') as mock_enum, \
+             patch('integrations.vlm.local_computer_tool._bring_foreground') as mock_bring:
+            mock_enum.return_value.refresh_window_info.return_value = \
+                self._make_winfo(1, minimized=True)
+            action = {'action': 'left_click', 'coordinate': [500, 500]}
+            meta, early = _prepare_window_for_action(
+                1, action, if_occluded='foreground')
+        assert early is None, 'foreground policy should not return early'
+        mock_bring.assert_called_once_with(1)
+
+    def test_window_local_coord_translated_to_screen(self):
+        from integrations.vlm.local_computer_tool import _prepare_window_for_action
+        with patch('integrations.remote_desktop.window_capture.WindowEnumerator') as mock_enum:
+            mock_enum.return_value.refresh_window_info.return_value = \
+                self._make_winfo(1, rect=(100, 200, 800, 600))
+            action = {'action': 'left_click', 'coordinate': [500, 500]}
+            meta, early = _prepare_window_for_action(
+                1, action, if_occluded='skip')
+        assert early is None
+        # 100 + int(500*800/1000)=500, 200 + int(500*600/1000)=500
+        assert action['coordinate'] == [500, 500]
+        assert action['_translated_from'] == (500, 500)
+        assert action['_translated_to'] == (500, 500)
+
+    def test_norm_coord_corner_translated_correctly(self):
+        from integrations.vlm.local_computer_tool import _prepare_window_for_action
+        with patch('integrations.remote_desktop.window_capture.WindowEnumerator') as mock_enum:
+            mock_enum.return_value.refresh_window_info.return_value = \
+                self._make_winfo(1, rect=(0, 0, 1000, 1000))
+            action = {'action': 'left_click', 'coordinate': [1000, 1000]}
+            _prepare_window_for_action(1, action, if_occluded='skip')
+        assert action['coordinate'] == [1000, 1000]
+
+    def test_screen_pixel_coord_left_alone(self):
+        """Coord with values > 1000 = caller passed screen pixels;
+        translation must NOT mangle them."""
+        from integrations.vlm.local_computer_tool import _prepare_window_for_action
+        with patch('integrations.remote_desktop.window_capture.WindowEnumerator') as mock_enum:
+            mock_enum.return_value.refresh_window_info.return_value = \
+                self._make_winfo(1, rect=(0, 0, 800, 600))
+            action = {'action': 'left_click', 'coordinate': [1500, 800]}
+            _prepare_window_for_action(1, action, if_occluded='skip')
+        assert action['coordinate'] == [1500, 800]
+
+
+class TestQuickImageDiff:
+    """_quick_image_diff: cheap pre/post diff for verify=True."""
+
+    def _b64_solid_color(self, color, size=(100, 100)):
+        import base64, io
+        from PIL import Image
+        img = Image.new('RGB', size, color)
+        buf = io.BytesIO()
+        img.save(buf, 'JPEG', quality=80)
+        return base64.b64encode(buf.getvalue()).decode('ascii')
+
+    def test_identical_images_diff_zero(self):
+        from integrations.vlm.local_computer_tool import _quick_image_diff
+        b64 = self._b64_solid_color((255, 0, 0))
+        assert _quick_image_diff(b64, b64) == 0.0
+
+    def test_completely_different_images_diff_high(self):
+        from integrations.vlm.local_computer_tool import _quick_image_diff
+        a = self._b64_solid_color((0, 0, 0))
+        b = self._b64_solid_color((255, 255, 255))
+        diff = _quick_image_diff(a, b)
+        assert diff > 0.9, f'black vs white should be near-100% diff, got {diff}'
+
+    def test_invalid_input_returns_zero(self):
+        """Bad base64 returns 0 conservatively (no spurious nudges)."""
+        from integrations.vlm.local_computer_tool import _quick_image_diff
+        assert _quick_image_diff('not-base64!!!', 'also-bad') == 0.0
+
+
+class TestPostClickVerifyRetry:
+    """When verify=True and pre/post diff is tiny, retry once with
+    a 50-px nudge."""
+
+    def _solid_b64(self, color=(128, 128, 128)):
+        import base64, io
+        from PIL import Image
+        img = Image.new('RGB', (100, 100), color)
+        buf = io.BytesIO()
+        img.save(buf, 'JPEG', quality=80)
+        return base64.b64encode(buf.getvalue()).decode('ascii')
+
+    @patch('integrations.vlm.local_computer_tool.take_screenshot')
+    @patch('integrations.vlm.local_computer_tool._execute_inprocess')
+    @patch('integrations.vlm.local_computer_tool.time.sleep')
+    def test_no_change_triggers_nudge_retry(self, mock_sleep, mock_exec,
+                                             mock_screenshot):
+        from integrations.vlm.local_computer_tool import execute_action
+        same_b64 = self._solid_b64()
+        mock_screenshot.return_value = same_b64
+        mock_exec.return_value = {'output': 'clicked'}
+
+        result = execute_action(
+            {'action': 'left_click', 'coordinate': [100, 100]},
+            'inprocess', verify=True)
+
+        assert result['verify_diff'] == 0.0
+        assert result['verify_retried'] is True
+        assert result['verify_nudge_to'] == [150, 100]
+        assert mock_exec.call_count == 2
+
+    @patch('integrations.vlm.local_computer_tool.take_screenshot')
+    @patch('integrations.vlm.local_computer_tool._execute_inprocess')
+    @patch('integrations.vlm.local_computer_tool.time.sleep')
+    def test_visible_change_no_retry(self, mock_sleep, mock_exec,
+                                      mock_screenshot):
+        from integrations.vlm.local_computer_tool import execute_action
+        mock_screenshot.side_effect = [
+            self._solid_b64((0, 0, 0)),
+            self._solid_b64((255, 255, 255)),
+        ]
+        mock_exec.return_value = {'output': 'clicked'}
+
+        result = execute_action(
+            {'action': 'left_click', 'coordinate': [100, 100]},
+            'inprocess', verify=True)
+
+        assert result['verify_diff'] > 0.9
+        assert result['verify_retried'] is False
+        assert mock_exec.call_count == 1
+
