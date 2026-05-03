@@ -78,7 +78,15 @@ except ImportError:
 
 @dataclass
 class WindowInfo:
-    """Metadata for a single OS window."""
+    """Metadata for a single OS window.
+
+    The trailing ``z_order`` / ``is_foreground`` / ``is_occluded`` /
+    ``occluded_pct`` / ``is_protected`` / ``monitor_idx`` fields were
+    added in Phase 1 of the VLM best-of-all-worlds plan (memory/
+    vlm_best_of_all_worlds_plan.md §1).  All have safe defaults so
+    existing callers (window_session, dlna_bridge, agent_tools) keep
+    working without modification.
+    """
     hwnd: int                           # Window handle (HWND on Windows, XID on Linux)
     title: str
     process_name: str
@@ -86,6 +94,13 @@ class WindowInfo:
     rect: Tuple[int, int, int, int]     # (x, y, width, height)
     visible: bool = True
     minimized: bool = False
+    # ── Phase-1 additions (VLM occlusion + multi-monitor) ──
+    z_order: int = 0                    # 0 = topmost; higher = further back
+    is_foreground: bool = False         # True if this is the active window
+    is_occluded: bool = False           # True if any other window covers > 5% of rect
+    occluded_pct: float = 0.0           # 0.0–100.0; % of rect area covered
+    is_protected: bool = False          # DWM-cloaked (DRM, virtual desktop hidden)
+    monitor_idx: int = -1               # Index into list_monitors() (-1 = unknown)
 
     def to_dict(self) -> dict:
         return {
@@ -96,6 +111,12 @@ class WindowInfo:
             'rect': list(self.rect),
             'visible': self.visible,
             'minimized': self.minimized,
+            'z_order': self.z_order,
+            'is_foreground': self.is_foreground,
+            'is_occluded': self.is_occluded,
+            'occluded_pct': round(self.occluded_pct, 1),
+            'is_protected': self.is_protected,
+            'monitor_idx': self.monitor_idx,
         }
 
     @classmethod
@@ -108,6 +129,12 @@ class WindowInfo:
             rect=tuple(d.get('rect', (0, 0, 0, 0))),
             visible=d.get('visible', True),
             minimized=d.get('minimized', False),
+            z_order=d.get('z_order', 0),
+            is_foreground=d.get('is_foreground', False),
+            is_occluded=d.get('is_occluded', False),
+            occluded_pct=d.get('occluded_pct', 0.0),
+            is_protected=d.get('is_protected', False),
+            monitor_idx=d.get('monitor_idx', -1),
         )
 
 
@@ -178,8 +205,18 @@ class WindowEnumerator:
     # ── Windows backend ────────────────────────────────────────
 
     def _list_windows_win32(self, include_minimized: bool) -> List[WindowInfo]:
-        """Enumerate windows via Win32 API."""
+        """Enumerate windows via Win32 API.
+
+        EnumWindows yields windows in **top-to-bottom z-order** — the first
+        callback invocation is the topmost window.  We use that order to
+        populate ``z_order`` (0 = topmost) and to compute ``is_occluded`` /
+        ``occluded_pct`` in :func:`_compute_occlusion`.
+        """
         results = []
+        try:
+            foreground_hwnd = _win32gui.GetForegroundWindow()
+        except Exception:
+            foreground_hwnd = 0
 
         def enum_callback(hwnd, _):
             if not _win32gui.IsWindowVisible(hwnd):
@@ -211,6 +248,12 @@ class WindowEnumerator:
             except Exception:
                 pass
 
+            # Phase-1 enrichment.  z_order is just the EnumWindows arrival
+            # index (top = 0).  is_protected uses DWMWA_CLOAKED — true for
+            # DRM-protected windows (Netflix, banking apps that opt out)
+            # AND for virtual-desktop-hidden windows (cloaked while not on
+            # current desktop).  Either way, capture_window will return
+            # black pixels, so the flag warns callers to fall back.
             results.append(WindowInfo(
                 hwnd=hwnd,
                 title=title,
@@ -219,9 +262,19 @@ class WindowEnumerator:
                 rect=(left, top, width, height),
                 visible=True,
                 minimized=minimized,
+                z_order=len(results),
+                is_foreground=(hwnd == foreground_hwnd),
+                is_protected=_is_dwm_cloaked(hwnd),
             ))
 
         _win32gui.EnumWindows(enum_callback, None)
+        # Compute occlusion + monitor assignment in a second pass — both
+        # need the full window list / monitor list to make sense.
+        _compute_occlusion(results)
+        try:
+            _assign_monitors(results, list_monitors())
+        except Exception as e:
+            logger.debug(f"Monitor assignment skipped: {e}")
         return results
 
     def _get_process_name_win32(self, pid: int) -> str:
@@ -667,3 +720,311 @@ class WindowCapture:
             except Exception:
                 pass
             self._mss_instance = None
+
+
+# ════════════════════════════════════════════════════════════════════
+# Phase 1 of vlm_best_of_all_worlds_plan.md §1 — module-level helpers
+# the VLM stack uses for occlusion-tolerant capture and multi-monitor
+# enumeration.  Lives in this file (not a sibling) so we have ONE
+# canonical home for window enumeration; the VLM stack imports from
+# here rather than maintaining a parallel implementation (Gate 4).
+# ════════════════════════════════════════════════════════════════════
+
+DWMWA_CLOAKED = 14  # DWM window-attribute index — non-zero = cloaked
+
+
+def _is_dwm_cloaked(hwnd) -> bool:
+    """True if the window is DWM-cloaked.
+
+    Cloaked windows include:
+      * DRM-protected content (Netflix desktop app, some banking apps
+        opted out of capture) — PrintWindow/BitBlt return black pixels
+      * Windows on other virtual desktops (cloaked while not on current
+        desktop) — capturing them returns last-frame snapshot, often stale
+
+    Either way, callers should be told the capture won't reflect live
+    content and they may want a different fallback.  Best-effort: if
+    dwmapi isn't available (very old Windows), return False.
+    """
+    if not _win32gui:
+        return False
+    try:
+        import ctypes
+        cloaked = ctypes.c_int(0)
+        result = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            int(hwnd), DWMWA_CLOAKED,
+            ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+        return result == 0 and cloaked.value != 0
+    except Exception:
+        return False
+
+
+def _compute_occlusion(windows: List[WindowInfo]) -> None:
+    """Annotate each window's ``is_occluded`` / ``occluded_pct`` in place.
+
+    Assumes windows are sorted top-to-bottom z-order (the EnumWindows
+    callback order).  For each window, compute the union of intersections
+    with every window above it; cap at the window's own area to avoid
+    over-counting when multiple windows above overlap each other AND this
+    window.  Threshold for is_occluded = > 5% covered (lets small overlay
+    bars / tray windows not count as 'occluded').
+    """
+    for i, win in enumerate(windows):
+        if win.minimized:
+            continue
+        wx, wy, ww, wh = win.rect
+        if ww <= 0 or wh <= 0:
+            continue
+        win_area = ww * wh
+        overlap_area = 0
+        for j in range(i):
+            other = windows[j]
+            if other.minimized:
+                continue
+            ox, oy, ow, oh = other.rect
+            ix1 = max(wx, ox)
+            iy1 = max(wy, oy)
+            ix2 = min(wx + ww, ox + ow)
+            iy2 = min(wy + wh, oy + oh)
+            if ix1 < ix2 and iy1 < iy2:
+                overlap_area += (ix2 - ix1) * (iy2 - iy1)
+        # Cap so a window covered by 2 things doesn't read as 200%.
+        overlap_area = min(overlap_area, win_area)
+        win.occluded_pct = (overlap_area / win_area) * 100.0
+        win.is_occluded = win.occluded_pct > 5.0
+
+
+def _assign_monitors(windows: List[WindowInfo],
+                     monitors: List[dict]) -> None:
+    """Set each window's ``monitor_idx`` based on which monitor its
+    rect's center point falls on.  Monitors that fully contain the
+    window's center beat partial-overlap monitors (avoids ambiguity
+    for windows straddling two monitors)."""
+    for win in windows:
+        wx, wy, ww, wh = win.rect
+        cx, cy = wx + ww // 2, wy + wh // 2
+        win.monitor_idx = -1
+        for m in monitors:
+            mx, my, mw, mh = m['rect']
+            if mx <= cx < mx + mw and my <= cy < my + mh:
+                win.monitor_idx = m['idx']
+                break
+
+
+def _ensure_dpi_aware_for_enum() -> None:
+    """Make this process DPI-aware before reading monitor / window rects.
+
+    Without this, EnumDisplayMonitors / GetWindowRect return LOGICAL
+    coordinates (post-scaling), e.g. 1707×960 instead of the physical
+    2560×1440 on a 150%-scaled display.  Pyautogui's screenshot returns
+    PHYSICAL pixels, so any caller mixing the two would have its click
+    coordinates land in the wrong spot — exactly the bug
+    local_computer_tool's _ensure_dpi_aware() was added to prevent.
+
+    Safe / idempotent: SetProcessDpiAwareness is per-process; calling
+    twice with the same value is a no-op, calling with a different
+    value silently fails (so existing DPI-aware processes aren't
+    disturbed).
+    """
+    if platform.system() != 'Windows':
+        return
+    try:
+        import ctypes
+        # PROCESS_PER_MONITOR_DPI_AWARE = 2 (Win 8.1+)
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except (AttributeError, OSError):
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def list_monitors() -> List[dict]:
+    """Enumerate physical displays.
+
+    Returns:
+        List of dicts: ``[{idx, rect: (x,y,w,h), scale_factor,
+        is_primary, name}]``.  ``rect`` is in **physical** pixel
+        coords thanks to :func:`_ensure_dpi_aware_for_enum`.
+        Negative values are valid for monitors left/above the primary.
+        ``scale_factor`` is the DPI scale (1.0 = 96 DPI; 1.5 = 144 DPI
+        / 150% scaling).  Empty list on non-Windows or unsupported
+        builds (Phase 2 adds macOS/Linux).
+    """
+    if platform.system() != 'Windows':
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return []
+
+    _ensure_dpi_aware_for_enum()
+
+    MONITORINFOF_PRIMARY = 0x00000001
+
+    class MONITORINFOEX(ctypes.Structure):
+        _fields_ = [
+            ('cbSize', wintypes.DWORD),
+            ('rcMonitor', wintypes.RECT),
+            ('rcWork', wintypes.RECT),
+            ('dwFlags', wintypes.DWORD),
+            ('szDevice', ctypes.c_wchar * 32),
+        ]
+
+    monitors: List[dict] = []
+
+    @ctypes.WINFUNCTYPE(
+        ctypes.c_int,
+        wintypes.HMONITOR,
+        wintypes.HDC,
+        ctypes.POINTER(wintypes.RECT),
+        wintypes.LPARAM,
+    )
+    def _enum_proc(hmon, _hdc, _lprect, _lparam):
+        info = MONITORINFOEX()
+        info.cbSize = ctypes.sizeof(MONITORINFOEX)
+        try:
+            ctypes.windll.user32.GetMonitorInfoW(hmon, ctypes.byref(info))
+        except Exception:
+            return 1
+        rect = info.rcMonitor
+        scale_factor = 1.0
+        try:
+            # MDT_EFFECTIVE_DPI = 0 (Win 8.1+); falls back to 96 if unavailable
+            dpi_x = ctypes.c_uint(96)
+            dpi_y = ctypes.c_uint(96)
+            ctypes.windll.shcore.GetDpiForMonitor(
+                hmon, 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y))
+            scale_factor = dpi_x.value / 96.0
+        except (AttributeError, OSError):
+            pass
+        monitors.append({
+            'idx': len(monitors),
+            'rect': (
+                rect.left, rect.top,
+                rect.right - rect.left, rect.bottom - rect.top,
+            ),
+            'work_rect': (
+                info.rcWork.left, info.rcWork.top,
+                info.rcWork.right - info.rcWork.left,
+                info.rcWork.bottom - info.rcWork.top,
+            ),
+            'scale_factor': scale_factor,
+            'is_primary': bool(info.dwFlags & MONITORINFOF_PRIMARY),
+            'name': info.szDevice,
+        })
+        return 1
+
+    try:
+        ctypes.windll.user32.EnumDisplayMonitors(0, 0, _enum_proc, 0)
+    except Exception as e:
+        logger.debug(f"EnumDisplayMonitors failed: {e}")
+    return monitors
+
+
+def capture_window_one_shot(hwnd: int, *, fmt: str = 'jpeg',
+                            quality: int = 70) -> Optional[bytes]:
+    """Capture a single window's pixels even when it's occluded /
+    not the foreground.
+
+    Uses ``user32.PrintWindow`` with ``PW_RENDERFULLCONTENT = 0x02``
+    which captures DWM-rendered content correctly for windows that
+    don't respond to ``WM_PRINT`` (most modern Win10+ apps including
+    Chrome / Edge / UWP).  Falls back to plain ``PrintWindow`` (flag
+    = 0) for older Windows where the flag is unsupported.
+
+    Args:
+        hwnd: Window handle from :func:`list_windows`.
+        fmt: 'jpeg' (default) or 'png'.
+        quality: JPEG quality 1–100 (ignored for png).
+
+    Returns:
+        Image bytes, or None if the window is gone / dimensions zero /
+        capture failed.
+
+    Failure modes (callers should handle):
+      * DRM-protected / cloaked windows return all-black pixels.  Check
+        ``WindowInfo.is_protected`` before relying on the capture.
+      * Pre-Win 10 1903 lacks PW_RENDERFULLCONTENT.  This function
+        downgrades to flag=0 with a debug log.
+      * Window minimized: returns last-saved DWM thumbnail (may be stale).
+    """
+    if platform.system() != 'Windows' or not _win32gui or not _PIL_Image:
+        return None
+    try:
+        import ctypes
+    except ImportError:
+        return None
+    if not _win32gui.IsWindow(hwnd):
+        return None
+    try:
+        left, top, right, bottom = _win32gui.GetClientRect(hwnd)
+    except Exception:
+        return None
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        return None
+
+    PW_RENDERFULLCONTENT = 0x02
+
+    hwnd_dc = _win32gui.GetWindowDC(hwnd)
+    if not hwnd_dc:
+        return None
+    mfc_dc = None
+    save_dc = None
+    bitmap = None
+    try:
+        mfc_dc = _win32ui.CreateDCFromHandle(hwnd_dc)
+        save_dc = mfc_dc.CreateCompatibleDC()
+        bitmap = _win32ui.CreateBitmap()
+        bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+        save_dc.SelectObject(bitmap)
+        result = ctypes.windll.user32.PrintWindow(
+            hwnd, save_dc.GetSafeHdc(), PW_RENDERFULLCONTENT)
+        if not result:
+            # Older Win — retry without the flag.
+            result = ctypes.windll.user32.PrintWindow(
+                hwnd, save_dc.GetSafeHdc(), 0)
+        if not result:
+            return None
+        bmp_info = bitmap.GetInfo()
+        bmp_data = bitmap.GetBitmapBits(True)
+        img = _PIL_Image.frombuffer(
+            'RGB',
+            (bmp_info['bmWidth'], bmp_info['bmHeight']),
+            bmp_data, 'raw', 'BGRX', 0, 1,
+        )
+        buf = io.BytesIO()
+        if fmt.lower() == 'png':
+            img.save(buf, format='PNG', optimize=True)
+        else:
+            img.save(buf, format='JPEG', quality=quality, optimize=True)
+        return buf.getvalue()
+    except Exception as e:
+        logger.debug(f"capture_window_one_shot failed for hwnd={hwnd}: {e}")
+        return None
+    finally:
+        try:
+            if bitmap is not None:
+                _win32gui.DeleteObject(bitmap.GetHandle())
+            if save_dc is not None:
+                save_dc.DeleteDC()
+            if mfc_dc is not None:
+                mfc_dc.DeleteDC()
+            _win32gui.ReleaseDC(hwnd, hwnd_dc)
+        except Exception:
+            pass
+
+
+def list_windows(*, include_minimized: bool = False) -> List[dict]:
+    """VLM-friendly thin wrapper: return list of dicts (not WindowInfo
+    objects) ready to ship to the VLM grounding prompt.
+
+    Calls into :class:`WindowEnumerator` so there's one canonical
+    enumerator implementation for the whole codebase.
+    """
+    enum = WindowEnumerator()
+    return [w.to_dict() for w in enum.list_windows(
+        include_minimized=include_minimized)]
