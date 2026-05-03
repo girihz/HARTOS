@@ -408,16 +408,13 @@ def run_local_agentic_loop(
                                   'middle_click', 'hover', 'mouse_move'}
 
                 if next_action in _CLICK_ACTIONS:
-                    coord = action_json.get('coordinate')
-                    # Try parsing <point> tags from raw response
-                    import re as _re
-                    point_match = _re.search(r'<point>\s*(\d+)\s*,\s*(\d+)\s*</point>', raw or '')
-                    if point_match:
-                        nx, ny = int(point_match.group(1)), int(point_match.group(2))
-                    elif coord and isinstance(coord, list) and len(coord) == 2:
-                        nx, ny = coord[0], coord[1]
-                    else:
-                        nx, ny = 500, 500  # center fallback
+                    # Phase 5 follow-through: was a 4th inline <point>
+                    # regex parser duplicating parser._parse_point_shape.
+                    # Now delegates to the canonical parser so the
+                    # action_json JSON-coordinate vs the raw <point>
+                    # tag agree (they previously could disagree when
+                    # the JSON had Box ID + the raw text had a point).
+                    nx, ny = _extract_click_coord(raw, action_json)
 
                     # Scale from 1000-normalized or image space to screen space
                     try:
@@ -431,7 +428,8 @@ def run_local_agentic_loop(
                             # Image pixel coords
                             screen_x = int(nx * _sw / VLM_IMG_W)
                             screen_y = int(ny * _sh / VLM_IMG_H)
-                    except Exception:
+                    except Exception as _scale_err:
+                        logger.debug(f"coord scale to screen failed: {_scale_err}")
                         screen_x, screen_y = nx, ny
                     action_json['coordinate'] = [screen_x, screen_y]
                     logger.info(f"Action: {next_action} at ({screen_x},{screen_y}) "
@@ -720,6 +718,31 @@ def _call_local_llm(messages: list) -> str:
     except Exception as e:
         logger.error(f"Local LLM call failed: {e}")
         raise
+
+
+def _extract_click_coord(raw: str, action_json: dict) -> tuple:
+    """Pull the click target coord from the VLM response.
+
+    Single source of truth for "where in 0-1000 norm space did the
+    VLM say to click?" — was a 4th parallel parser inline in the
+    iteration body.  Now delegates to
+    :func:`integrations.vlm.parser.parse_vlm_action` for the
+    ``<point>`` regex, then falls back to ``action_json['coordinate']``,
+    then to dead center (500, 500).
+
+    Returns ``(nx, ny)`` always — never raises, never returns None.
+    Center fallback is the historical behaviour the VLM loop has
+    relied on since 2026-04-10.
+    """
+    from integrations.vlm.parser import parse_vlm_action
+    pa = parse_vlm_action(raw or '', expected_shape='point_only')
+    if pa.norm_x is not None and pa.norm_y is not None:
+        return pa.norm_x, pa.norm_y
+    coord = action_json.get('coordinate')
+    if coord and isinstance(coord, list) and len(coord) == 2 \
+            and coord[0] is not None and coord[1] is not None:
+        return coord[0], coord[1]
+    return 500, 500
 
 
 def _parse_vlm_response(response_text: str) -> dict:

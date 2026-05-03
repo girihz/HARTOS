@@ -14,6 +14,7 @@ import sys
 import time
 import base64
 import logging
+from typing import Optional
 
 # VLM screenshot long-edge — aspect ratio is PRESERVED during resize.
 # Old behavior (1024×576 forced) squished 16:10 screens into 16:9 and the
@@ -138,6 +139,51 @@ def get_active_window_info():
     return None
 
 
+#: Process-name keyword pairs the reasoning-mismatch detector watches.
+#: ``(reasoning_substring, foreground_window_substring)`` — when the
+#: VLM's reasoning includes the first but the actual foreground window
+#: title doesn't include the second, the action gets flagged.  Order
+#: matters: more specific patterns first.  Extend by appending tuples.
+_REASONING_MISMATCH_PATTERNS = (
+    ('mobaxt', 'mobaxt'),
+    ('notepad', 'notepad'),
+)
+
+#: Verbs in the VLM's reasoning that hint a window-targeted action.
+#: We only run the (slow) get_active_window_info probe when the
+#: reasoning suggests the VLM is acting on a specific window, not
+#: when it's typing or generic-clicking somewhere mid-screen.
+_WINDOW_TARGETED_VERBS = ('minimize', 'close', 'switch to', 'click on')
+
+
+def _check_reasoning_mismatch(action: dict) -> Optional[str]:
+    """Detect when the VLM's stated reasoning contradicts the actual
+    foreground window.  Returns a human-readable mismatch description
+    or None when there's no detectable disagreement.
+
+    Extracted from execute_action in the SRP cleanup pass — was 14
+    lines tangled in the action-dispatch flow alongside per-window
+    translation, safety, audit, and verify.  Self-contained now.
+
+    Pattern config in module-level ``_REASONING_MISMATCH_PATTERNS``.
+    Adding a new pattern is one tuple append.
+    """
+    reasoning = action.get('Reasoning', action.get('reasoning', '')).lower()
+    if not reasoning:
+        return None
+    if not any(verb in reasoning for verb in _WINDOW_TARGETED_VERBS):
+        return None
+    active = get_active_window_info()
+    if not active:
+        return None
+    active_lower = active.lower()
+    for reasoning_kw, window_kw in _REASONING_MISMATCH_PATTERNS:
+        if reasoning_kw in reasoning and window_kw not in active_lower:
+            return (f"VLM thinks {reasoning_kw.title()} but active window "
+                    f"is: {active}")
+    return None
+
+
 def execute_action(action: dict, tier: str, *,
                    window_handle: int = None,
                    verify: bool = False,
@@ -186,17 +232,7 @@ def execute_action(action: dict, tier: str, *,
         'status', 'translated_from', 'translated_to', 'verify_diff',
         'safety_block' (when safety=True and a guard refused).
     """
-    # Validate: if reasoning mentions a specific app, check it matches reality
-    reasoning = action.get('Reasoning', action.get('reasoning', '')).lower()
-    _mismatch = None
-    if any(app in reasoning for app in ['minimize', 'close', 'switch to', 'click on']):
-        active = get_active_window_info()
-        if active:
-            # Check for common misidentifications
-            if 'mobaxt' in reasoning and 'mobaxt' not in active.lower():
-                _mismatch = f"VLM thinks MobaXterm but active window is: {active}"
-            elif 'notepad' in reasoning and 'notepad' not in active.lower():
-                _mismatch = f"VLM thinks Notepad but active window is: {active}"
+    _mismatch = _check_reasoning_mismatch(action)
 
     # Phase 4: per-window translation + occlusion handling.  Mutates
     # action['coordinate'] in place when needed; returns an early
@@ -417,8 +453,16 @@ def _post_click_verify(action: dict, result: dict, pre_b64: str, *,
         time.sleep(0.20)  # let the GUI settle before re-snapshot
         post_b64 = take_screenshot(tier)
     except Exception as e:
+        # Surface the failure loudly — verification is a contract,
+        # not a courtesy.  WARNING (not debug) so users notice when
+        # the screenshot path is broken; downstream callers can read
+        # verify_error and decide whether to trust the action result.
+        logger.warning(
+            f"verify post-screenshot failed - cannot detect no-op clicks "
+            f"this iteration: {e}")
         result['verify_diff'] = None
         result['verify_error'] = f'post-screenshot failed: {e}'
+        result['verify_retried'] = False
         return result
     diff = _quick_image_diff(pre_b64, post_b64)
     result['verify_diff'] = round(diff, 3)

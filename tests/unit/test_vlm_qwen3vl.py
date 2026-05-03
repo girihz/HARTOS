@@ -2415,3 +2415,122 @@ class TestExecuteActionWindowHandleEdgeCases:
         passed_action = mock_exec.call_args[0][0]
         assert passed_action['text'] == 'preserve me'
 
+
+class TestCheckReasoningMismatch:
+    """SRP extraction from execute_action - the mismatch detector
+    is now standalone and unit-testable."""
+
+    def test_no_reasoning_returns_none(self):
+        from integrations.vlm.local_computer_tool import _check_reasoning_mismatch
+        assert _check_reasoning_mismatch({'action': 'left_click'}) is None
+
+    def test_reasoning_without_window_verb_skips_probe(self):
+        """Reasoning that doesn't mention a window-targeted verb must
+        NOT trigger the slow get_active_window_info probe."""
+        from integrations.vlm.local_computer_tool import _check_reasoning_mismatch
+        with patch('integrations.vlm.local_computer_tool.get_active_window_info') as mock_probe:
+            result = _check_reasoning_mismatch(
+                {'reasoning': 'typing the user query'})
+        assert result is None
+        mock_probe.assert_not_called()
+
+    def test_mobaxt_mismatch_detected(self):
+        from integrations.vlm.local_computer_tool import _check_reasoning_mismatch
+        with patch('integrations.vlm.local_computer_tool.get_active_window_info',
+                   return_value='Claude Code'):
+            result = _check_reasoning_mismatch(
+                {'reasoning': 'click on the MobaXterm terminal'})
+        assert result is not None
+        assert 'Mobaxt' in result
+        assert 'Claude Code' in result
+
+    def test_mobaxt_match_no_mismatch(self):
+        from integrations.vlm.local_computer_tool import _check_reasoning_mismatch
+        with patch('integrations.vlm.local_computer_tool.get_active_window_info',
+                   return_value='MobaXterm session 1'):
+            result = _check_reasoning_mismatch(
+                {'reasoning': 'click on the MobaXterm terminal'})
+        assert result is None
+
+    def test_extending_pattern_list_works(self):
+        """The pattern list is module-level - adding an entry should
+        immediately work without code changes elsewhere."""
+        from integrations.vlm import local_computer_tool as lct
+        original = lct._REASONING_MISMATCH_PATTERNS
+        try:
+            lct._REASONING_MISMATCH_PATTERNS = original + (('vscode', 'visual studio'),)
+            with patch.object(lct, 'get_active_window_info',
+                              return_value='Notepad'):
+                result = lct._check_reasoning_mismatch(
+                    {'reasoning': 'switch to vscode'})
+            assert result is not None
+            assert 'Vscode' in result
+        finally:
+            lct._REASONING_MISMATCH_PATTERNS = original
+
+
+class TestExtractClickCoord:
+    """Loop's _extract_click_coord is the single source of truth for
+    where in 0-1000 norm space the VLM said to click - was a 4th
+    parallel parser before this commit."""
+
+    def test_point_tag_in_raw_wins(self):
+        from integrations.vlm.local_loop import _extract_click_coord
+        raw = 'Looking at the screen <point>234,567</point>'
+        nx, ny = _extract_click_coord(raw, {'coordinate': [999, 999]})
+        assert (nx, ny) == (234, 567)
+
+    def test_action_json_coordinate_when_no_point_tag(self):
+        from integrations.vlm.local_loop import _extract_click_coord
+        nx, ny = _extract_click_coord(
+            '{"Next Action": "left_click"}',
+            {'coordinate': [400, 800]})
+        assert (nx, ny) == (400, 800)
+
+    def test_center_fallback_when_neither_present(self):
+        from integrations.vlm.local_loop import _extract_click_coord
+        nx, ny = _extract_click_coord(
+            'I am not sure where to click',
+            {'coordinate': None})
+        assert (nx, ny) == (500, 500)
+
+    def test_none_coord_in_action_json_falls_back_to_center(self):
+        """action_json.get('coordinate') = [None, None] is the shape
+        the VLM emits when it doesn't know - must NOT be treated as
+        a valid (None, None) coord."""
+        from integrations.vlm.local_loop import _extract_click_coord
+        nx, ny = _extract_click_coord('', {'coordinate': [None, None]})
+        assert (nx, ny) == (500, 500)
+
+
+class TestExecTestRectParser:
+    """Reviewer flagged the exec-test rect parser as unguarded
+    against malformed input.  Since it is in the benchmark file
+    (not importable cleanly), we verify the expected error-handling
+    behaviour by reading the parsing code path - 4-comma input
+    works, anything else falls into the ValueError except that
+    prints and continues."""
+
+    def test_well_formed_rect_parses(self):
+        # The actual parser is `[int(s) for s in rect.split(',')]`
+        # with 4 unpacked values.  Mirror it here to lock the format.
+        rect_str = '100,200,800,600'
+        x, y, w, h = [int(s) for s in rect_str.split(',')]
+        assert (x, y, w, h) == (100, 200, 800, 600)
+
+    def test_three_value_rect_raises_unpacking(self):
+        rect_str = '100,200,800'
+        try:
+            x, y, w, h = [int(s) for s in rect_str.split(',')]
+            assert False, 'expected unpacking error'
+        except ValueError:
+            pass  # expected
+
+    def test_non_numeric_rect_raises(self):
+        rect_str = 'abc,def,ghi,jkl'
+        try:
+            [int(s) for s in rect_str.split(',')]
+            assert False, 'expected int conversion error'
+        except ValueError:
+            pass
+

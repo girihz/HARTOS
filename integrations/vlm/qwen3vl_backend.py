@@ -86,7 +86,11 @@ class Qwen3VLBackend:
         try:
             from core.port_registry import get_port
             _llm_port = get_port('llm')
-        except Exception:
+        except Exception as _port_err:
+            # Sensible fallback - port_registry unavailable means we
+            # are running outside the bundled Nunba context (test /
+            # standalone).  Honour HEVOLVE_LLM_PORT env or default 8080.
+            logger.debug(f"port_registry unavailable, using env/8080: {_port_err}")
             _llm_port = int(os.environ.get('HEVOLVE_LLM_PORT', 8080))
         self.base_url = base_url or os.environ.get(
             'HEVOLVE_VLM_ENDPOINT_URL',
@@ -315,8 +319,11 @@ class Qwen3VLBackend:
                 if _r.returncode == 0:
                     fg_info = f' FOREGROUND: "{fg_title}".' if fg_title else ''
                     return f'OS: macOS.{fg_info} Visible apps: [{_r.stdout.strip()}]\n'
-        except Exception:
-            pass
+        except Exception as e:
+            # OS-context probes are nice-to-have - the VLM still
+            # works without them.  Log so silent-fallback doesn't
+            # mask a broken probe (osascript/wmctrl/PowerShell missing).
+            logger.debug(f"_get_os_context probe failed: {e}")
         return ''
 
     def _detect_action_type(self, task, raw_response=''):
@@ -357,7 +364,12 @@ class Qwen3VLBackend:
         try:
             import pyautogui as _pag
             _screen_w, _screen_h = _pag.size()
-        except Exception:
+        except Exception as _pag_err:
+            # Pyautogui can fail when no display is attached (CI /
+            # headless).  Fall back to image dims so the parser at
+            # least produces stable norm_x/norm_y; downstream callers
+            # that need true screen px will see them mismatch.
+            logger.debug(f"pyautogui.size() unavailable, using image dims: {_pag_err}")
             _screen_w, _screen_h = img_w, img_h
         pa = parse_vlm_action(
             raw, expected_shape='point_only',
@@ -481,15 +493,28 @@ class Qwen3VLBackend:
 
         local_available = self._is_local_vlm_available()
 
+        # Tier orderings per plan §10:
+        #   local_only  → local (or no_route)
+        #   hybrid      → local → paired_peer → hive → cloud  (always all 4)
+        #   hive        → paired_peer → hive → local → cloud
+        # Reviewer flagged that the prior 'hybrid' order excluded
+        # 'cloud' when local was reachable, which contradicted the
+        # plan's "fall through all four tiers" wording.  Now matches.
         if intelligence_preference == 'local_only':
             tiers = ['local'] if local_available else []
         elif intelligence_preference == 'hive':
-            tiers = (['paired_peer', 'hive']
-                     + (['local'] if local_available else []))
+            tiers = ['paired_peer', 'hive']
+            if local_available:
+                tiers.append('local')
+            tiers.append('cloud')
         else:  # 'hybrid' (default)
-            tiers = ((['local'] if local_available and prefer_local else [])
-                     + ['paired_peer', 'hive']
-                     + ([] if local_available else ['cloud']))
+            tiers = []
+            if local_available and prefer_local:
+                tiers.append('local')
+            tiers += ['paired_peer', 'hive']
+            if local_available and not prefer_local:
+                tiers.append('local')
+            tiers.append('cloud')
 
         for tier in tiers:
             try:
@@ -746,7 +771,9 @@ class Qwen3VLBackend:
         try:
             import pyautogui as _pag
             screen_w, screen_h = _pag.size()
-        except Exception:
+        except Exception as _pag_err:
+            logger.debug(
+                f"pyautogui.size() unavailable, using image dims: {_pag_err}")
             screen_w, screen_h = img_w, img_h
 
         # --- Strategy 1: Taskbar pre-check via shared helper ---
@@ -1071,8 +1098,12 @@ class Qwen3VLBackend:
             img_bytes = base64.b64decode(b64_data)
             img = Image.open(io.BytesIO(img_bytes))
             return img.width, img.height
-        except Exception:
-            # Fallback to common resolution
+        except Exception as e:
+            # Fallback to common resolution.  Log because using the
+            # wrong resolution causes coord-scaling drift downstream;
+            # silent fallback would be diagnosable only via wrong-
+            # location-clicks symptoms in production.
+            logger.debug(f"_get_image_dimensions failed, using 1920x1080 fallback: {e}")
             return 1920, 1080
 
     @staticmethod

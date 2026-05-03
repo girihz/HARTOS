@@ -189,13 +189,37 @@ class TestDispatchInference(unittest.TestCase):
         self.assertEqual(result['tier'], 'paired_peer')
 
     def test_no_peer_no_local_no_cloud_returns_no_route(self):
+        # cloud tier needs WorldModelBridge import - block it so the
+        # tier returns None and we fall through to no_route.
         with patch.object(self.backend, '_is_local_vlm_available',
-                          return_value=False):
+                          return_value=False), \
+             patch.object(self.backend, '_dispatch_cloud',
+                          return_value=None):
             result = self.backend.dispatch_inference(
                 {'method': 'point_and_act', 'screenshot_b64': 'x',
                  'task': 'click X'},
                 intelligence_preference='hybrid')
         self.assertEqual(result['tier'], 'no_route')
+
+    def test_hybrid_includes_cloud_when_local_available(self):
+        """Reviewer fix: 'hybrid' must enumerate all 4 tiers, not
+        exclude cloud when local is reachable.  Verifies the tier
+        list includes 'cloud' as a final fallback."""
+        peer = MagicMock(side_effect=Exception('peer down'))
+        with patch.object(self.backend, '_is_local_vlm_available',
+                          return_value=True), \
+             patch.object(self.backend, '_dispatch_local',
+                          side_effect=Exception('local crashed')), \
+             patch.object(self.backend, '_dispatch_cloud',
+                          return_value={'action': 'left_click',
+                                        'reasoning': 'cloud win'}) as m_cloud:
+            result = self.backend.dispatch_inference(
+                {'method': 'point_and_act', 'screenshot_b64': 'x',
+                 'task': 'click X'},
+                peer_dispatch=peer,
+                intelligence_preference='hybrid')
+        m_cloud.assert_called_once()
+        self.assertEqual(result['tier'], 'cloud')
 
 
 if __name__ == '__main__':

@@ -83,7 +83,10 @@ class SafetyConfig:
         default_factory=lambda: DEFAULT_BLOCKED_TITLE_PATTERNS)
     audit_enabled: bool = (
         os.environ.get('HEVOLVE_VLM_AUDIT_ENABLED', '1') not in ('0', 'false', 'no'))
-    audit_dir: str = ''  # empty → default to platform_paths/audit
+    # Override with HEVOLVE_VLM_AUDIT_DIR; empty default → ~/.nunba/audit
+    # via _default_dir().
+    audit_dir: str = field(
+        default_factory=lambda: os.environ.get('HEVOLVE_VLM_AUDIT_DIR', ''))
 
 
 # ─── Session guard (count + throttle) ─────────────────────────────────
@@ -185,15 +188,23 @@ class AuditLogger:
             self.path = None  # disables logging
 
     def _default_dir(self) -> str:
-        """Platform-appropriate default — matches the existing log dir
-        convention used by Nunba (``~/Documents/Nunba/audit`` on Win,
-        ``~/Library/Logs/Nunba/audit`` on macOS, ``~/.config/nunba/audit``
-        on Linux)."""
-        try:
-            from core.platform_paths import get_data_dir
-            return os.path.join(get_data_dir(), 'audit')
-        except Exception:
-            return os.path.expanduser('~/.nunba/audit')
+        """Audit log location.
+
+        Plan §5 spec: ``~/.nunba/audit/vlm_actions_{date}.jsonl``.
+        Reviewer flagged the prior implementation deferred to
+        ``platform_paths.get_data_dir()`` which gave platform-correct
+        paths but didn't match the plan literally.  Resolution: use
+        the plan-literal ``~/.nunba/audit`` as the default; admins
+        who want platform-default paths set
+        ``HEVOLVE_VLM_AUDIT_DIR=$(python -c "from core.platform_paths
+        import get_data_dir; import os; print(os.path.join(
+        get_data_dir(), 'audit'))")`` once at install time.
+
+        Override with ``HEVOLVE_VLM_AUDIT_DIR=...`` env var (read in
+        SafetyConfig).  Empty string honored (audit logger inits but
+        never writes).
+        """
+        return os.path.expanduser('~/.nunba/audit')
 
     def log(self, action: dict, result: dict, *,
             window_meta: Optional[dict] = None,
