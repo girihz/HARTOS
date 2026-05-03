@@ -811,32 +811,10 @@ def _assign_monitors(windows: List[WindowInfo],
                 break
 
 
-def _ensure_dpi_aware_for_enum() -> None:
-    """Make this process DPI-aware before reading monitor / window rects.
-
-    Without this, EnumDisplayMonitors / GetWindowRect return LOGICAL
-    coordinates (post-scaling), e.g. 1707×960 instead of the physical
-    2560×1440 on a 150%-scaled display.  Pyautogui's screenshot returns
-    PHYSICAL pixels, so any caller mixing the two would have its click
-    coordinates land in the wrong spot — exactly the bug
-    local_computer_tool's _ensure_dpi_aware() was added to prevent.
-
-    Safe / idempotent: SetProcessDpiAwareness is per-process; calling
-    twice with the same value is a no-op, calling with a different
-    value silently fails (so existing DPI-aware processes aren't
-    disturbed).
-    """
-    if platform.system() != 'Windows':
-        return
-    try:
-        import ctypes
-        # PROCESS_PER_MONITOR_DPI_AWARE = 2 (Win 8.1+)
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        except (AttributeError, OSError):
-            ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
+# DPI awareness has a single canonical home in core/dpi_awareness.py.
+# This module imports from there instead of duplicating the
+# SetProcessDpiAwareness ctypes call.
+from core.dpi_awareness import ensure_dpi_aware as _ensure_dpi_aware_for_enum
 
 
 def list_monitors() -> List[dict]:

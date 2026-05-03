@@ -36,27 +36,10 @@ except ImportError:
     pyautogui = None
 
 
-def _ensure_dpi_aware():
-    """Make this process DPI-aware on Windows so screenshot pixels and
-    pyautogui click coordinates live in the same physical space.
-
-    Without this, on a 150%-scaled 2560×1440 display, pyautogui.size() returns
-    (1707, 960) while pyautogui.screenshot() captures the full 2560×1440 physical
-    pixels — so VLM-derived coordinates land in the wrong spot and frequently
-    miss Start menu / taskbar targets. Idempotent; safe to call repeatedly."""
-    if sys.platform != 'win32':
-        return
-    try:
-        import ctypes
-        # PROCESS_PER_MONITOR_DPI_AWARE = 2 (Win 8.1+). Falls back to
-        # SetProcessDPIAware on older versions. Both are no-ops if already set.
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        except (AttributeError, OSError):
-            ctypes.windll.user32.SetProcessDPIAware()
-    except Exception as e:
-        logger.debug(f"DPI awareness setup skipped: {e}")
-
+# Single source of truth for SetProcessDpiAwareness — see
+# core/dpi_awareness.py for the rationale (was duplicated in
+# remote_desktop/window_capture.py until 2026-05-03 DRY pass).
+from core.dpi_awareness import ensure_dpi_aware as _ensure_dpi_aware
 
 # Call at import time so every screenshot/click path is DPI-consistent
 _ensure_dpi_aware()
