@@ -141,7 +141,8 @@ def get_active_window_info():
 def execute_action(action: dict, tier: str, *,
                    window_handle: int = None,
                    verify: bool = False,
-                   if_occluded: str = 'skip') -> dict:
+                   if_occluded: str = 'skip',
+                   safety: bool = False) -> dict:
     """
     Execute a single VLM action (click, type, key, etc.).
 
@@ -173,10 +174,17 @@ def execute_action(action: dict, tier: str, *,
               ``'foreground'``            — SetForegroundWindow first, then click
               ``'force'``                 — click regardless (PrintWindow-captured
                                             click target may underlie another window)
+        safety: opt-in safety layer (Phase 6 of vlm_best_of_all_worlds_plan
+            §5).  When True, runs the action through the SessionGuard
+            (per-session cap + per-second throttle), the WindowBlocklist
+            (refuses lsass / password managers / banking-titled windows),
+            and writes a JSONL audit record per attempt.  Existing call
+            sites that don't pass safety=True are unchanged.
 
     Returns:
         dict with 'output' and optionally 'error', 'window_mismatch',
-        'status', 'translated_from', 'translated_to', 'verify_diff'.
+        'status', 'translated_from', 'translated_to', 'verify_diff',
+        'safety_block' (when safety=True and a guard refused).
     """
     # Validate: if reasoning mentions a specific app, check it matches reality
     reasoning = action.get('Reasoning', action.get('reasoning', '')).lower()
@@ -198,7 +206,27 @@ def execute_action(action: dict, tier: str, *,
         _window_meta, _early = _prepare_window_for_action(
             window_handle, action, if_occluded)
         if _early is not None:
+            if safety:
+                _emit_audit(action, _early, _window_meta, None,
+                            block_reason=_early.get('status'))
             return _early
+
+    # Phase 6: safety guards run BEFORE any pyautogui call so a refusal
+    # never reaches the user's screen.  Order matters — session-level
+    # rate cap is cheapest, run first; window blocklist needs window
+    # metadata so runs second.
+    if safety:
+        _block = _check_safety(_window_meta)
+        if _block is not None:
+            _result = {
+                'output': '', 'status': 'safety_blocked',
+                'error': _block, 'safety_block': _block,
+            }
+            if _window_meta is not None:
+                _result['window'] = _window_meta
+            _emit_audit(action, _result, _window_meta, None,
+                        block_reason=_block)
+            return _result
 
     # Phase 4: pre-action screenshot for verify=True diff.
     _pre_b64 = None
@@ -228,7 +256,49 @@ def execute_action(action: dict, tier: str, *,
             action, result, _pre_b64,
             tier=tier, window_meta=_window_meta)
 
+    # Phase 6: record the action in the session guard + audit log.
+    # Only record on a successful (non-error) attempt — refusals were
+    # logged above and don't count against the session cap.
+    if safety and result.get('error') is None:
+        try:
+            from integrations.vlm.safety import get_session_guard
+            get_session_guard().record()
+        except Exception as e:
+            logger.debug(f"safety: session guard record failed: {e}")
+        _emit_audit(action, result, _window_meta, _pre_b64)
+
     return result
+
+
+# ─── Phase 6 helper plumbing ──────────────────────────────────────────
+
+def _check_safety(window_meta):
+    """Run rate guard + window blocklist.  Returns block-reason
+    string when refusing, None when OK."""
+    try:
+        from integrations.vlm.safety import (
+            get_session_guard, is_window_blocked)
+    except Exception as e:
+        logger.debug(f"safety module unavailable: {e}")
+        return None
+    reason = get_session_guard().check()
+    if reason is not None:
+        return reason
+    return is_window_blocked(window_meta)
+
+
+def _emit_audit(action, result, window_meta, screenshot_b64,
+                block_reason=None):
+    """Best-effort audit log — failures must NOT bubble up and break
+    the action path."""
+    try:
+        from integrations.vlm.safety import get_audit_logger
+        get_audit_logger().log(
+            action, result, window_meta=window_meta,
+            screenshot_b64=screenshot_b64,
+            block_reason=block_reason)
+    except Exception as e:
+        logger.debug(f"audit log failed: {e}")
 
 
 # ─── Phase 4 helpers (per-window translation + post-click verify) ────
