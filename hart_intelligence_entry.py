@@ -6489,9 +6489,27 @@ def chat():
             })
 
     if prompt_id:
+        # Recipe pull-on-demand: when prompt_id has no local recipe
+        # but the cloud has one (cross-device user), pull it before
+        # falling into the create-mode branch.  Best-effort - if cloud
+        # is offline / blob missing / schema mismatch, returns False
+        # and we proceed to create-mode as before.  Closes the
+        # cross-device gap from the 2026-05-04 Speech Therapy
+        # silent-fallback incident.
+        _prompt_path = os.path.join(PROMPTS_DIR, f'{prompt_id}.json')
+        if not os.path.exists(_prompt_path):
+            try:
+                from core.recipe_sync import pull_recipe
+                if pull_recipe(PROMPTS_DIR, prompt_id, str(user_id)):
+                    app.logger.info(
+                        f'recipe_sync: pulled recipe bundle for '
+                        f'prompt_id={prompt_id} from cloud - REUSE path '
+                        f'now reachable')
+            except Exception as e:
+                app.logger.debug(f'recipe_sync: pull skipped: {e}')
+
         # System agents (like Nunba) route directly to langchain casual chat
         # instead of entering gather_info/CREATE mode
-        _prompt_path = os.path.join(PROMPTS_DIR, f'{prompt_id}.json')
         if os.path.exists(_prompt_path):
             try:
                 with open(_prompt_path, 'r') as _pf:
@@ -7836,6 +7854,78 @@ def create_prompts():
         app.logger.debug(f"Cloud sync failed (non-fatal): {e}")
 
     return jsonify({'success': True, 'saved': saved})
+
+
+# ───────────────────────── Recipe sync endpoints ─────────────────────
+# Cross-device sync for recipe-file BUNDLES (the {id}.json + flow +
+# personality + per-action recipes), distinct from /createpromptlist
+# which only syncs metadata.  See core/recipe_sync.py for the
+# canonical wire envelope.  Closes the cross-device gap that caused
+# the 2026-05-04 Speech Therapy silent fallback.
+
+# In-process recipe blob store (cloud tier installs override via
+# DB-backed implementation; flat installs fine with on-disk).
+_RECIPE_BLOB_DIR = os.path.join(PROMPTS_DIR, '..', 'recipe_blobs')
+
+
+@app.route('/prompts/sync', methods=['POST'])
+def upload_recipe_bundle():
+    """POST a recipe bundle for one prompt_id.
+
+    Body shape: see core.recipe_sync.build_envelope.  The cloud
+    deployment of HARTOS persists this; flat installs may also
+    accept it for testing but the file is intended to round-trip
+    via the central instance.
+    """
+    try:
+        from core.recipe_sync import SCHEMA_VERSION
+    except ImportError:
+        return jsonify({'error': 'recipe_sync unavailable'}), 503
+    envelope = request.get_json() or {}
+    if envelope.get('schema_version') != SCHEMA_VERSION:
+        return jsonify({
+            'error': 'schema_mismatch',
+            'expected': SCHEMA_VERSION,
+            'got': envelope.get('schema_version'),
+        }), 400
+    prompt_id = envelope.get('prompt_id')
+    files = envelope.get('files') or {}
+    if not prompt_id or not files:
+        return jsonify({'error': 'prompt_id + files required'}), 400
+    try:
+        os.makedirs(_RECIPE_BLOB_DIR, exist_ok=True)
+    except OSError as e:
+        return jsonify({'error': f'blob dir create failed: {e}'}), 500
+    blob_path = os.path.join(_RECIPE_BLOB_DIR, f'{prompt_id}.json')
+    try:
+        with open(blob_path, 'w', encoding='utf-8') as f:
+            json.dump(envelope, f)
+    except (IOError, OSError) as e:
+        return jsonify({'error': f'blob write failed: {e}'}), 500
+    return jsonify({
+        'stored': True,
+        'checksum': envelope.get('checksum', ''),
+        'files_count': len(files),
+    })
+
+
+@app.route('/prompts/sync/<prompt_id>', methods=['GET'])
+def download_recipe_bundle(prompt_id):
+    """GET the recipe bundle for *prompt_id*.
+
+    Returns 404 when no blob has been uploaded yet.  Cloud tier
+    installs serve from a DB-backed store; flat installs read from
+    the on-disk blob dir written by upload_recipe_bundle.
+    """
+    blob_path = os.path.join(_RECIPE_BLOB_DIR, f'{prompt_id}.json')
+    if not os.path.isfile(blob_path):
+        return jsonify({'error': 'not_found'}), 404
+    try:
+        with open(blob_path, 'r', encoding='utf-8') as f:
+            envelope = json.load(f)
+    except (IOError, OSError, json.JSONDecodeError) as e:
+        return jsonify({'error': f'blob read failed: {e}'}), 500
+    return jsonify(envelope)
 
 
 def _get_active_backend_info() -> dict:

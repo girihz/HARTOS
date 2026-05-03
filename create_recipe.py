@@ -4820,6 +4820,20 @@ def update_agent_creation_to_db(prompt_id):
     url = f'{database_url}/update_agent_prompt?prompt_id={prompt_id}'
     headers = {'Content-Type': 'application/json'}
     res = pooled_patch(url, headers=headers)
+    # Push the full recipe bundle to cloud after creation completes.
+    # This is the WRITE half of the cross-device sync introduced in
+    # core/recipe_sync.py - without it the agent is local-only and
+    # the user hits the silent-fallback bug when switching devices.
+    # Best-effort: never raises, never blocks the user.
+    try:
+        from core.recipe_sync import push_recipe
+        # user_id not in scope here; recipe_sync accepts '' as
+        # creator-unknown.  The {prompt_id}.json file itself carries
+        # creator_user_id so the cloud side can still attribute.
+        push_recipe(PROMPTS_DIR, prompt_id, user_id='')
+    except Exception as _push_err:
+        current_app.logger.debug(
+            f'recipe_sync push for prompt_id={prompt_id} failed: {_push_err}')
 
 
 def create_final_recipe_for_current_flow(flow, merged_dict, prompt_id):
