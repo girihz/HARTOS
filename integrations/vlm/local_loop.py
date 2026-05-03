@@ -693,32 +693,16 @@ def _parse_vlm_response(response_text: str) -> dict:
     Parse VLM JSON response, handling markdown code blocks and partial JSON.
 
     Matches OmniParser vlm_agent.py extract_data() pattern.
+
+    Phase 5: thin shim onto the canonical parser in
+    :mod:`integrations.vlm.parser`.  Returns the same dict shape this
+    function always has (``{Next Action, Status, Reasoning, ...}``)
+    via :meth:`ParsedAction.to_action_json_dict`.  The byte-equivalent
+    fallback for empty / unparseable input is preserved.
     """
-    if not response_text:
-        return {"Next Action": "None", "Status": "DONE", "Reasoning": "Empty VLM response"}
-    # Try to extract JSON from code blocks first
-    json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-    if json_match:
-        try:
-            return json.loads(json_match.group(1))
-        except json.JSONDecodeError:
-            pass
-
-    # Try to find raw JSON object
-    brace_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
-    if brace_match:
-        try:
-            return json.loads(brace_match.group(0))
-        except json.JSONDecodeError:
-            pass
-
-    # Fallback: treat as completed if no parseable JSON
-    logger.warning(f"Could not parse VLM response as JSON: {response_text[:200]}")
-    return {
-        "Next Action": "None",
-        "Status": "DONE",
-        "Reasoning": response_text[:500],
-    }
+    from integrations.vlm.parser import parse_vlm_action
+    pa = parse_vlm_action(response_text or '', expected_shape='action_json')
+    return pa.to_action_json_dict()
 
 
 def _build_action_payload(action_json: dict, parsed_screen: dict) -> dict:

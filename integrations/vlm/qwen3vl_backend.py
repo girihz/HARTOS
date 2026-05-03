@@ -339,83 +339,35 @@ class Qwen3VLBackend:
         return 'left_click'
 
     def _parse_action_response(self, raw, img_w, img_h, task=''):
-        """Parse VLM response into action dict. Returns (result_dict, nx, ny) or (result_dict, None, None).
+        """Parse VLM response into action dict. Returns
+        ``(result_dict, nx, ny)`` or ``(result_dict, None, None)``.
 
-        NOTE: img_w/img_h are VLM image dimensions (e.g. 1024x576), but pyautogui
-        needs SCREEN coordinates. We use pyautogui.size() for the final scaling.
+        Phase 5: thin shim onto :func:`integrations.vlm.parser.parse_vlm_action`
+        with ``expected_shape='point_only'``.  The byte-equivalent
+        legacy fields are reproduced via
+        :meth:`ParsedAction.to_point_action_dict`.
+
+        ``img_w/img_h`` arg kept for back-compat — historically the
+        function fell back to image dims when pyautogui.size() failed.
+        Pyautogui screen size is the source of truth (we use it for
+        the actual click), so we pass it through to the parser as
+        the scaling target.
         """
-        raw = raw.strip()
-
-        # Get actual screen dimensions for coordinate scaling
+        from integrations.vlm.parser import parse_vlm_action
         try:
             import pyautogui as _pag
             _screen_w, _screen_h = _pag.size()
         except Exception:
-            _screen_w, _screen_h = img_w, img_h  # fallback to image dims
-
-        if 'DONE' in raw.upper():
-            return {'action': 'done', 'screen_x': 0, 'screen_y': 0,
-                    'text': '', 'done': True, 'reasoning': raw, 'raw': raw}, None, None
-
-        # Detect TYPE: in response
-        if raw.upper().startswith('TYPE:'):
-            text = raw.split(':', 1)[1].strip()
-            return {'action': 'type', 'screen_x': 0, 'screen_y': 0,
-                    'text': text, 'done': False, 'reasoning': f'type "{text}"',
-                    'raw': raw}, None, None
-
-        # Also detect "type" action from VLM free-text responses
-        type_match = re.search(r'(?:type|enter|input)\s*[:\-"\']+\s*(.+?)(?:\s*<|$)', raw, re.IGNORECASE)
-        if type_match and '<point>' not in raw:
-            text = type_match.group(1).strip().strip('"\'')
-            return {'action': 'type', 'screen_x': 0, 'screen_y': 0,
-                    'text': text, 'done': False, 'reasoning': f'type "{text}"',
-                    'raw': raw}, None, None
-
-        # Detect scroll actions (no coords needed)
-        raw_lower = raw.lower()
-        task_lower = task.lower() if task else ''
-        if any(kw in task_lower or kw in raw_lower for kw in self._SCROLL_DOWN_KEYWORDS):
-            return {'action': 'scroll_down', 'screen_x': 0, 'screen_y': 0,
-                    'text': '', 'done': False, 'reasoning': 'scroll down',
-                    'raw': raw}, None, None
-        if any(kw in task_lower or kw in raw_lower for kw in self._SCROLL_UP_KEYWORDS):
-            return {'action': 'scroll_up', 'screen_x': 0, 'screen_y': 0,
-                    'text': '', 'done': False, 'reasoning': 'scroll up',
-                    'raw': raw}, None, None
-
-        # Detect action type from task context
-        action_type = self._detect_action_type(task, raw)
-
-        # Parse <point>x,y</point>
-        m = re.search(r'<point>\s*(\d+)\s*,\s*(\d+)\s*</point>', raw)
-        if m:
-            nx, ny = int(m.group(1)), int(m.group(2))
-            px = int(nx * _screen_w / 1000)
-            py = int(ny * _screen_h / 1000)
-            return {'action': action_type, 'screen_x': px, 'screen_y': py,
-                    'norm_x': nx, 'norm_y': ny,
-                    'text': '', 'done': False,
-                    'reasoning': f'{action_type} at ({nx},{ny}) normalized',
-                    'raw': raw}, nx, ny
-
-        # Fallback: extract number pairs in 0-1000 range
-        nums = re.findall(r'\d+', raw)
-        if len(nums) >= 2:
-            nx, ny = int(nums[0]), int(nums[1])
-            if 0 <= nx <= 1000 and 0 <= ny <= 1000:
-                px = int(nx * _screen_w / 1000)
-                py = int(ny * _screen_h / 1000)
-                return {'action': action_type, 'screen_x': px, 'screen_y': py,
-                        'norm_x': nx, 'norm_y': ny,
-                        'text': '', 'done': False,
-                        'reasoning': f'fallback {action_type} ({nx},{ny})',
-                        'raw': raw}, nx, ny
-
-        logger.warning(f"Could not parse point_and_act response: {raw[:100]}")
-        return {'action': 'none', 'screen_x': 0, 'screen_y': 0,
-                'text': '', 'done': False, 'reasoning': raw,
-                'raw': raw}, None, None
+            _screen_w, _screen_h = img_w, img_h
+        pa = parse_vlm_action(
+            raw, expected_shape='point_only',
+            task=task,
+            screen_w=_screen_w, screen_h=_screen_h,
+            detect_action_type=self._detect_action_type,
+            scroll_down_keywords=self._SCROLL_DOWN_KEYWORDS,
+            scroll_up_keywords=self._SCROLL_UP_KEYWORDS,
+        )
+        return pa.to_point_action_dict(), pa.norm_x, pa.norm_y
 
     def _is_taskbar_task(self, task):
         """Check if task involves taskbar elements."""
@@ -945,46 +897,21 @@ class Qwen3VLBackend:
             raise
 
     def _parse_unified_response(self, response_text):
-        """Parse Qwen3-VL JSON response, handling markdown blocks and partial JSON."""
-        # Try code block extraction first
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group(1))
-            except json.JSONDecodeError:
-                pass
+        """Parse Qwen3-VL JSON response, handling markdown blocks and partial JSON.
 
-        # Try raw JSON object
-        brace_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
-        if brace_match:
-            try:
-                return json.loads(brace_match.group(0))
-            except json.JSONDecodeError:
-                pass
-
-        # Try more aggressive nested JSON extraction
-        depth = 0
-        start_idx = None
-        for i, ch in enumerate(response_text):
-            if ch == '{':
-                if depth == 0:
-                    start_idx = i
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0 and start_idx is not None:
-                    try:
-                        return json.loads(response_text[start_idx:i + 1])
-                    except json.JSONDecodeError:
-                        start_idx = None
-
-        logger.warning(f"Could not parse Qwen3-VL response as JSON: {response_text[:200]}")
-        return {
-            'UI_Elements': [],
-            'Next Action': 'None',
-            'Status': 'DONE',
-            'Reasoning': response_text[:500],
-        }
+        Phase 5: thin shim onto :mod:`integrations.vlm.parser`.  Same
+        dict shape (UI_Elements + Next Action + Status + Reasoning)
+        as the historical inline implementation, but the JSON
+        extraction (code-block / raw-brace / depth-counted) lives in
+        one canonical place now.
+        """
+        from integrations.vlm.parser import parse_vlm_action
+        pa = parse_vlm_action(
+            response_text or '', expected_shape='som_bbox')
+        result = pa.to_action_json_dict()
+        # Legacy callers expect UI_Elements always present (default to []).
+        result.setdefault('UI_Elements', [])
+        return result
 
     @staticmethod
     def _get_image_dimensions(b64_data):
