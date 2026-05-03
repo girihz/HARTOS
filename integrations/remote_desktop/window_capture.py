@@ -218,6 +218,12 @@ class WindowEnumerator:
         except Exception:
             foreground_hwnd = 0
 
+        # Cache PID → process name across this enumeration.  Browsers (Chrome,
+        # Edge, VS Code) spawn 5–20 windows under the SAME PID; without the
+        # cache we OpenProcess + QueryFullProcessImageName once per window,
+        # which is pure-syscall waste on the EnumWindows hot path.
+        process_name_cache: dict = {}
+
         def enum_callback(hwnd, _):
             if not _win32gui.IsWindowVisible(hwnd):
                 return
@@ -239,12 +245,17 @@ class WindowEnumerator:
             except Exception:
                 return
 
-            # Get process info
+            # Get process info — cached per-PID so a 20-window Chrome session
+            # makes one OpenProcess call instead of 20.
             pid = 0
             process_name = ''
             try:
                 _, pid = _win32process.GetWindowThreadProcessId(hwnd)
-                process_name = self._get_process_name_win32(pid)
+                if pid in process_name_cache:
+                    process_name = process_name_cache[pid]
+                else:
+                    process_name = self._get_process_name_win32(pid)
+                    process_name_cache[pid] = process_name
             except Exception:
                 pass
 
@@ -759,6 +770,18 @@ def _is_dwm_cloaked(hwnd) -> bool:
         return False
 
 
+# Cap on the inner loop of _compute_occlusion.  Without it, the
+# nominally-O(N²) algorithm scales as N(N-1)/2 = 4950 ops at N=100,
+# 19900 at N=200.  In practice typical desktops have <50 visible
+# windows; extreme outliers (terminal multiplexers, notification
+# stacks) rarely exceed 100.  Capping at OCCLUSION_INNER_CAP+1
+# windows-above means even at N=500 we do at most 500 * 100 = 50k
+# cheap rect-intersection ops.  Combined with the in-loop
+# short-circuit (overlap >= win_area → 100%), this is dominated by
+# the actual EnumWindows syscall overhead.
+OCCLUSION_INNER_CAP = 100
+
+
 def _compute_occlusion(windows: List[WindowInfo]) -> None:
     """Annotate each window's ``is_occluded`` / ``occluded_pct`` in place.
 
@@ -768,6 +791,9 @@ def _compute_occlusion(windows: List[WindowInfo]) -> None:
     over-counting when multiple windows above overlap each other AND this
     window.  Threshold for is_occluded = > 5% covered (lets small overlay
     bars / tray windows not count as 'occluded').
+
+    Performance: O(N × min(N, OCCLUSION_INNER_CAP)) with an inner-loop
+    short-circuit when overlap_area saturates win_area.
     """
     for i, win in enumerate(windows):
         if win.minimized:
@@ -777,7 +803,11 @@ def _compute_occlusion(windows: List[WindowInfo]) -> None:
             continue
         win_area = ww * wh
         overlap_area = 0
-        for j in range(i):
+        # Inner loop capped: only the topmost OCCLUSION_INNER_CAP windows
+        # above can occlude this one.  Anything deeper than that is
+        # almost certainly already 100% covered by closer-to-top windows.
+        upper_bound = min(i, OCCLUSION_INNER_CAP)
+        for j in range(upper_bound):
             other = windows[j]
             if other.minimized:
                 continue
@@ -788,10 +818,43 @@ def _compute_occlusion(windows: List[WindowInfo]) -> None:
             iy2 = min(wy + wh, oy + oh)
             if ix1 < ix2 and iy1 < iy2:
                 overlap_area += (ix2 - ix1) * (iy2 - iy1)
-        # Cap so a window covered by 2 things doesn't read as 200%.
-        overlap_area = min(overlap_area, win_area)
+                # Short-circuit: once we hit 100% covered, more checks
+                # can't change the verdict.  Saves ~half the inner-loop
+                # work on heavily-stacked desktops.
+                if overlap_area >= win_area:
+                    overlap_area = win_area
+                    break
         win.occluded_pct = (overlap_area / win_area) * 100.0
         win.is_occluded = win.occluded_pct > 5.0
+
+
+def _printwindow_with_fallback(hwnd: int, hdc: int, _printwindow=None) -> int:
+    """Try ``PrintWindow`` with ``PW_RENDERFULLCONTENT=0x02`` (DWM-
+    aware, captures Chrome / Edge / UWP correctly), fall back to
+    plain ``PrintWindow`` (flag=0) if the flag is unsupported on
+    pre-Win10-1903 systems.
+
+    Returns the BOOL result of whichever call succeeded, or 0 if
+    both failed.
+
+    ``_printwindow`` is an injection point for unit tests so the
+    fallback can be verified without a live HWND / GDI context.
+    Defaults to ``ctypes.windll.user32.PrintWindow``.
+    """
+    if _printwindow is None:
+        try:
+            import ctypes
+            _printwindow = ctypes.windll.user32.PrintWindow
+        except Exception:
+            return 0
+    PW_RENDERFULLCONTENT = 0x02
+    result = _printwindow(hwnd, hdc, PW_RENDERFULLCONTENT)
+    if not result:
+        # Older Win — flag unsupported.  Retry without it.  Worst case:
+        # captured frame is missing DWM-rendered content for layered
+        # windows, but it's still better than nothing.
+        result = _printwindow(hwnd, hdc, 0)
+    return result
 
 
 def _assign_monitors(windows: List[WindowInfo],
@@ -945,8 +1008,6 @@ def capture_window_one_shot(hwnd: int, *, fmt: str = 'jpeg',
     if width <= 0 or height <= 0:
         return None
 
-    PW_RENDERFULLCONTENT = 0x02
-
     hwnd_dc = _win32gui.GetWindowDC(hwnd)
     if not hwnd_dc:
         return None
@@ -959,12 +1020,7 @@ def capture_window_one_shot(hwnd: int, *, fmt: str = 'jpeg',
         bitmap = _win32ui.CreateBitmap()
         bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
         save_dc.SelectObject(bitmap)
-        result = ctypes.windll.user32.PrintWindow(
-            hwnd, save_dc.GetSafeHdc(), PW_RENDERFULLCONTENT)
-        if not result:
-            # Older Win — retry without the flag.
-            result = ctypes.windll.user32.PrintWindow(
-                hwnd, save_dc.GetSafeHdc(), 0)
+        result = _printwindow_with_fallback(hwnd, save_dc.GetSafeHdc())
         if not result:
             return None
         bmp_info = bitmap.GetInfo()
