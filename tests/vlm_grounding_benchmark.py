@@ -587,13 +587,20 @@ if _methods_available:
               f"{s['exact_count']:6d} {s['good_count']:6d} "
               f"{s['avg_time_s']:7.1f}s {s['n']:4d}")
 
-    # Fallback recommendation: per-task-class winner
+    # Fallback recommendation: per-task-class winner.
+    # Rebuild the per-method bucket from method_results — the
+    # summarize_bucket DRY refactor in commit 0fa2cb0 removed the
+    # earlier method_buckets variable.  Reviewer (post-shipment)
+    # caught the NameError before any user hit it.
+    from collections import defaultdict as _dd_local
     print(f"\n{'='*70}")
     print("PER-TARGET WINNER (lowest error)")
     print(f"{'='*70}")
-    target_buckets = _dd(list)
+    target_buckets = _dd_local(list)
+    method_buckets = _dd_local(list)
     for r in method_results:
         target_buckets[r['target']].append(r)
+        method_buckets[r['method']].append(r)
     for target, rs in target_buckets.items():
         winner = min(rs, key=lambda r: r['error'])
         print(f"  {target:30s} → {winner['method']:20s} "
@@ -603,7 +610,7 @@ if _methods_available:
     print("RECOMMENDED FALLBACK CHAIN")
     print(f"{'='*70}")
     # Rank methods by their per-target win count + by avg error.
-    win_counts = _dd(int)
+    win_counts = _dd_local(int)
     for target, rs in target_buckets.items():
         winner = min(rs, key=lambda r: r['error'])
         win_counts[winner['method']] += 1

@@ -526,14 +526,21 @@ class Qwen3VLBackend:
                          f'(intelligence_preference={intelligence_preference})'}
 
     def _is_local_vlm_available(self) -> bool:
-        """Quick reachability probe for the local VLM endpoint."""
+        """Quick reachability probe for the local VLM endpoint.
+
+        Uses ``self.base_url`` (constructor attribute) — earlier
+        version of this method referenced ``self.api_url`` which
+        doesn't exist; reviewer caught the typo before it shipped
+        to a real caller.  Llama-server's /health returns 200 OK
+        when ready, 503 when warming up, anything else when down.
+        """
         try:
             from core.http_pool import pooled_get
-            r = pooled_get(self.api_url.replace('/chat/completions',
-                                                  '/health'),
-                            timeout=1)
+            health_url = self.base_url.rstrip('/').replace('/v1', '') + '/health'
+            r = pooled_get(health_url, timeout=1)
             return r.status_code == 200
-        except Exception:
+        except Exception as e:
+            logger.debug(f'_is_local_vlm_available probe failed: {e}')
             return False
 
     def _dispatch_local(self, method, screenshot_b64, task, history):

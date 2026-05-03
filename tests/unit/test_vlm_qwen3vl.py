@@ -2341,3 +2341,77 @@ class TestPostClickVerifyRetry:
         assert result['verify_retried'] is False
         assert mock_exec.call_count == 1
 
+    @patch('integrations.vlm.local_computer_tool.take_screenshot')
+    @patch('integrations.vlm.local_computer_tool._execute_inprocess')
+    @patch('integrations.vlm.local_computer_tool.time.sleep')
+    @patch('integrations.vlm.local_computer_tool._quick_image_diff')
+    def test_diff_just_below_threshold_retries(self, mock_diff, mock_sleep,
+                                                 mock_exec, mock_screenshot):
+        """Boundary: diff = 0.004 (< VERIFY_DIFF_THRESHOLD=0.005) -> retry."""
+        from integrations.vlm.local_computer_tool import (
+            execute_action, VERIFY_DIFF_THRESHOLD)
+        assert VERIFY_DIFF_THRESHOLD == 0.005
+        mock_screenshot.return_value = self._solid_b64()
+        mock_exec.return_value = {'output': 'clicked'}
+        mock_diff.return_value = 0.004
+        result = execute_action(
+            {'action': 'left_click', 'coordinate': [100, 100]},
+            'inprocess', verify=True)
+        assert result['verify_retried'] is True
+        assert mock_exec.call_count == 2
+
+    @patch('integrations.vlm.local_computer_tool.take_screenshot')
+    @patch('integrations.vlm.local_computer_tool._execute_inprocess')
+    @patch('integrations.vlm.local_computer_tool.time.sleep')
+    @patch('integrations.vlm.local_computer_tool._quick_image_diff')
+    def test_diff_just_above_threshold_does_not_retry(self, mock_diff, mock_sleep,
+                                                       mock_exec, mock_screenshot):
+        """Boundary: diff = 0.006 (>= VERIFY_DIFF_THRESHOLD=0.005) -> no retry."""
+        from integrations.vlm.local_computer_tool import execute_action
+        mock_screenshot.return_value = self._solid_b64()
+        mock_exec.return_value = {'output': 'clicked'}
+        mock_diff.return_value = 0.006
+        result = execute_action(
+            {'action': 'left_click', 'coordinate': [100, 100]},
+            'inprocess', verify=True)
+        assert result['verify_retried'] is False
+        assert mock_exec.call_count == 1
+
+
+class TestExecuteActionWindowHandleEdgeCases:
+    """Coverage gap reviewer flagged: window_handle path with action
+    that has no coordinate (e.g. type / key / hotkey actions targeted
+    at a specific window).  Must NOT crash, must NOT translate
+    non-existent coords."""
+
+    def _make_winfo(self, hwnd, rect=(0, 0, 800, 600)):
+        from integrations.remote_desktop.window_capture import WindowInfo
+        return WindowInfo(hwnd=hwnd, title='Test', process_name='t.exe',
+                          pid=42, rect=rect)
+
+    def test_window_handle_with_no_coordinate_succeeds(self):
+        """type action targeted at a window - no coord to translate;
+        execute_action must still call _execute_inprocess."""
+        from integrations.vlm.local_computer_tool import execute_action
+        with patch('integrations.remote_desktop.window_capture.WindowEnumerator') as mock_enum, \
+             patch('integrations.vlm.local_computer_tool._execute_inprocess',
+                   return_value={'output': 'typed', 'status': 'ok'}) as mock_exec:
+            mock_enum.return_value.refresh_window_info.return_value = self._make_winfo(1)
+            result = execute_action(
+                {'action': 'type', 'text': 'hello'},
+                'inprocess', window_handle=1)
+        mock_exec.assert_called_once()
+        assert result['output'] == 'typed'
+
+    def test_window_handle_preserves_action_text_field(self):
+        """The window-translation step must NOT mutate non-coordinate fields."""
+        from integrations.vlm.local_computer_tool import execute_action
+        action = {'action': 'type', 'text': 'preserve me'}
+        with patch('integrations.remote_desktop.window_capture.WindowEnumerator') as mock_enum, \
+             patch('integrations.vlm.local_computer_tool._execute_inprocess',
+                   return_value={'output': 'ok'}) as mock_exec:
+            mock_enum.return_value.refresh_window_info.return_value = self._make_winfo(1)
+            execute_action(action, 'inprocess', window_handle=1)
+        passed_action = mock_exec.call_args[0][0]
+        assert passed_action['text'] == 'preserve me'
+

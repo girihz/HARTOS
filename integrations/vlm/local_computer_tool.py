@@ -388,6 +388,24 @@ def _bring_foreground(hwnd: int) -> None:
         logger.debug(f"bring-foreground hwnd={hwnd} failed: {e}")
 
 
+# Diff thresholds for _post_click_verify.  Named so reviewers (and
+# tests) don't have to guess what 0.005 / 16 mean.
+#: Fraction-of-changed-pixels below which we consider the screen
+#: "unchanged" → triggers a 50-px nudge retry.  0.5% covers JPEG
+#: noise on a static frame and small cursor sprites without false-
+#: triggering on real UI updates (button press → dialog → > 5%).
+VERIFY_DIFF_THRESHOLD: float = 0.005
+
+#: Per-pixel grayscale delta above which a pixel counts as "changed".
+#: Set to absorb JPEG-quality-70 quantization noise (typically < 8).
+VERIFY_PIXEL_NOISE_FLOOR: int = 16
+
+#: How far to nudge the click on a no-change retry (screen px).
+#: Half a typical button width — high enough to escape a missed edge,
+#: low enough to stay inside the same UI element.
+VERIFY_NUDGE_PX: int = 50
+
+
 def _post_click_verify(action: dict, result: dict, pre_b64: str, *,
                        tier: str, window_meta: dict = None) -> dict:
     """Take a post-action screenshot, diff against pre, and if no
@@ -404,12 +422,12 @@ def _post_click_verify(action: dict, result: dict, pre_b64: str, *,
         return result
     diff = _quick_image_diff(pre_b64, post_b64)
     result['verify_diff'] = round(diff, 3)
-    if diff < 0.005:
+    if diff < VERIFY_DIFF_THRESHOLD:
         # No visible change — try one nudge.  Only meaningful for
         # click-type actions with a coordinate.
         coord = action.get('coordinate')
         if coord and isinstance(coord, (list, tuple)) and len(coord) >= 2:
-            nudged = [int(coord[0]) + 50, int(coord[1])]
+            nudged = [int(coord[0]) + VERIFY_NUDGE_PX, int(coord[1])]
             nudged_action = dict(action, coordinate=nudged)
             logger.info(
                 f"verify: no visible change after click @ {coord}; "
@@ -446,8 +464,10 @@ def _quick_image_diff(b64_a: str, b64_b: str) -> float:
         n = len(ba)
         if n == 0:
             return 0.0
-        # Threshold of 16 absorbs JPEG-compression noise on unchanged regions.
-        changed = sum(1 for a, b in zip(ba, bb) if abs(a - b) > 16)
+        # Per-pixel noise floor absorbs JPEG-compression noise on
+        # unchanged regions (see VERIFY_PIXEL_NOISE_FLOOR docstring).
+        changed = sum(1 for a, b in zip(ba, bb)
+                       if abs(a - b) > VERIFY_PIXEL_NOISE_FLOOR)
         return changed / n
     except Exception:
         # Conservative: report no diff so we don't trigger spurious nudges.

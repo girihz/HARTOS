@@ -224,6 +224,28 @@ def run_local_agentic_loop(
             f"prompt={prompt_id}): {instruction[:100]}"
         )
 
+    # Phase 3.5 wire-up: classify the task with the complementary path
+    # router and use it to size the iteration budget.  Single-shot
+    # tasks ("click X") shouldn't burn the full 30-iter budget when
+    # one click satisfies the goal — the multi-iter loop's overhead
+    # is real (per-iter screenshot + VLM call ~3-5s).  Multi-step
+    # tasks get the full caller-supplied max_iterations.
+    _route = 'multi_step'  # safe default — never over-cap a real loop
+    try:
+        if qwen3vl is not None:
+            _route = qwen3vl.route_task(instruction or enhanced)
+            logger.info(f"VLM loop route_task: '{instruction[:60]}' → {_route}")
+            if _route == 'single_shot' and max_iterations > 3:
+                # Cap at 3 — gives one nudge-retry + one followup
+                # if the click misses without burning the full budget.
+                max_iterations = 3
+            elif _route == 'enumerate' and max_iterations > 1:
+                # Enumerate = parse_and_reason snapshot, no follow-up
+                # iter needed.
+                max_iterations = 1
+    except Exception as e:
+        logger.debug(f'route_task wire-up skipped: {e}')
+
     # Build conversation messages for LLM
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -531,9 +553,21 @@ def run_local_agentic_loop(
                 exit_reason = 'done'
                 break
 
-            # 5. Execute the action
+            # 5. Execute the action.
+            # Phase 6 wire-up: pass safety=True so the per-session cap
+            # + window blocklist + audit JSONL fire on every loop click.
+            # Verify=True triggers the post-click pre/post diff + 50px
+            # nudge retry from Phase 4.  Both default-tunable via env
+            # but ON in the loop is the right safe default — solo
+            # /visual_agent calls keep their existing behaviour.
             action_payload = _build_action_payload(action_json, parsed)
-            result = execute_action(action_payload, tier)
+            _safety_on = os.environ.get(
+                'HEVOLVE_VLM_LOOP_SAFETY', '1').lower() not in ('0', 'false', 'no')
+            _verify_on = os.environ.get(
+                'HEVOLVE_VLM_LOOP_VERIFY', '0').lower() in ('1', 'true', 'yes')
+            result = execute_action(
+                action_payload, tier,
+                safety=_safety_on, verify=_verify_on)
             action_ok = result.get('status') != 'error'
             if action_ok:
                 consecutive_action_errors = 0
