@@ -2,12 +2,46 @@
 VLM Grounding Benchmark — All targets x All strategies.
 Measures <point>x,y</point> accuracy, finds optimal strategy+prompt combos.
 
-Run: PYTHONIOENCODING=utf-8 python tests/vlm_grounding_benchmark.py
-Requires: VLM server on 127.0.0.1:8080, PIL, pyautogui (for screen size)
+Run modes:
+    # Plain run — print tables, save tests/vlm_benchmark_results.json
+    PYTHONIOENCODING=utf-8 python tests/vlm_grounding_benchmark.py
+
+    # Seed / refresh the no-regression baseline (commit with prefix
+    # 'baseline-bump:' so reviewers see it's a deliberate move).
+    python tests/vlm_grounding_benchmark.py --bump-baseline
+
+    # Gate mode — compare to baseline; exit non-zero on regression.
+    # CI hook + manual verification before merging anything that
+    # touches integrations/vlm/** or qwen3vl_backend.py.
+    python tests/vlm_grounding_benchmark.py --gate
+
+Requires: VLM server reachable via core.port_registry.get_port('llm')
+or HEVOLVE_VLM_ENDPOINT_URL (default 127.0.0.1:8080), PIL, pyautogui.
 """
 
-import base64, re, io, requests, time, sys, json
+import base64, re, io, requests, time, sys, json, argparse
 from PIL import ImageGrab, Image
+
+# ── CLI flags (parse early; rest of the file consults _ARGS) ───────
+# parse_known_args so pytest / kernel-runner extra flags don't error
+_parser = argparse.ArgumentParser(
+    description='VLM grounding benchmark + no-regression gate.')
+_parser.add_argument(
+    '--gate', action='store_true',
+    help='After running, compare to baseline JSON and exit non-zero on regression')
+_parser.add_argument(
+    '--bump-baseline', action='store_true',
+    help='Promote current run to baseline (writes JSON + .md).  Commit with prefix "baseline-bump:"')
+_parser.add_argument(
+    '--baseline-path', default='tests/vlm_benchmark_baseline.json',
+    help='Path to baseline JSON (default: tests/vlm_benchmark_baseline.json)')
+_parser.add_argument(
+    '--err-threshold-pct', type=float, default=10.0,
+    help='Allow up to N%% increase in avg_err per group before failing the gate (default 10)')
+_parser.add_argument(
+    '--time-threshold-pct', type=float, default=20.0,
+    help='Allow up to N%% increase in avg_time per group before failing the gate (default 20)')
+_ARGS, _ = _parser.parse_known_args()
 
 # ── Screenshot ──────────────────────────────────────────────────────
 img = ImageGrab.grab()
@@ -180,12 +214,31 @@ STRATEGIES = {
 }
 
 # ── Run benchmark ───────────────────────────────────────────────────
-results = []
-print(f"\n{'='*90}")
-print(f"{'Target':30s} {'Strategy':22s} {'Got':12s} {'Expected':12s} {'Err':>6s} {'Grade':6s} {'Time':>5s}")
-print(f"{'='*90}")
+# Skip-strategy escape hatch: set HEVOLVE_VLM_BENCH_METHODS_ONLY=1 to
+# bypass the prompt-strategy section entirely and run only the new
+# METHOD section below.  Useful when the strategy results from a prior
+# run are still in tests/vlm_benchmark_results.json and you only want
+# to refresh the per-method comparison (e.g. after a code change in
+# qwen3vl_backend or local_loop).
+_methods_only = os.environ.get('HEVOLVE_VLM_BENCH_METHODS_ONLY', '').lower() in ('1', 'true', 'yes')
 
-for target, (exp_x, exp_y) in TARGETS.items():
+results = []
+if _methods_only:
+    print(f"\nSkipping prompt-strategy section (HEVOLVE_VLM_BENCH_METHODS_ONLY=1)")
+    print(f"Loading prior strategy results from tests/vlm_benchmark_results.json if present")
+    try:
+        with open('tests/vlm_benchmark_results.json') as _prev_f:
+            _prev = json.load(_prev_f)
+            results = _prev.get('results', [])
+            print(f"  Loaded {len(results)} prior strategy results")
+    except Exception as _prev_err:
+        print(f"  Could not load prior results ({_prev_err}) — strategy section will be empty")
+else:
+    print(f"\n{'='*90}")
+    print(f"{'Target':30s} {'Strategy':22s} {'Got':12s} {'Expected':12s} {'Err':>6s} {'Grade':6s} {'Time':>5s}")
+    print(f"{'='*90}")
+
+for target, (exp_x, exp_y) in (TARGETS.items() if not _methods_only else ()):
     for strat_name, strat in STRATEGIES.items():
         # taskbar_list is target-agnostic — only run once, then extract per-target
         if strat_name in ('taskbar_list', 'describe_all_then_pick') and target not in ('Start button',):
@@ -416,7 +469,16 @@ def _run_loop_one_iter(target):
     actions = res.get('extracted_responses') or []
     if not actions:
         return None, None, elapsed, '(no action)'
-    first = actions[0].get('content') or {}
+    first_entry = actions[0] or {}
+    first = first_entry.get('content')
+    # Guard against the iteration-error path: when the loop's body
+    # raises, extracted_responses[i]['content'] is the str(exception)
+    # — see local_loop.py iteration except clause.  Detect and surface
+    # as a benchmarkable failure instead of crashing on first.get().
+    if isinstance(first, str):
+        return None, None, elapsed, f'(iter error: {first[:30]})'
+    if first is None:
+        return None, None, elapsed, '(empty content)'
     coord = first.get('coordinate')
     strategy = first.get('_strategy', 'inline_prompt')
     nx = ny = None
@@ -539,3 +601,82 @@ with open('tests/vlm_benchmark_results.json', 'w') as f:
     json.dump(out, f, indent=2, default=str)
 print(f"\nResults saved to tests/vlm_benchmark_results.json")
 print(f"Strategy tests: {len(results)}, method tests: {len(method_results)}")
+
+
+# ════════════════════════════════════════════════════════════════════
+# §0 of vlm_best_of_all_worlds_plan.md — the no-regression gate.
+#
+# Whole VLM workstream is gated by this.  No phase ships unless the
+# gate stays green against the committed baseline.  Two operations:
+#
+#   --bump-baseline  Promote the just-finished run to baseline
+#                    (writes both .json + .md).  Author MUST commit
+#                    with prefix 'baseline-bump:' so reviewers see
+#                    it's a deliberate move, not a silent drift.
+#
+#   --gate           Compare the just-finished run to baseline JSON
+#                    and exit non-zero if ANY of:
+#                      * avg_err per (strategy or method) bucket
+#                        increased by more than --err-threshold-pct
+#                      * EXACT count per bucket decreased
+#                      * FAIL count per bucket increased
+#                      * avg_time per bucket grew by more than
+#                        --time-threshold-pct
+#                      * per-(target,method) sub-strategy attribution
+#                        changed (silent strategy drift catches code
+#                        paths that pass coords but lose the smarts)
+# ════════════════════════════════════════════════════════════════════
+
+
+# Pure helpers live in tests/vlm_gate_lib.py so they're importable
+# without triggering the screenshot+benchmark side effects above.
+from vlm_gate_lib import (
+    summarize_bucket, strategy_attribution,
+    compare_buckets, compare_attribution, render_baseline_md,
+)
+
+
+# ── --bump-baseline ───────────────────────────────────────────────
+if _ARGS.bump_baseline:
+    os.makedirs(os.path.dirname(_ARGS.baseline_path) or '.', exist_ok=True)
+    with open(_ARGS.baseline_path, 'w') as f:
+        json.dump(out, f, indent=2, default=str)
+    md_path = _ARGS.baseline_path[:-5] + '.md' if _ARGS.baseline_path.endswith('.json') \
+        else _ARGS.baseline_path + '.md'
+    with open(md_path, 'w', encoding='utf-8') as f:
+        f.write(render_baseline_md(out))
+    print(f"\n[baseline-bump] Wrote {_ARGS.baseline_path}")
+    print(f"[baseline-bump] Wrote {md_path}")
+    print(f"[baseline-bump] Commit with prefix 'baseline-bump:' so reviewers see "
+          f"it's a deliberate move (not silent drift)")
+
+
+# ── --gate ────────────────────────────────────────────────────────
+if _ARGS.gate:
+    if not os.path.exists(_ARGS.baseline_path):
+        print(f"\n[gate] No baseline at {_ARGS.baseline_path} — nothing to "
+              f"compare against.  First seed it with --bump-baseline.")
+        sys.exit(0)
+    with open(_ARGS.baseline_path) as f:
+        _baseline = json.load(f)
+    print(f"\n[gate] Comparing to baseline from {_baseline.get('timestamp', '?')}")
+    _regressions = (
+        compare_buckets(
+            summarize_bucket(results, 'strategy'),
+            summarize_bucket(_baseline.get('results', []), 'strategy'),
+            'strategy', _ARGS.err_threshold_pct, _ARGS.time_threshold_pct)
+        + compare_buckets(
+            summarize_bucket(method_results, 'method'),
+            summarize_bucket(_baseline.get('method_results', []), 'method'),
+            'method', _ARGS.err_threshold_pct, _ARGS.time_threshold_pct)
+        + compare_attribution(
+            strategy_attribution(method_results),
+            strategy_attribution(_baseline.get('method_results', [])))
+    )
+    if _regressions:
+        print(f"[gate] FAIL — {len(_regressions)} regression(s):")
+        for _r in _regressions:
+            print(f"  - {_r}")
+        sys.exit(1)
+    print(f"[gate] PASS — no regressions vs baseline")
+    sys.exit(0)
