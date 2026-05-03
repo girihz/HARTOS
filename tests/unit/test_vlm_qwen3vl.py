@@ -1528,19 +1528,31 @@ class TestVLMDeterministicActions:
         assert 'refused' in result['output'].lower()
 
     def test_shell_action_fails_closed_on_import_error(self):
-        """If hart_intelligence_entry can't be imported we MUST fail
+        """If the shared shell handler is unavailable (HARTOS still
+        loading, or stripped from the frozen build) we MUST fail
         closed — no bare subprocess fallback that skips the denylist.
         Regression guard: previously the code had a fallback that ran
-        the command without any safety checks at all."""
+        the command without any safety checks at all.
+
+        The production code reads the handler via
+        ``core.safe_hartos_attr.safe_hartos_attr`` (which inspects
+        ``sys.modules`` — never calls ``__import__``).  The earlier
+        version of this test patched ``builtins.__import__`` which
+        had zero effect on the actual code path: ``safe_hartos_attr``
+        returned the cached module from ``sys.modules`` and the
+        test passed only when run in isolation (before something
+        else in the suite imported hart_intelligence_entry).  Now
+        we patch the resolver directly — that's the layer the
+        production code uses, so the test exercises the real fail-
+        closed branch deterministically.
+        """
         from integrations.vlm import local_computer_tool
-        real_import = __builtins__['__import__'] if isinstance(__builtins__, dict) else __builtins__.__import__
-
-        def broken_import(name, *args, **kwargs):
-            if name == 'hart_intelligence_entry':
-                raise ImportError('simulated')
-            return real_import(name, *args, **kwargs)
-
-        with patch('builtins.__import__', side_effect=broken_import):
+        with patch(
+            'integrations.vlm.local_computer_tool.safe_hartos_attr'
+            if hasattr(local_computer_tool, 'safe_hartos_attr')
+            else 'core.safe_hartos_attr.safe_hartos_attr',
+            return_value=None,
+        ):
             result = local_computer_tool._execute_inprocess(
                 {'action': 'shell', 'command': 'echo hi'}
             )
@@ -1612,23 +1624,21 @@ class TestVLMDeterministicActions:
         assert result['status'] == 'ok'
 
     def test_open_file_gui_nonwindows_fails_closed_on_import_error(self):
-        """If the shared shell handler can't be imported on non-Windows,
-        open_file_gui must fail closed — NO bare subprocess fallback that
-        would skip the denylist. Same regression guard as the shell action."""
+        """If the shared shell handler is unavailable on non-Windows,
+        open_file_gui must fail closed — NO bare subprocess fallback
+        that would skip the denylist.  Same regression guard as the
+        shell action.  Patches the safe_hartos_attr resolver (which
+        is the actual layer production code uses) instead of
+        builtins.__import__ (the prior version's wrong layer that
+        only worked when the test ran in isolation)."""
         from integrations.vlm import local_computer_tool as lct
-        real_import = (
-            __builtins__['__import__']
-            if isinstance(__builtins__, dict)
-            else __builtins__.__import__
-        )
-
-        def broken_import(name, *args, **kwargs):
-            if name == 'hart_intelligence_entry':
-                raise ImportError('simulated')
-            return real_import(name, *args, **kwargs)
-
         with patch.object(lct.sys, 'platform', 'linux'), \
-             patch('builtins.__import__', side_effect=broken_import):
+             patch(
+                 'integrations.vlm.local_computer_tool.safe_hartos_attr'
+                 if hasattr(lct, 'safe_hartos_attr')
+                 else 'core.safe_hartos_attr.safe_hartos_attr',
+                 return_value=None,
+             ):
             result = lct._execute_inprocess(
                 {'action': 'open_file_gui', 'path': '/home/u/doc.pdf'}
             )

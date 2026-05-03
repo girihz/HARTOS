@@ -519,22 +519,18 @@ class Qwen3VLBackend:
         except Exception:
             screen_w, screen_h = img_w, img_h
 
-        # --- Strategy 1: Taskbar list for taskbar targets ---
-        if self._is_taskbar_task(task):
-            logger.info(f"Using taskbar_list strategy for: {task}")
-            match, list_raw = self._taskbar_list_lookup(screenshot_b64, task)
-            if match:
-                nx, ny, match_line = match
-                px = int(nx * screen_w / 1000)
-                py = int(ny * screen_h / 1000)
-                latency = time.time() - start
-                return {'action': 'left_click', 'screen_x': px, 'screen_y': py,
-                        'norm_x': nx, 'norm_y': ny,
-                        'text': '', 'done': False,
-                        'reasoning': f'taskbar_list: {match_line}',
-                        'raw': list_raw, 'latency': latency,
-                        'strategy': 'taskbar_list'}
-            logger.info("taskbar_list: no match found, falling through to describe_first")
+        # --- Strategy 1: Taskbar pre-check via shared helper ---
+        # Phase 3 of vlm_best_of_all_worlds_plan.md: replaced inline
+        # taskbar_list code with a call to try_taskbar_pre_check (the
+        # b7936bf helper).  Behavior is byte-identical to the prior
+        # inline implementation — same _is_taskbar_task gate, same
+        # _taskbar_list_lookup call, same return-dict shape, same
+        # fall-through when no match.  Verified by the existing
+        # TestPointAndActBottomEdgeRetry suite.
+        taskbar_action = self.try_taskbar_pre_check(
+            screenshot_b64, task, screen_w, screen_h, start)
+        if taskbar_action is not None:
+            return taskbar_action
 
         # --- Strategy 2: describe_first (primary, avg=78) ---
         state_hint = ''
@@ -589,82 +585,20 @@ class Qwen3VLBackend:
         raw = self._call_api(messages)
         result, nx, ny = self._parse_action_response(raw, img_w, img_h, task=task)
 
-        # --- Strategy 3: elimination retry if coords look suspicious ---
-        # Patterns the model commonly falls into when it isn't actually grounding:
-        #   • dead center (400-600, 400-600): "I don't know, so middle"
-        #   • bottom edge (y > 930): clicks taskbar when asked for in-screen UI
-        #     (observed pattern: model says "Notepad is in Start menu" but
-        #     grounds to y=975 which is the taskbar strip below the Start menu)
-        #   • top edge (y < 30): clicks window chrome / title bar
-        # Only trigger the retry when the task itself is NOT about the
-        # suspected region — clicking the Start button at y=990 is legitimate,
-        # clicking a "Notepad tile" at y=990 is not.
-        if nx is not None and ny is not None and result['action'] == 'left_click':
-            is_center_biased = (350 < nx < 650 and 350 < ny < 650)
-            task_lower = task.lower()
-            task_is_taskbar = self._is_taskbar_task(task) or any(
-                kw in task_lower for kw in ('taskbar', 'start button', 'system tray')
-            )
-            # Bottom edge hallucination: y > 930 on a task NOT about the
-            # taskbar means the model probably pointed into the taskbar strip
-            # while claiming it was pointing at in-app content.
-            is_bottom_edge_biased = (ny > 930 and not task_is_taskbar)
-            is_top_edge_biased = (ny < 30)
-            is_suspicious = is_center_biased or is_bottom_edge_biased or is_top_edge_biased
-            if is_suspicious:
-                bias_kind = (
-                    'center' if is_center_biased else
-                    'bottom-edge' if is_bottom_edge_biased else
-                    'top-edge'
-                )
-                logger.info(
-                    f"{bias_kind}-biased coords ({nx},{ny}) for non-taskbar task, "
-                    f"retrying with elimination strategy"
-                )
-                elim_prompt = (
-                    f'I need to find the target for: {task}\n'
-                    f'Describe its location precisely BEFORE giving coordinates:\n'
-                    f'  - Top half or bottom half?\n'
-                    f'  - Left third, middle third, or right third?\n'
-                    f'  - Is it inside a window, in a menu, or on the taskbar?\n'
-                    f'If the task asks to open an app and that app is not '
-                    f'already visible, the correct action is usually NOT a '
-                    f'click — respond with DONE and I will use a keyboard '
-                    f'shortcut instead.\n'
-                    f'Otherwise, give the precise <point>x,y</point> (0-1000 normalized) '
-                    f'and avoid the taskbar strip (y > 930) unless the target '
-                    f'is an actual taskbar icon.'
-                )
-                elim_raw = self._call_api([{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": elim_prompt},
-                        {"type": "image_url", "image_url": {
-                            "url": f"data:image/jpeg;base64,{screenshot_b64}"
-                        }},
-                    ]
-                }])
-                elim_result, enx, eny = self._parse_action_response(elim_raw, img_w, img_h, task=task)
-                # Only reject the retry if it reproduces the *same* bias we
-                # were retrying for. If we retried bottom-edge and the retry
-                # lands in the middle of the screen, that's a legitimate hit
-                # even if it happens to be near center — the whole point of
-                # the retry was to escape the bottom strip, not to verify the
-                # answer is off-center.
-                if enx is None or eny is None:
-                    reproduced_bias = True
-                elif is_bottom_edge_biased:
-                    reproduced_bias = (eny > 930 and not task_is_taskbar)
-                elif is_top_edge_biased:
-                    reproduced_bias = (eny < 30)
-                else:  # center-biased
-                    reproduced_bias = (350 < enx < 650 and 350 < eny < 650)
-
-                if not reproduced_bias:
-                    # Retry escaped the original bias — trust it
-                    result = elim_result
-                    result['strategy'] = 'elimination_retry'
-                    logger.info(f"Elimination retry gave ({enx},{eny}) — using it")
+        # --- Strategy 3: bias detection + elimination retry via helpers ---
+        # Phase 3 refactor: replaced inline center/bottom/top-edge bias
+        # checks + elimination prompt construction with detect_grounding_bias
+        # + retry_with_elimination (b7936bf helpers).  Same patterns
+        # detected, same retry prompt, same reproduced-bias rejection
+        # rule.  Verified by TestPointAndActBottomEdgeRetry.
+        bias_kind = self.detect_grounding_bias(nx, ny, result['action'], task)
+        if bias_kind is not None:
+            retry = self.retry_with_elimination(
+                screenshot_b64, task, img_w, img_h, bias_kind)
+            if retry is not None:
+                # Helper returns (result, nx, ny) — strategy already
+                # tagged 'elimination_retry' on the inner result.
+                result, nx, ny = retry
 
         latency = time.time() - start
         result['latency'] = latency
@@ -674,13 +608,10 @@ class Qwen3VLBackend:
     # ─── Shared grounding-strategy helpers ──────────────────────────────
     # Extracted from point_and_act so the multi-iteration agentic loop
     # (integrations/vlm/local_loop.py) can use them too.  point_and_act
-    # is intentionally LEFT UNCHANGED in this commit — it keeps its
-    # inline copies of the same logic so its end-to-end behaviour is
-    # byte-identical.  The duplication is deliberate-for-now: it means
-    # this change is strictly additive (loop GAINS strategies, no other
-    # caller's behaviour shifts).  A follow-up DRY pass can replace
-    # point_and_act's inlined code with calls to these helpers once
-    # the loop integration has soaked.
+    # was refactored in Phase 3 of vlm_best_of_all_worlds_plan.md to
+    # call these helpers instead of maintaining inline copies, so
+    # there is now ONE source of truth for taskbar shortcut + bias
+    # detection + elimination retry — no parallel paths.
     #
     # Why it matters: commit 8fa6e97 (Apr 10, 2026 — "Single VLM call:
     # plan + ground in one prompt — halves per-step latency") moved the
