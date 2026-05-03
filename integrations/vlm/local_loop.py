@@ -561,6 +561,14 @@ def run_local_agentic_loop(
             else:
                 consecutive_action_errors += 1
 
+            # Surface coordinate + strategy in the response content so
+            # observers (benchmark, audit, /visual_agent telemetry,
+            # post-hoc replay) can reconstruct what the VLM actually
+            # decided this iteration without re-parsing action_json.
+            # Was missing - vlm_grounding_benchmark.py:loop_one_iter
+            # path always read content['coordinate'] = None and scored
+            # all 6 targets as FAIL, hiding any real grounding regression
+            # behind a fixed metric.
             extracted_responses.append({
                 "type": "action",
                 "content": {
@@ -568,6 +576,8 @@ def run_local_agentic_loop(
                     "reasoning": action_json.get('Reasoning', ''),
                     "result": result.get('output', ''),
                     "ok": action_ok,
+                    "coordinate": action_json.get('coordinate'),
+                    "_strategy": action_json.get('_strategy', 'inline_prompt'),
                 },
                 "iteration": iteration + 1,
             })
