@@ -441,6 +441,149 @@ class Qwen3VLBackend:
 
         return best_match, list_raw
 
+    # ─── Phase 10: P2P inference resolver ──────────────────────────────
+    # Mobile devices can't competitively run a 4B+ multimodal model;
+    # they capture, transmit to a paired peer (typically the user's
+    # desktop Nunba) for inference, then execute the action locally.
+    # This resolver picks where the VLM call goes based on
+    # intelligence_preference + reachability.  Plan §8 / §10.
+
+    def dispatch_inference(self, request: dict, *,
+                            peer_dispatch=None,
+                            intelligence_preference: str = 'hybrid'
+                            ) -> dict:
+        """Pick the right tier for a VLM inference request and run it.
+
+        Args:
+            request: dict with at least
+                ``{'method', 'screenshot_b64', 'task'}``.  Optional
+                keys: ``history``, ``window_rect``, ``platform``,
+                ``request_id``, ``prefer_local``.
+            peer_dispatch: optional callable
+                ``peer_dispatch(channel, payload, timeout)`` to route
+                to a paired peer over PeerLink.  When None, only
+                local + cloud tiers are considered.
+            intelligence_preference: ``'local_only'`` (default for
+                desktop) | ``'hybrid'`` (try local first, peer as
+                fallback) | ``'hive'`` (prefer peer/hive when local
+                is busy or unreachable).
+
+        Returns:
+            dict with grounding result + ``'tier'`` field set to
+            whichever path executed: ``'local'`` | ``'paired_peer'``
+            | ``'hive'`` | ``'cloud'`` | ``'no_route'``.
+        """
+        method = request.get('method', 'point_and_act')
+        screenshot_b64 = request.get('screenshot_b64', '')
+        task = request.get('task', '')
+        history = request.get('history')
+        prefer_local = request.get('prefer_local', True)
+
+        local_available = self._is_local_vlm_available()
+
+        if intelligence_preference == 'local_only':
+            tiers = ['local'] if local_available else []
+        elif intelligence_preference == 'hive':
+            tiers = (['paired_peer', 'hive']
+                     + (['local'] if local_available else []))
+        else:  # 'hybrid' (default)
+            tiers = ((['local'] if local_available and prefer_local else [])
+                     + ['paired_peer', 'hive']
+                     + ([] if local_available else ['cloud']))
+
+        for tier in tiers:
+            try:
+                if tier == 'local':
+                    result = self._dispatch_local(method, screenshot_b64,
+                                                    task, history)
+                elif tier == 'paired_peer':
+                    if peer_dispatch is None:
+                        continue
+                    result = self._dispatch_paired_peer(
+                        request, peer_dispatch)
+                    if result is None:
+                        continue
+                elif tier == 'hive':
+                    if peer_dispatch is None:
+                        continue
+                    result = self._dispatch_hive(request, peer_dispatch)
+                    if result is None:
+                        continue
+                elif tier == 'cloud':
+                    result = self._dispatch_cloud(request)
+                    if result is None:
+                        continue
+                else:
+                    continue
+                result['tier'] = tier
+                return result
+            except Exception as e:
+                logger.debug(f'tier {tier} failed: {e}')
+                continue
+
+        return {'tier': 'no_route',
+                'error': f'no inference path available '
+                         f'(intelligence_preference={intelligence_preference})'}
+
+    def _is_local_vlm_available(self) -> bool:
+        """Quick reachability probe for the local VLM endpoint."""
+        try:
+            from core.http_pool import pooled_get
+            r = pooled_get(self.api_url.replace('/chat/completions',
+                                                  '/health'),
+                            timeout=1)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def _dispatch_local(self, method, screenshot_b64, task, history):
+        """Execute the requested method against the local VLM."""
+        if method == 'parse_and_reason':
+            return self.parse_and_reason(screenshot_b64, task,
+                                          history=history)
+        if method == 'point_and_act':
+            return self.point_and_act(screenshot_b64, task,
+                                       history=history)
+        # Default to point_and_act for unknown methods.
+        return self.point_and_act(screenshot_b64, task, history=history)
+
+    def _dispatch_paired_peer(self, request, peer_dispatch):
+        """Route to a paired peer over the PeerLink compute channel.
+        Same wire shape both sides agree on (see plan §8 for the
+        request/response schemas)."""
+        try:
+            payload = dict(request, type='vlm_grounding')
+            response = peer_dispatch('compute', payload, timeout=60)
+            if response and response.get('type') == 'vlm_grounding_result':
+                return response
+        except Exception as e:
+            logger.debug(f'paired peer dispatch failed: {e}')
+        return None
+
+    def _dispatch_hive(self, request, peer_dispatch):
+        """Same shape as paired_peer but routed via hivemind channel
+        for hive-grade VLM nodes (compute-host tier)."""
+        try:
+            payload = dict(request, type='vlm_grounding')
+            response = peer_dispatch('hivemind', payload, timeout=60)
+            if response and response.get('type') == 'vlm_grounding_result':
+                return response
+        except Exception as e:
+            logger.debug(f'hive dispatch failed: {e}')
+        return None
+
+    def _dispatch_cloud(self, request):
+        """Last resort — Hevolve.ai cloud VLM via WorldModelBridge."""
+        try:
+            from integrations.world_model_bridge import dispatch_to_cloud
+        except ImportError:
+            return None
+        try:
+            return dispatch_to_cloud('vlm_grounding', request)
+        except Exception as e:
+            logger.debug(f'cloud dispatch failed: {e}')
+            return None
+
     # ─── Phase 3.5: Complementary path router ──────────────────────────
     # The keystone of vlm_best_of_all_worlds_plan.md.  The three sibling
     # methods (point_and_act / parse_and_reason / run_local_agentic_loop)
