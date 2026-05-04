@@ -852,11 +852,20 @@ class GossipProtocol:
         if not node_id or not url or node_id == self.node_id:
             return False
 
-        # Sybil protection: max 5 nodes per IP/hostname
+        # Sybil protection: max 5 nodes per IP/hostname.
+        # Loopback addresses are exempt - single-user dev installs
+        # naturally accumulate many node_ids on localhost (one per
+        # reboot / data-dir reset / clean-install), and rejecting
+        # them as Sybil is a false positive that floods WARNING logs
+        # AND blocks legitimate self-peer registration during testing.
+        # Real Sybil attacks come from distinct external IPs.
         try:
             from urllib.parse import urlparse
-            host = urlparse(url).hostname or ''
-            if host:
+            host = (urlparse(url).hostname or '').lower()
+            _is_loopback = host in (
+                'localhost', '127.0.0.1', '::1', '0.0.0.0',
+            ) or host.startswith('127.')
+            if host and not _is_loopback:
                 from .models import PeerNode
                 same_host_count = db.query(PeerNode).filter(
                     PeerNode.url.contains(host),

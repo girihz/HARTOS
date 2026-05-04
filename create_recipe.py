@@ -4820,13 +4820,33 @@ def update_agent_creation_to_db(prompt_id):
     url = f'{database_url}/update_agent_prompt?prompt_id={prompt_id}'
     headers = {'Content-Type': 'application/json'}
     res = pooled_patch(url, headers=headers)
+    # Push the full recipe bundle to cloud after creation completes.
+    # This is the WRITE half of the cross-device sync introduced in
+    # core/recipe_sync.py - without it the agent is local-only and
+    # the user hits the silent-fallback bug when switching devices.
+    # Best-effort: never raises, never blocks the user.
+    try:
+        from core.recipe_sync import push_recipe
+        # user_id not in scope here; recipe_sync accepts '' as
+        # creator-unknown.  The {prompt_id}.json file itself carries
+        # creator_user_id so the cloud side can still attribute.
+        push_recipe(PROMPTS_DIR, prompt_id, user_id='')
+    except Exception as _push_err:
+        current_app.logger.debug(
+            f'recipe_sync push for prompt_id={prompt_id} failed: {_push_err}')
 
 
 def create_final_recipe_for_current_flow(flow, merged_dict, prompt_id):
     name = os.path.join(PROMPTS_DIR, f'{prompt_id}_{flow}_recipe.json')
-    with open(name, "w") as json_file:
+    # Atomic write (M3 in post-shipment review): write to temp + rename
+    # so concurrent prompts_backup.snapshot_prompts can never capture
+    # a half-written recipe file.  os.replace is atomic on the same
+    # filesystem on both Windows and POSIX.
+    tmp = name + '.tmp'
+    with open(tmp, "w") as json_file:
         json.dump(merged_dict, json_file)
-        current_app.logger.info(f"create_final_recipe_for_current_flow Dictionary saved to {name}")
+    os.replace(tmp, name)
+    current_app.logger.info(f"create_final_recipe_for_current_flow Dictionary saved to {name}")
 
 
 

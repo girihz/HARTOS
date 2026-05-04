@@ -178,6 +178,8 @@ class Post(Base):
     expected_outcome = Column(Text, nullable=True)          # Expected net positive
     is_thought_experiment = Column(Boolean, default=False)
     dynamic_layout = Column(JSON, nullable=True)            # Liquid UI layout JSON
+    # Phase 7c.5 — per-post privacy. Mirrors sql.models.SocialPost.
+    privacy = Column(String(16), nullable=True, index=True)
     created_at = Column(DateTime, default=func.now(), index=True)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
@@ -212,6 +214,10 @@ class Post(Base):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
+        # Phase 7c.5 — surface 'privacy' only when set; NULL stays absent
+        # so flag-off deploys retain pre-migration JSON shape.
+        if getattr(self, 'privacy', None):
+            d['privacy'] = self.privacy
         if include_author and self.author:
             d['author'] = self.author.to_dict()
         return d

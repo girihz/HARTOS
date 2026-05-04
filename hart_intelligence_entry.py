@@ -323,6 +323,9 @@ def hevolve_verify_boot():
 
 
 from core.http_pool import pooled_get, pooled_post
+from core.auth_local import (
+    require_local_or_token, require_local_or_token_csrf_safe,
+)
 from datetime import datetime, timezone
 from typing import List, Union, Optional, Mapping, Any, Dict
 
@@ -446,6 +449,19 @@ except Exception:
 
 # Ensure prompts directory exists (agent creation writes JSON here)
 os.makedirs(PROMPTS_DIR, exist_ok=True)
+
+# Boot-time prompts/ snapshot (best-effort, non-blocking).  Bounds
+# data loss to "since last reboot" if the user wipes data dir or
+# hits a corruption.  Fires at module-import time so it runs in
+# BOTH the CLI hevolve-server path AND the Nunba bundled path
+# (Nunba imports hart_intelligence_entry as a library; the CLI
+# main() is never called in that case).  See core/prompts_backup.py.
+try:
+    from core.prompts_backup import snapshot_at_boot as _hartos_snapshot_at_boot
+    _hartos_snapshot_at_boot()
+except Exception as _snap_err:
+    logging.getLogger('hevolve_core').debug(
+        f'prompts_backup at module-load skipped: {_snap_err}')
 
 # Google A2A integration (from gpt4.1)
 try:
@@ -6489,9 +6505,27 @@ def chat():
             })
 
     if prompt_id:
+        # Recipe pull-on-demand: when prompt_id has no local recipe
+        # but the cloud has one (cross-device user), pull it before
+        # falling into the create-mode branch.  Best-effort - if cloud
+        # is offline / blob missing / schema mismatch, returns False
+        # and we proceed to create-mode as before.  Closes the
+        # cross-device gap from the 2026-05-04 Speech Therapy
+        # silent-fallback incident.
+        _prompt_path = os.path.join(PROMPTS_DIR, f'{prompt_id}.json')
+        if not os.path.exists(_prompt_path):
+            try:
+                from core.recipe_sync import pull_recipe
+                if pull_recipe(PROMPTS_DIR, prompt_id, str(user_id)):
+                    app.logger.info(
+                        f'recipe_sync: pulled recipe bundle for '
+                        f'prompt_id={prompt_id} from cloud - REUSE path '
+                        f'now reachable')
+            except Exception as e:
+                app.logger.debug(f'recipe_sync: pull skipped: {e}')
+
         # System agents (like Nunba) route directly to langchain casual chat
         # instead of entering gather_info/CREATE mode
-        _prompt_path = os.path.join(PROMPTS_DIR, f'{prompt_id}.json')
         if os.path.exists(_prompt_path):
             try:
                 with open(_prompt_path, 'r') as _pf:
@@ -6572,12 +6606,19 @@ def chat():
         try:
             from integrations.agent_engine.speculative_dispatcher import get_speculative_dispatcher
             dispatcher = get_speculative_dispatcher()
+            # agent_bound=True when prompt_id refers to a real agent on
+            # disk — the dispatcher uses this signal to never let the
+            # 0.8B draft short-circuit the specialist on trivial Q&A.
+            # Computed BEFORE the request-id coalesce so a fallback
+            # request_id doesn't masquerade as an agent.
+            _agent_bound = bool(prompt_id)
             result = dispatcher.dispatch_draft_first(
                 prompt, str(user_id),
                 str(prompt_id) if prompt_id else str(request_id or 'anon'),
                 agent_persona=custom_prompt or None,
                 preferred_lang=preferred_lang,
                 user_pref=intelligence_preference,
+                agent_bound=_agent_bound,
             )
             # Only commit when the dispatcher actually produced a reply.
             # no_draft_model / circuit breaker / guardrail block all leave
@@ -7297,6 +7338,72 @@ def time_agent():
     return jsonify({'response':f'{res}'}), 200
 
 
+@app.route('/api/vlm/stop', methods=['POST'])
+@require_local_or_token_csrf_safe
+def vlm_stop():
+    """Halt an in-progress VLM computer-use loop for a (user, prompt).
+
+    Ports OmniParser/omnitool/gradio/agentic_rpc.py:/stop into HARTOS
+    proper.  When the user clicks Stop in Nunba's indicator window,
+    the request lands here, the loop's stop flag is set, and the
+    next iteration of run_local_agentic_loop exits cleanly with
+    exit_reason='stopped' before another action runs on the screen.
+
+    Auth: ``@require_local_or_token_csrf_safe``.  Nunba's bundled install
+    POSTs here from desktop/indicator_window.py over localhost without a
+    JWT — the decorator allows that.  Remote callers (production HARTOS
+    on regional/central tier) must send ``Authorization: Bearer
+    <HARTOS_API_TOKEN>``.  Without this gate, any unauthenticated
+    network client could bulk-halt another user's VLM sessions.
+
+    The ``_csrf_safe`` variant adds an Origin/Referer header check on
+    top of the localhost gate, closing the same-machine
+    cross-origin-browser-CSRF vector: a malicious page on a different
+    origin in the same browser cannot trigger a Stop on the user's
+    active VLM session.  Native desktop callers (the indicator window)
+    don't send Origin/Referer at all, so they pass through unaffected.
+
+    Body (JSON):
+        {"user_id": "<uid>", "prompt_id": "<pid>"}
+    Response:
+        {"status": "stopped"|"no_active_session", "user_id", "prompt_id"}
+
+    Empty body / missing prompt_id → bulk-stop every active session
+    for the given user_id.  Empty user_id is rejected (bulk-stop
+    across all users would be a foot-gun).
+    """
+    data = request.get_json(silent=True) or {}
+    user_id = data.get('user_id')
+    prompt_id = data.get('prompt_id')
+
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 400
+
+    from integrations.vlm.local_loop import (
+        request_stop, list_active_sessions,
+    )
+
+    if prompt_id:
+        found = request_stop(str(user_id), str(prompt_id))
+        return jsonify({
+            'status': 'stopped' if found else 'no_active_session',
+            'user_id': str(user_id),
+            'prompt_id': str(prompt_id),
+        }), 200
+
+    # Bulk-stop: every session for this user_id
+    stopped = []
+    for uid, pid in list_active_sessions():
+        if uid == str(user_id):
+            if request_stop(uid, pid):
+                stopped.append({'user_id': uid, 'prompt_id': pid})
+    return jsonify({
+        'status': 'stopped' if stopped else 'no_active_session',
+        'user_id': str(user_id),
+        'stopped_sessions': stopped,
+    }), 200
+
+
 @app.route('/visual_agent',methods=['POST'])
 def visual_agent():
     app.logger.info('GOT REQUEST IN Visual AGENT API')
@@ -7778,6 +7885,169 @@ def create_prompts():
         app.logger.debug(f"Cloud sync failed (non-fatal): {e}")
 
     return jsonify({'success': True, 'saved': saved})
+
+
+# ───────────────────────── Recipe sync endpoints ─────────────────────
+# Cross-device sync for recipe-file BUNDLES (the {id}.json + flow +
+# personality + per-action recipes), distinct from /createpromptlist
+# which only syncs metadata.  See core/recipe_sync.py for the
+# canonical wire envelope.  Closes the cross-device gap that caused
+# the 2026-05-04 Speech Therapy silent fallback.
+
+# In-process recipe blob store (cloud tier installs override via
+# DB-backed implementation; flat installs fine with on-disk).
+_RECIPE_BLOB_DIR = os.path.join(PROMPTS_DIR, '..', 'recipe_blobs')
+
+
+@app.route('/prompts/sync', methods=['POST'])
+def upload_recipe_bundle():
+    """POST a recipe bundle for one prompt_id.
+
+    Body shape: see core.recipe_sync.build_envelope.  The cloud
+    deployment of HARTOS persists this; flat installs may also
+    accept it for testing but the file is intended to round-trip
+    via the central instance.
+
+    Defenses (added in post-shipment hardening pass):
+      M5 - prompt_id MUST equal os.path.basename(prompt_id) so an
+           attacker can't write to ../../etc/passwd via the path
+           construction at the bottom of this handler
+      M6 - reject when incoming uploaded_at < existing uploaded_at
+           UNLESS body carries force=True.  Prevents an older client
+           from silently clobbering a newer cloud state.  Idempotent
+           on identical-checksum re-pushes (200 OK without rewrite)
+    """
+    try:
+        from core.recipe_sync import SCHEMA_VERSION, _safe_filename
+    except ImportError:
+        return jsonify({'error': 'recipe_sync unavailable'}), 503
+    envelope = request.get_json() or {}
+    if envelope.get('schema_version') != SCHEMA_VERSION:
+        return jsonify({
+            'error': 'schema_mismatch',
+            'expected': SCHEMA_VERSION,
+            'got': envelope.get('schema_version'),
+        }), 400
+    prompt_id = envelope.get('prompt_id')
+    files = envelope.get('files') or {}
+    if not prompt_id or not files:
+        return jsonify({'error': 'prompt_id + files required'}), 400
+
+    # M5: prompt_id flows into a filesystem path - validate it the
+    # same way the recipe_sync.pull_recipe path validates filenames.
+    pid_str = str(prompt_id)
+    if not _safe_filename(pid_str + '.json'):
+        return jsonify({
+            'error': 'unsafe prompt_id - must be basename-safe',
+            'prompt_id': pid_str,
+        }), 400
+
+    try:
+        os.makedirs(_RECIPE_BLOB_DIR, exist_ok=True)
+    except OSError as e:
+        return jsonify({'error': f'blob dir create failed: {e}'}), 500
+    blob_path = os.path.join(_RECIPE_BLOB_DIR, f'{pid_str}.json')
+
+    # M6: staleness guard - reject if incoming envelope is older than
+    # what's on disk, unless caller explicitly opts into overwrite.
+    # The 'force' query param is a deliberate, explicit override; the
+    # body field exists for symmetry.
+    force = bool(envelope.get('force')) or \
+        request.args.get('force', '').lower() in ('1', 'true', 'yes')
+    incoming_ts = int(envelope.get('uploaded_at') or 0)
+    incoming_checksum = envelope.get('checksum', '')
+    if os.path.isfile(blob_path):
+        try:
+            with open(blob_path, 'r', encoding='utf-8') as f:
+                existing = json.load(f)
+            existing_ts = int(existing.get('uploaded_at') or 0)
+            existing_checksum = existing.get('checksum', '')
+            # Idempotent re-push: same checksum → 200 OK without rewrite
+            if incoming_checksum and incoming_checksum == existing_checksum:
+                return jsonify({
+                    'stored': True, 'unchanged': True,
+                    'checksum': incoming_checksum,
+                    'files_count': len(files),
+                })
+            if not force and incoming_ts < existing_ts:
+                return jsonify({
+                    'error': 'stale_upload',
+                    'reason': (
+                        f'incoming uploaded_at={incoming_ts} < '
+                        f'existing={existing_ts}; pass force=true to '
+                        f'override (will silently overwrite newer cloud state)'),
+                    'existing_checksum': existing_checksum,
+                }), 409  # Conflict
+        except (IOError, OSError, json.JSONDecodeError, ValueError) as e:
+            app.logger.debug(
+                f'/prompts/sync staleness check failed for {pid_str}: {e}')
+            # Fall through and write - existing blob is corrupt anyway
+
+    # Atomic write so concurrent GET can't read a half-written blob.
+    tmp_path = blob_path + '.tmp'
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(envelope, f)
+        os.replace(tmp_path, blob_path)
+    except (IOError, OSError) as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return jsonify({'error': f'blob write failed: {e}'}), 500
+    return jsonify({
+        'stored': True,
+        'checksum': envelope.get('checksum', ''),
+        'files_count': len(files),
+    })
+
+
+@app.route('/prompts/sync/<prompt_id>', methods=['GET'])
+def download_recipe_bundle(prompt_id):
+    """GET the recipe bundle for *prompt_id*.
+
+    Returns 404 when no blob has been uploaded yet.  Cloud tier
+    installs serve from a DB-backed store; flat installs read from
+    the on-disk blob dir written by upload_recipe_bundle.
+
+    Defense (post-shipment hardening, mirrors upload_recipe_bundle's
+    M5 check): prompt_id flows from the URL path into a filesystem
+    join.  Flask's default ``string`` URL converter forbids ``/`` but
+    permits ``..`` after URL-decode, so a request like
+    ``GET /prompts/sync/..%2F..%2Fetc%2Fpasswd`` would otherwise
+    resolve outside _RECIPE_BLOB_DIR.  We validate the same way the
+    upload path does — via core.recipe_sync._safe_filename — and add
+    a realpath containment check as belt+suspenders.
+    """
+    try:
+        from core.recipe_sync import _safe_filename
+    except ImportError:
+        return jsonify({'error': 'recipe_sync unavailable'}), 503
+
+    pid_str = str(prompt_id)
+    if not _safe_filename(pid_str + '.json'):
+        return jsonify({
+            'error': 'unsafe prompt_id - must be basename-safe',
+        }), 400
+
+    blob_path = os.path.join(_RECIPE_BLOB_DIR, f'{pid_str}.json')
+    # Realpath containment: even if _safe_filename misses some
+    # platform-specific edge case (symlink dir, NTFS short name),
+    # this catch-all keeps reads inside the blob dir.
+    blob_real = os.path.realpath(blob_path)
+    base_real = os.path.realpath(_RECIPE_BLOB_DIR)
+    if not (blob_real == base_real
+            or blob_real.startswith(base_real + os.sep)):
+        return jsonify({'error': 'unsafe prompt_id'}), 400
+
+    if not os.path.isfile(blob_path):
+        return jsonify({'error': 'not_found'}), 404
+    try:
+        with open(blob_path, 'r', encoding='utf-8') as f:
+            envelope = json.load(f)
+    except (IOError, OSError, json.JSONDecodeError) as e:
+        return jsonify({'error': f'blob read failed: {e}'}), 500
+    return jsonify(envelope)
 
 
 def _get_active_backend_info() -> dict:
@@ -9239,6 +9509,10 @@ def main():
     """
     # Boot integrity verification (deferred from import time)
     hevolve_verify_boot()
+    # NOTE: prompts_backup.snapshot_at_boot runs at module-import
+    # time (line ~452) so it fires for BOTH the CLI path here AND
+    # Nunba's library-import path.  Removing the duplicate call here
+    # avoids two snapshots per CLI boot.
 
     # Guardrail hash verification — refuse to boot with tampered
     # hive_guardrails values unless HEVOLVE_GUARDRAIL_HASH_ENFORCE=0

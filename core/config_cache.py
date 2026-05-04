@@ -172,6 +172,41 @@ def get_central_db_url() -> str:
     return _DEFAULT_CENTRAL_DB_URL
 
 
+def get_stop_api_url() -> str:
+    """VLM computer-use stop endpoint URL.
+
+    Resolves to HARTOS's local /api/vlm/stop in bundled mode (the
+    handler ported from OmniParser/omnitool/gradio/agentic_rpc.py
+    lives at hart_intelligence_entry.py:vlm_stop).  When the user
+    clicks Stop in Nunba's indicator window, this URL is what gets
+    POST'd; the handler flips the stop flag in
+    integrations.vlm.local_loop._vlm_stop_flags and the next
+    iteration of run_local_agentic_loop exits cleanly with
+    exit_reason='stopped' before another action runs on the screen.
+
+    Standalone mode falls back to the env-var override (if set) or
+    empty string (callers skip the POST when falsy).
+
+    Override:
+        HEVOLVE_STOP_API_URL=http://my-cluster:5001/api/vlm/stop
+    Empty override is honored ('' = disable).
+
+    Used to live as a hardcoded `http://gcp_training2.hertzai.com:5001/stop`
+    literal in Nunba's main.py and app.py — pointed at a cloud
+    OmniParser instance that's not part of any current local
+    install.  The /stop endpoint ITSELF was never ported when the
+    VLM execution loop moved into HARTOS, so the call timed out on
+    every shutdown of every install for months.  Now the endpoint
+    is in HARTOS and this resolver wires Nunba to it correctly.
+    """
+    override = os.environ.get('HEVOLVE_STOP_API_URL')
+    if override is not None:
+        return override
+    if is_bundled():
+        return f"{_local_base()}/api/vlm/stop"
+    return ''
+
+
 def get_action_api() -> str:
     """Action API URL for create/query actions."""
     if is_bundled():

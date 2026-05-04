@@ -223,12 +223,23 @@ class VRAMManager:
         # for the failure mode (2026-04-15 wmic 27-min hang, same class).
         from core.subprocess_safe import run_bounded
 
+        # nvidia-smi can be slow when the GPU is under heavy compute load
+        # (driver call queues serialize behind kernel launches, NVML init
+        # contends with active CUDA contexts).  5s was too tight on
+        # 8GB systems running concurrent VLM benchmarks - hit the
+        # subprocess_safe kill-pipes path every cycle and flooded the
+        # log.  15s gives slow systems breathing room without leaving
+        # zombie nvidia-smi processes around.  Override via env for
+        # truly degraded systems.
+        _nvsmi_timeout = float(os.environ.get(
+            'HEVOLVE_NVIDIA_SMI_TIMEOUT', '15'))
+
         # 1) nvidia-smi — zero-dependency, works on any NVIDIA GPU system
         try:
             result = run_bounded(
                 ["nvidia-smi", "--query-gpu=name,memory.total,memory.free",
                  "--format=csv,noheader,nounits"],
-                timeout=5,
+                timeout=_nvsmi_timeout,
             )
             if result.returncode == 0 and result.stdout.strip():
                 line = result.stdout.strip().split("\n")[0]
@@ -253,11 +264,12 @@ class VRAMManager:
         except Exception as e:
             logger.debug(f"nvidia-smi failed: {e}")
 
-        # 1b) rocm-smi — AMD GPUs via ROCm
+        # 1b) rocm-smi — AMD GPUs via ROCm.  Same loaded-GPU rationale
+        # as nvidia-smi above; honour the same env override.
         try:
             result = run_bounded(
                 ["rocm-smi", "--showmeminfo", "vram", "--csv"],
-                timeout=5,
+                timeout=_nvsmi_timeout,
             )
             if result.returncode == 0 and result.stdout.strip():
                 # Parse CSV output: header line then data lines

@@ -276,7 +276,8 @@ class SpeculativeDispatcher:
                              node_id: str = None,
                              agent_persona: Optional[str] = None,
                              preferred_lang: str = 'en',
-                             user_pref: str = 'auto') -> dict:
+                             user_pref: str = 'auto',
+                             agent_bound: bool = False) -> dict:
         """Draft-first dispatch: tiny model answers immediately, signals whether
         to delegate.
 
@@ -404,6 +405,30 @@ class SpeculativeDispatcher:
             logger.info(
                 f"draft-first: low-confidence 'none' ({confidence:.2f} < "
                 f"{_DRAFT_CONFIDENCE_FLOOR}) → escalating to local verifier"
+            )
+            delegate = 'local'
+
+        # AGENT-BINDING GUARD: when the caller bound this turn to a
+        # specific agent (prompt_id resolves to a real agent on disk,
+        # not the request-id fallback), the user has chosen a
+        # specialist and expects THAT specialist's voice — not the
+        # 0.8B draft answering in its generic voice.  Even a trivial
+        # greeting like "hi" should pass through the specialist so
+        # its persona / system prompt / tool registry shapes the
+        # reply.  Promote delegate=none → local so the expert path
+        # always takes the turn for agent-bound requests.
+        #
+        # When agent_bound=False (no specific agent in scope, e.g.
+        # default chat or guest free-floating), the draft's "none"
+        # decision stays — the 0.8B can handle trivial questions
+        # without paying the 4B cost.
+        if delegate == 'none' and agent_bound:
+            logger.info(
+                "draft-first: prompt_id=%r is bound to a specific "
+                "agent — escalating delegate=none → 'local' so the "
+                "agent's expert path takes the turn instead of the "
+                "0.8B draft's generic voice.",
+                prompt_id,
             )
             delegate = 'local'
 
@@ -602,7 +627,26 @@ class SpeculativeDispatcher:
 
         Owns ONLY prompt construction — no I/O, no side effects.
         """
-        persona_block = ''
+        # Default brand identity when no explicit persona is supplied.
+        # Without this fall-back, the user's "who are you?" turn drops
+        # through to the underlying model's training-default name
+        # ("I'm Qwen3.5...") because cf3e337 deliberately removed every
+        # "You are <internal-role>" sentence to fix an identity-leak
+        # where the draft echoed "first-responder" architecture jargon.
+        # That fix was correct in spirit but went one step too far —
+        # the BRAND identity (the user-facing product name "Nunba") is
+        # not architecture jargon and is exactly what the user expects
+        # to hear when no per-agent persona is selected.  The
+        # ``agent_persona`` branch below overrides this for any turn
+        # where a specific persona is in scope, so explicit personas
+        # are unaffected.
+        #
+        # Single source of truth — core.constants.NUNBA_BRAND_IDENTITY.
+        # Same constant is imported by Nunba's _fallback_chat in
+        # routes/hartos_backend_adapter.py so the two paths can never
+        # drift on brand wording.
+        from core.constants import NUNBA_BRAND_IDENTITY
+        persona_block = f"{NUNBA_BRAND_IDENTITY}\n\n"
         if agent_persona:
             # Cap the persona at ~800 chars so a long system prompt doesn't
             # blow the 0.8B model's context budget on a single-turn call.
@@ -654,16 +698,20 @@ class SpeculativeDispatcher:
             # multi-turn memory, or the ReAct loop — so it must never
             # refuse on behalf of the system.
             #
-            # Carefully avoids any "You are <X>" identity sentence.  The
-            # 3ea8648 prompt opened with "You are a fast local first-
-            # responder" and the model would echo it verbatim on "who
-            # are you?" → "I'm your fast local first-responder, ready
-            # to assist you right away."  All instructions below are
-            # phrased as the *job* and *rules*, never as identity, so the
-            # model has no internal role-name to reflect back.  When the
-            # user asks who they're talking to and no persona is loaded
-            # above, the model falls through to its own training-default
-            # generic-assistant identity.
+            # The 3ea8648 prompt opened with "You are a fast local
+            # first-responder" and the model would echo it verbatim on
+            # "who are you?" → "I'm your fast local first-responder,
+            # ready to assist you right away."  cf3e337 fixed that by
+            # removing every internal-role identity sentence, but went
+            # one step too far — with NO identity at all the 0.8B fell
+            # through to its training-default name ("I'm Qwen…").  The
+            # default brand identity ("You are Nunba…") now lives in
+            # persona_block above, so this section deliberately does
+            # NOT add another "You are <X>" line — only the BRAND
+            # identity above is allowed; INTERNAL-ROLE jargon
+            # ("first-responder", "draft", "classifier") stays out.
+            # All instructions below are phrased as the *job* and
+            # *rules*, never as architecture identity.
             + "Your job is to produce a short reply to the user AND "
             "classify the user's intent on several independent axes. The "
             "classification flags route the message downstream — be "

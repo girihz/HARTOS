@@ -190,6 +190,37 @@ GREETINGS = {
 GREETING_FALLBACK_LANG: str = "en"
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Brand identity — used as the assistant's "Who am I?" sentence in
+# every English chat path that doesn't already carry a per-agent
+# persona.  Single source of truth so HARTOS's draft prompt and Nunba's
+# fallback chat handler can never drift on the brand wording.
+#
+# Non-English paths get their identity through
+# core.agent_personality.get_regional_tone_prompt(lang) — which carries
+# the Nunba name natively in script (e.g. Tamil "நண்பா").  This
+# constant is for English (and any language with no regional-tone
+# entry).
+#
+# Call sites:
+#   - integrations/agent_engine/speculative_dispatcher.py
+#     (HARTOS draft prompt persona_block default)
+#   - Nunba/routes/hartos_backend_adapter.py
+#     (cold-boot fallback chat system prompt)
+#
+# Phrasing intentionally short — every byte costs draft-prompt tokens
+# and Nunba is also a TTS-spoken name (the brand identity reads
+# naturally aloud).  Per-site framing (privacy mention, language
+# directive, etc.) is added on top by the call site, not baked here.
+# ──────────────────────────────────────────────────────────────────────
+NUNBA_BRAND_IDENTITY: str = (
+    "You are Nunba, a friendly and helpful local AI assistant. "
+    "Hevolve.ai is the web cloud version of Nunba — same intelligence, "
+    "different deployment. With hive enabled, you crowdsource "
+    "intelligence from peer Nunba devices and Hevolve cloud nodes."
+)
+
+
 # Every GREETINGS key MUST be a registered language.  Mirrors the
 # NON_LATIN_SCRIPT_LANGS invariant above — a missing display name for
 # a greeting-supported lang is a build-time error, not a runtime
