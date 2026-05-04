@@ -450,6 +450,19 @@ except Exception:
 # Ensure prompts directory exists (agent creation writes JSON here)
 os.makedirs(PROMPTS_DIR, exist_ok=True)
 
+# Boot-time prompts/ snapshot (best-effort, non-blocking).  Bounds
+# data loss to "since last reboot" if the user wipes data dir or
+# hits a corruption.  Fires at module-import time so it runs in
+# BOTH the CLI hevolve-server path AND the Nunba bundled path
+# (Nunba imports hart_intelligence_entry as a library; the CLI
+# main() is never called in that case).  See core/prompts_backup.py.
+try:
+    from core.prompts_backup import snapshot_at_boot as _hartos_snapshot_at_boot
+    _hartos_snapshot_at_boot()
+except Exception as _snap_err:
+    logging.getLogger('hevolve_core').debug(
+        f'prompts_backup at module-load skipped: {_snap_err}')
+
 # Google A2A integration (from gpt4.1)
 try:
     from integrations.google_a2a import initialize_a2a_server, get_a2a_server, register_all_agents
@@ -9496,18 +9509,10 @@ def main():
     """
     # Boot integrity verification (deferred from import time)
     hevolve_verify_boot()
-
-    # Boot-time prompts/ snapshot (best-effort, non-blocking).
-    # Bounds data loss to "since last reboot" if the user wipes data
-    # dir or hits a corruption.  Pairs with cloud sync (recipe_sync)
-    # which handles the cross-device case but needs network.  This
-    # is the zero-network fallback.  See core/prompts_backup.py.
-    try:
-        from core.prompts_backup import snapshot_at_boot
-        snapshot_at_boot()
-    except Exception as _snap_err:
-        logging.getLogger('hevolve_core').debug(
-            f'prompts_backup at boot skipped: {_snap_err}')
+    # NOTE: prompts_backup.snapshot_at_boot runs at module-import
+    # time (line ~452) so it fires for BOTH the CLI path here AND
+    # Nunba's library-import path.  Removing the duplicate call here
+    # avoids two snapshots per CLI boot.
 
     # Guardrail hash verification — refuse to boot with tampered
     # hive_guardrails values unless HEVOLVE_GUARDRAIL_HASH_ENFORCE=0
