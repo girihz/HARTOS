@@ -36,7 +36,7 @@ logger = logging.getLogger('hevolve_security')
 
 # These values are the DNA of HART OS. A fork that changes them
 # fails attestation. A fork that keeps them admits it's HART OS
-# (and must comply with the BSL license).
+# (and must comply with the Apache-2.0 license).
 
 ORIGIN_IDENTITY = {
     'name': 'HART OS',

@@ -144,7 +144,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/hertz-ai/HARTOS",
-    license="BSL-1.1",
+    license="Apache-2.0",
 
     # Package discovery.  agent_ledger lives in-tree at
     # agent-ledger-opensource/agent_ledger/ and is callers' top-level
@@ -228,7 +228,7 @@ setup(
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",
-        "License :: Other/Proprietary License",
+        "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",

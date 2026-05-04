@@ -7,7 +7,7 @@ name = "hart-backend"
 dynamic = ["version"]
 description = "HART OS - Hevolve Hive Agentic Runtime: Crowdsourced compute infrastructure for autonomous Hive AI Training. Distributed thought process across crowdsourced agents, distributed coding agents incentivizing compute providers, self-sustaining economy at national scale so no single entity, government, or corporation monopolizes AI. Intelligence belongs to the people. Only the master key (held by human stewards) can halt the being. Every engineering decision is transparent by design."
 readme = "README.md"
-license = {text = "BSL-1.1"}
+license = {text = "Apache-2.0"}
 requires-python = ">=3.9"
 authors = [
     {name = "HART Team", email = "contact@hevolve.ai"}
@@ -27,7 +27,7 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: Other/Proprietary License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
