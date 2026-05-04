@@ -62,6 +62,27 @@ def init_social(app):
     except Exception as e:
         logger.warning(f"HevolveSocial DB init failed (non-fatal): {e}")
 
+    # Phase 7a / Phase 8 — install global tenant filter on Session.
+    # Migration v40 added `tenant_id` columns to ~34 social tables;
+    # this teaches the ORM about them and filters every SELECT by
+    # the current request's tenant. No-op when g.tenant_id is None
+    # (flat/regional pass-through), so single-tenant deploys are
+    # unaffected. Plan reference: sunny-gliding-eich.md, Part E.1.
+    try:
+        from .tenant_filter import (
+            install_tenant_filter, register_tenant_aware,
+        )
+        install_tenant_filter()
+        from .models import (
+            User, Post, Comment, Community, Vote, Follow,
+            CommunityMembership, Notification, Report,
+        )
+        for _cls in (User, Post, Comment, Community, Vote, Follow,
+                     CommunityMembership, Notification, Report):
+            register_tenant_aware(_cls)
+    except Exception as e:
+        logger.warning(f"HevolveSocial tenant filter install skipped: {e}")
+
     # Seed default achievements
     try:
         from .gamification_service import GamificationService
@@ -91,6 +112,28 @@ def init_social(app):
             db.close()
     except Exception as e:
         logger.debug(f"HevolveSocial ad placement seeding skipped: {e}")
+
+    # Register conversations blueprint (Phase 7c.3 — DM/group chat).
+    # Distinct from api_channels (legacy 31-channel external adapter)
+    # — these blueprints have non-overlapping URL prefixes.
+    try:
+        from .api_conversations import conversations_bp
+        app.register_blueprint(conversations_bp)
+        logger.info("HevolveSocial conversations registered at "
+                    "/api/social/conversations/")
+    except Exception as e:
+        logger.warning(f"HevolveSocial conversations blueprint skipped: {e}")
+
+    # Register calls blueprint (Phase 7d — voice/video/screen).
+    # Flag-gated by `calls_v1` server-side; off → 503 on every endpoint.
+    # The blueprint's URL prefix is /api/social so the routes live at
+    # /api/social/calls/* (no nesting under /conversations).
+    try:
+        from .api_calls import calls_bp
+        app.register_blueprint(calls_bp)
+        logger.info("HevolveSocial calls registered at /api/social/calls/")
+    except Exception as e:
+        logger.warning(f"HevolveSocial calls blueprint skipped: {e}")
 
     # Register gamification blueprint
     try:

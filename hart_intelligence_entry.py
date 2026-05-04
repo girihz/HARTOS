@@ -323,7 +323,9 @@ def hevolve_verify_boot():
 
 
 from core.http_pool import pooled_get, pooled_post
-from core.auth_local import require_local_or_token
+from core.auth_local import (
+    require_local_or_token, require_local_or_token_csrf_safe,
+)
 from datetime import datetime, timezone
 from typing import List, Union, Optional, Mapping, Any, Dict
 
@@ -7324,7 +7326,7 @@ def time_agent():
 
 
 @app.route('/api/vlm/stop', methods=['POST'])
-@require_local_or_token
+@require_local_or_token_csrf_safe
 def vlm_stop():
     """Halt an in-progress VLM computer-use loop for a (user, prompt).
 
@@ -7334,12 +7336,19 @@ def vlm_stop():
     next iteration of run_local_agentic_loop exits cleanly with
     exit_reason='stopped' before another action runs on the screen.
 
-    Auth: ``@require_local_or_token``.  Nunba's bundled install POSTs
-    here from desktop/indicator_window.py over localhost without a
+    Auth: ``@require_local_or_token_csrf_safe``.  Nunba's bundled install
+    POSTs here from desktop/indicator_window.py over localhost without a
     JWT — the decorator allows that.  Remote callers (production HARTOS
     on regional/central tier) must send ``Authorization: Bearer
     <HARTOS_API_TOKEN>``.  Without this gate, any unauthenticated
     network client could bulk-halt another user's VLM sessions.
+
+    The ``_csrf_safe`` variant adds an Origin/Referer header check on
+    top of the localhost gate, closing the same-machine
+    cross-origin-browser-CSRF vector: a malicious page on a different
+    origin in the same browser cannot trigger a Stop on the user's
+    active VLM session.  Native desktop callers (the indicator window)
+    don't send Origin/Referer at all, so they pass through unaffected.
 
     Body (JSON):
         {"user_id": "<uid>", "prompt_id": "<pid>"}
