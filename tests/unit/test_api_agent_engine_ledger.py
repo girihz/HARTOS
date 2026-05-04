@@ -112,6 +112,13 @@ def app(storage_dir):
     auth_mod.require_auth = lambda f: f
     auth_mod.require_admin = lambda f: f
 
+    # 2026-05-04: ledger routes now use @require_local_or_token (so a
+    # localhost guest with no JWT can still see the admin Task Ledger
+    # in Nunba bundled installs).  Patch the source to identity here
+    # too — same pattern as require_auth above.
+    import core.auth_local as auth_local_mod
+    auth_local_mod.require_local_or_token = lambda f: f
+
     import importlib
     import integrations.agent_engine.api as api_mod
     importlib.reload(api_mod)

@@ -8,6 +8,7 @@ import logging
 from flask import Blueprint, request, jsonify, g
 
 from integrations.social.auth import require_auth, require_admin
+from core.auth_local import require_local_or_token
 
 logger = logging.getLogger('hevolve_social')
 
@@ -301,7 +302,7 @@ def _iter_ledgers(agent_filter=None):
 
 
 @agent_engine_bp.route('/api/agent-engine/ledger/tasks', methods=['GET'])
-@require_auth
+@require_local_or_token
 def list_ledger_tasks():
     """List tasks aggregated across all per-session SmartLedgers.
 
@@ -358,7 +359,7 @@ def list_ledger_tasks():
 
 
 @agent_engine_bp.route('/api/agent-engine/ledger/tasks/<task_id>', methods=['GET'])
-@require_auth
+@require_local_or_token
 def get_ledger_task(task_id):
     """Get a single task by ID, searching across all per-session ledgers."""
     try:
@@ -384,7 +385,7 @@ def get_ledger_task(task_id):
 
 
 @agent_engine_bp.route('/api/agent-engine/ledger/stats', methods=['GET'])
-@require_auth
+@require_local_or_token
 def get_ledger_stats():
     """Aggregate ledger stats across all per-session SmartLedgers.
 
