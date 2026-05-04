@@ -76,6 +76,47 @@ class TestSnapshotPrompts(unittest.TestCase):
         self.assertEqual(len(list_snapshots(self.prompts_dir)), 1)
 
 
+class TestSnapshotTornJsonDefense(unittest.TestCase):
+    """M3 in post-shipment review: snapshots must NOT capture
+    half-written / corrupt JSON files, even if a concurrent writer
+    leaves one mid-flight."""
+
+    def setUp(self):
+        self.tmp_root = tempfile.mkdtemp()
+        self.prompts_dir = os.path.join(self.tmp_root, 'prompts')
+        os.makedirs(self.prompts_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_root, ignore_errors=True)
+
+    def test_torn_json_skipped_in_snapshot(self):
+        # Two valid + one torn JSON file
+        with open(os.path.join(self.prompts_dir, '1.json'), 'w') as f:
+            f.write('{"valid":true}')
+        with open(os.path.join(self.prompts_dir, '2.json'), 'w') as f:
+            f.write('{"also":"valid"}')
+        with open(os.path.join(self.prompts_dir, '3_torn.json'), 'w') as f:
+            f.write('{"half_written":')  # invalid JSON
+        snap_name = snapshot_prompts(self.prompts_dir)
+        self.assertIsNotNone(snap_name)
+        snap_dir = os.path.join(_snapshots_root(self.prompts_dir), snap_name)
+        files = sorted(os.listdir(snap_dir))
+        self.assertIn('1.json', files)
+        self.assertIn('2.json', files)
+        self.assertNotIn('3_torn.json', files,
+            'torn-JSON file must be skipped to keep snapshot restore-safe')
+
+    def test_only_torn_files_no_snapshot(self):
+        """When the only files are torn, the snapshot should be empty
+        and rmdir cleanup should fire (no misleading empty snapshot)."""
+        with open(os.path.join(self.prompts_dir, 'torn.json'), 'w') as f:
+            f.write('{')  # invalid
+        result = snapshot_prompts(self.prompts_dir)
+        self.assertIsNone(result,
+            'snapshot with all-torn files should return None')
+
+
 class TestRetention(unittest.TestCase):
 
     def setUp(self):

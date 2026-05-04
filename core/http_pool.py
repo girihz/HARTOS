@@ -48,6 +48,16 @@ logging.getLogger('urllib3.connectionpool').setLevel(logging.ERROR)
 # the autobahn logger to ERROR keeps genuine connect-attempt errors
 # (e.g. ssl handshake failure on a real Crossbar URL) visible.
 logging.getLogger('autobahn.asyncio.component').setLevel(logging.ERROR)
+# autobahn.wamp.component (parent module) ALSO emits the connect-error
+# traceback at handle_connect_error - separate logger from the
+# .asyncio.component child.  Plus txaio.aio formats the traceback at
+# its own level.  Without silencing both, the traceback still surfaces
+# even when .asyncio.component is at ERROR (the traceback reaches the
+# root logger via stderr emit).  Bumping all three keeps the log clean
+# on flat installs without Crossbar.
+logging.getLogger('autobahn.wamp.component').setLevel(logging.ERROR)
+logging.getLogger('autobahn').setLevel(logging.ERROR)
+logging.getLogger('txaio').setLevel(logging.ERROR)
 # Same logic for asyncio's "socket.send() raised exception" pairs that
 # fire alongside the failed Crossbar connect attempts - the underlying
 # transport-failure event is already covered by the autobahn warning

@@ -11,7 +11,105 @@ from unittest.mock import patch, MagicMock
 from core.recipe_sync import (
     _files_for_prompt, _checksum, build_envelope,
     push_recipe, pull_recipe, SCHEMA_VERSION,
+    _safe_filename, _load_push_cache, _store_push_cache,
 )
+
+
+class TestSafeFilename(unittest.TestCase):
+    """M2 defense: harden against path-traversal / drive-letter /
+    NUL-byte / Windows-reserved-name attacks in untrusted cloud
+    payloads.  Each rejection class gets a test."""
+
+    def test_normal_filenames_accepted(self):
+        for ok in ['12345.json', '12345_personality.json',
+                   '12345_0_recipe.json', '12345_0_1.json']:
+            self.assertTrue(_safe_filename(ok), msg=ok)
+
+    def test_empty_and_dotfiles_rejected(self):
+        for bad in ['', '.', '..', '.hidden', '.gitignore']:
+            self.assertFalse(_safe_filename(bad), msg=bad)
+
+    def test_path_separators_rejected(self):
+        for bad in ['../etc/passwd', '..\\windows\\system',
+                    'sub/file.json', 'sub\\file.json',
+                    '../../../etc/passwd']:
+            self.assertFalse(_safe_filename(bad), msg=bad)
+
+    def test_nul_byte_rejected(self):
+        self.assertFalse(_safe_filename('file\x00.json'))
+        self.assertFalse(_safe_filename('\x00bad.json'))
+
+    def test_windows_drive_letter_rejected(self):
+        for bad in ['C:foo.json', 'D:bar.json', 'c:relative.json',
+                    'Z:\\absolute.json']:
+            self.assertFalse(_safe_filename(bad), msg=bad)
+
+    def test_windows_reserved_names_rejected(self):
+        for bad in ['CON.json', 'PRN.json', 'AUX.json', 'NUL.json',
+                    'COM1.json', 'COM9.json', 'LPT1.json', 'LPT9.json',
+                    'con.json', 'nul.json',  # case-insensitive
+                    'CON', 'NUL']:           # no extension
+            self.assertFalse(_safe_filename(bad), msg=bad)
+
+    def test_basename_mismatch_rejected(self):
+        # Anything where os.path.basename(x) != x
+        for bad in ['./file.json', 'a/b']:
+            self.assertFalse(_safe_filename(bad), msg=bad)
+
+
+class TestPushCacheIdempotency(unittest.TestCase):
+    """M7: push_recipe skips redundant network roundtrips when the
+    bundle's checksum matches the last successful push."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        with open(os.path.join(self.tmp, '12345.json'), 'w') as f:
+            f.write('{"name":"X"}')
+        # Isolate the cache file location for this test
+        import core.recipe_sync as _rs
+        self._orig_cache_file = _rs._PUSH_CACHE_FILE
+        self._test_cache = os.path.join(self.tmp, 'push_cache.json')
+        _rs._PUSH_CACHE_FILE = self._test_cache
+
+    def tearDown(self):
+        import core.recipe_sync as _rs
+        _rs._PUSH_CACHE_FILE = self._orig_cache_file
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_repeat_push_skips_when_unchanged(self):
+        """First push hits network + caches checksum.  Second push
+        with same content skips network."""
+        mock_resp = MagicMock(status_code=200)
+        with patch('core.http_pool.pooled_post', return_value=mock_resp) as mock_post:
+            # First push: network call
+            self.assertTrue(push_recipe(self.tmp, '12345',
+                                         central_url='https://x'))
+            self.assertEqual(mock_post.call_count, 1)
+            # Second push with same content: skipped
+            self.assertTrue(push_recipe(self.tmp, '12345',
+                                         central_url='https://x'))
+            self.assertEqual(mock_post.call_count, 1,
+                'second push should have been cached')
+
+    def test_force_overrides_cache(self):
+        mock_resp = MagicMock(status_code=200)
+        with patch('core.http_pool.pooled_post', return_value=mock_resp) as mock_post:
+            push_recipe(self.tmp, '12345', central_url='https://x')
+            push_recipe(self.tmp, '12345', central_url='https://x', force=True)
+            self.assertEqual(mock_post.call_count, 2,
+                'force=True must bypass the checksum cache')
+
+    def test_changed_content_pushes(self):
+        mock_resp = MagicMock(status_code=200)
+        with patch('core.http_pool.pooled_post', return_value=mock_resp) as mock_post:
+            push_recipe(self.tmp, '12345', central_url='https://x')
+            # Modify file
+            with open(os.path.join(self.tmp, '12345.json'), 'w') as f:
+                f.write('{"name":"Y"}')
+            push_recipe(self.tmp, '12345', central_url='https://x')
+            self.assertEqual(mock_post.call_count, 2,
+                'changed content must trigger a fresh push')
 
 
 class TestFilesForPrompt(unittest.TestCase):
@@ -116,8 +214,15 @@ class TestPushRecipe(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         with open(os.path.join(self.tmp, '12345.json'), 'w') as f:
             f.write('{"name":"X"}')
+        # Isolate the M7 push cache so other tests' successful pushes
+        # don't make us short-circuit a network call we want to verify.
+        import core.recipe_sync as _rs
+        self._orig_cache_file = _rs._PUSH_CACHE_FILE
+        _rs._PUSH_CACHE_FILE = os.path.join(self.tmp, '_isolated_cache.json')
 
     def tearDown(self):
+        import core.recipe_sync as _rs
+        _rs._PUSH_CACHE_FILE = self._orig_cache_file
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 

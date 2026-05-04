@@ -4838,9 +4838,15 @@ def update_agent_creation_to_db(prompt_id):
 
 def create_final_recipe_for_current_flow(flow, merged_dict, prompt_id):
     name = os.path.join(PROMPTS_DIR, f'{prompt_id}_{flow}_recipe.json')
-    with open(name, "w") as json_file:
+    # Atomic write (M3 in post-shipment review): write to temp + rename
+    # so concurrent prompts_backup.snapshot_prompts can never capture
+    # a half-written recipe file.  os.replace is atomic on the same
+    # filesystem on both Windows and POSIX.
+    tmp = name + '.tmp'
+    with open(tmp, "w") as json_file:
         json.dump(merged_dict, json_file)
-        current_app.logger.info(f"create_final_recipe_for_current_flow Dictionary saved to {name}")
+    os.replace(tmp, name)
+    current_app.logger.info(f"create_final_recipe_for_current_flow Dictionary saved to {name}")
 
 
 

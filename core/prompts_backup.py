@@ -114,15 +114,37 @@ def snapshot_prompts(prompts_dir: str,
         logger.debug(f'snapshot_prompts: cannot create {snap_path}: {e}')
         return None
 
+    # Belt + suspenders for M3 (post-shipment review): even though
+    # the canonical recipe writers were converted to atomic temp+rename,
+    # third-party writers / older HARTOS versions / hand-edits could
+    # still leave torn JSON.  Validate each file's JSON before copying;
+    # skip + log on parse failure so the snapshot only contains valid
+    # restorable state.
+    import json as _json
     copied = 0
+    skipped_corrupt = 0
     for fname in entries:
         src = os.path.join(prompts_dir, fname)
         dst = os.path.join(snap_path, fname)
         try:
+            with open(src, 'r', encoding='utf-8') as _src_f:
+                _content = _src_f.read()
+            try:
+                _json.loads(_content)
+            except _json.JSONDecodeError as je:
+                logger.warning(
+                    f'snapshot_prompts: skipping torn/corrupt {fname} '
+                    f'({je}) - snapshot stays restore-safe')
+                skipped_corrupt += 1
+                continue
             shutil.copy2(src, dst)
             copied += 1
         except (IOError, OSError) as e:
             logger.debug(f'snapshot_prompts: copy {fname} failed: {e}')
+    if skipped_corrupt:
+        logger.warning(
+            f'snapshot_prompts: {skipped_corrupt} torn/corrupt files '
+            f'skipped in snapshot {snap_name}')
     if copied == 0:
         # Empty snapshot is worse than no snapshot.
         try:
